@@ -616,8 +616,15 @@ context for the agent. Behavior:
 - Project: `cwd` from the payload, else `CLAUDE_PROJECT_DIR`, else Cursor `workspace_roots[0]`,
   else the process cwd; then project discovery (2.1). With no `llm-docs.json`, the hook still
   runs the dependency analysis (so it is useful before a project adopts packs).
-- Model: payload `model` (Claude Code, optional), Cursor `model`/`model_id`, Codex `model`;
-  cutoff resolution per 6.3.
+- Model: payload `model` (Claude Code sends it only in some sessions; headless `-p` runs omit
+  it), Cursor `model_id`/`model`, Codex `model`; then `ANTHROPIC_MODEL`; then `model` from
+  `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`,
+  `~/.claude/settings.json`. Claude Code aliases (`opus`, `sonnet`, `haiku`, `fable`, with
+  optional `[1m]`-style suffixes) resolve through the cutoff table to the family's current
+  model. Cutoff resolution per 6.3. When no cutoff resolves, the hook lists direct dependencies
+  without a pack released in the last 180 days under a neutral heading ("Recently released
+  dependencies (your training data may predate them)"): a fact from release dates, not a guess
+  about the model.
 - Content (at most 2,000 characters; nothing at all when there is nothing to say):
   1. Packs whose lockfile moved (stale) with the fix command.
   2. Direct dependencies newer than the model's training cutoff (or within the near-cutoff
@@ -756,8 +763,10 @@ the model already knows), a task prompt, a pack recipe, and mechanical checks (`
 `node --test`) the runner executes after the agent finishes. Arms: `baseline` (no pack, no
 plugin), `pack` (pack and managed block, no plugin), `plugin` (pack, block, and plugin hook and
 skills). The runner prepares workspaces with dependencies installed before the agent starts,
-runs `claude -p` with a pinned model, turn and budget caps, and isolated settings, grades with
-the checks, and writes `evals/results/<timestamp>/results.json` and `summary.md` (pass rate per
+runs `claude -p` with a pinned model, turn and budget caps, and `--setting-sources project` so user
+settings and plugins stay out of every arm (measured 2026-11-05 on Claude Code 2.1.318: an
+isolated `CLAUDE_CONFIG_DIR` loses the OAuth login, and `--safe-mode` also disables hooks from
+`--plugin-dir`, so neither can be used for the plugin arm), grades with the checks, and writes `evals/results/<timestamp>/results.json` and `summary.md` (pass rate per
 arm and case, runs, cost). The README publishes the numbers with the date, model, and run count.
 
 ## 14. Acceptance
