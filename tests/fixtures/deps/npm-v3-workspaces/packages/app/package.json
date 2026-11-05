@@ -1,0 +1,8 @@
+{
+  "name": "@acme/app",
+  "version": "0.1.0",
+  "dependencies": {
+    "zod": "^3.22.0",
+    "react": "^18.2.0"
+  }
+}

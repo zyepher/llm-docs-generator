@@ -1,0 +1,37 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "bun-app",
+      "dependencies": {
+        "hono": "^4.6.0",
+        "str": "npm:string-width@^4.2.0",
+        "tiny": "github:acme/tiny#v1.0.0",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.1.0",
+      },
+    },
+    "packages/api": {
+      "name": "@acme/api",
+      "dependencies": {
+        "zod": "^3.23.0",
+      },
+    },
+  },
+  "packages": {
+    "@acme/api": ["@acme/api@workspace:packages/api"],
+
+    "@types/bun": ["@types/bun@1.1.13", "", { "dependencies": { "bun-types": "1.1.34" } }, "sha512-KmQxSBgVWCl6RSuerlLGZlIWfdxkKqat0nxN61+qu4y1KDn0Ll3j7v1Pl8GnaL3a/U6GGWVTJh75ap62kR1E8Q=="],
+
+    "@acme/api/zod": ["zod@3.23.8", "", {}, "sha512-XBx9AXhXktjUqnepgTiE5flcKIYWi/rme0Eaj+5Y0lftuGBq+jyRu/md4WnuxqgP1ubdpNCsYEYPxrzVHD8d6g=="],
+
+    "bun-types": ["bun-types@1.1.34", "", { "dependencies": { "@types/node": "~20.12.8" } }, "sha512-br5QygTEL/TwB4uQOb96Ky22j4Gq2WxWH/8Oqv20fk5HagwKXo/akB+LiYgSfzexCt6kkcUaVm+bKiPl71xPvw=="],
+
+    "hono": ["hono@4.6.9", "", {}, "sha512-p/pN5yZLuZaHzyAOT2nw2/Ud6HhJHYmDNGH6Ck1OWBhPMVeM1r74jbCRwNi0gyFRjjbsGgoHbOyj7mT1PDNbTw=="],
+
+    "str": ["string-width@4.2.3", "", {}, "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g=="],
+
+    "tiny": ["tiny@github:acme/tiny#5f4e3d2", {}, "acme-tiny-5f4e3d2"],
+  }
+}

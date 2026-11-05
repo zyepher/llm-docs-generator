@@ -1,0 +1,12 @@
+{
+  "name": "legacy-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.17.1",
+    "my-utils": "file:../my-utils",
+    "strip": "npm:strip-ansi@6.0.0"
+  },
+  "devDependencies": {
+    "mocha": "^8.2.1"
+  }
+}

@@ -1,0 +1,22 @@
+[project]
+name = "Acme-Service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "FastAPI[standard]>=0.115",
+    "pydantic_settings ; python_version >= '3.12'",
+    "acme-core",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5"]
+
+[dependency-groups]
+dev = ["pytest>=8", { include-group = "lint" }]
+lint = ["ruff"]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+acme-core = { workspace = true }

@@ -1,0 +1,16 @@
+{
+  "name": "yarn-classic-app",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "lodash": "^4.17.21",
+    "string-width-cjs": "npm:string-width@^4.2.0",
+    "left-pad": "git+https://github.com/stevemao/left-pad.git#v1.3.0",
+    "local-thing": "file:../local-thing"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.23.0"
+  }
+}

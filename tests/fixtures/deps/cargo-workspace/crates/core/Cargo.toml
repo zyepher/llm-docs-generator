@@ -1,0 +1,16 @@
+[package]
+name = "acme-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+rand = "0.8"
+json = { package = "serde_json", version = "1.0" }
+internal-macros = { git = "https://github.com/acme/internal-macros" }
+
+[dev-dependencies]
+insta = "1.40"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = "0.59"

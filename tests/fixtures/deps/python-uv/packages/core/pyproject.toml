@@ -1,0 +1,7 @@
+[project]
+name = "acme-core"
+version = "0.1.0"
+dependencies = ["httpx==0.27.2", "internal-sdk"]
+
+[tool.uv.sources]
+internal-sdk = { git = "https://github.com/acme/internal-sdk", tag = "v1.2.0" }
