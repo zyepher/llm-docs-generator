@@ -73,6 +73,11 @@ export async function captureGitState(resolvedSourcePath: string): Promise<GitSt
   };
 }
 
+/** The top-level directory of the git work tree containing `cwd`, or undefined outside one. */
+export async function gitTopLevel(cwd: string): Promise<string | undefined> {
+  return gitTextOrUndefined(cwd, ['rev-parse', '--show-toplevel']);
+}
+
 function sourceRootFromRepo(
   showPrefix: string,
   isDirectory: boolean,
