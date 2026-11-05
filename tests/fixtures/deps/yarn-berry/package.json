@@ -1,0 +1,14 @@
+{
+  "name": "berry-app",
+  "packageManager": "yarn@4.1.1",
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "lodash": "^4.17.21",
+    "string-width-cjs": "npm:string-width@^4.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

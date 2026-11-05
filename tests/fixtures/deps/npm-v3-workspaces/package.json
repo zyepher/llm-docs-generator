@@ -1,0 +1,15 @@
+{
+  "name": "acme-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "react": "^18.2.0",
+    "lodash": "npm:lodash-es@^4.17.21",
+    "left-pad": "github:stevemao/left-pad#v1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "@acme/ui",
+  "version": "1.0.0",
+  "dependencies": {
+    "react-icons": "github:react-icons/react-icons#v5.0.1",
+    "lodash": "^4.17.21"
+  }
+}

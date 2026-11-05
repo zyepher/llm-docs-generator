@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "poetry-app"
+version = "0.1.0"
+description = ""
+authors = ["Acme <dev@acme.test>"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+Django = "^5.0"
+requests = { version = "^2.31", extras = ["socks"] }
+my-fork = { git = "https://github.com/acme/my-fork.git", branch = "main" }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+black = "^24.1"

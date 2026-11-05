@@ -1,0 +1,59 @@
+{
+  "_meta": {
+    "hash": {
+      "sha256": "abc123"
+    },
+    "pipfile-spec": 6,
+    "requires": {
+      "python_version": "3.12"
+    },
+    "sources": [
+      {
+        "name": "pypi",
+        "url": "https://pypi.org/simple",
+        "verify_ssl": true
+      }
+    ]
+  },
+  "default": {
+    "certifi": {
+      "hashes": [
+        "sha256:922820b53db7a7257ffbda3f597266d435245903d80737e34f8a45ff3e3230d8"
+      ],
+      "index": "pypi",
+      "markers": "python_version >= '3.6'",
+      "version": "==2024.8.30"
+    },
+    "flask-login": {
+      "hashes": [
+        "sha256:5e23d14a607ef12806c699590b89d0f0e0d67baeec599d75947bf9c147330333"
+      ],
+      "index": "pypi",
+      "version": "==0.6.3"
+    },
+    "local-pkg": {
+      "editable": true,
+      "path": "./local-pkg"
+    },
+    "requests": {
+      "hashes": [
+        "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6"
+      ],
+      "index": "pypi",
+      "version": "==2.32.3"
+    }
+  },
+  "develop": {
+    "pytest": {
+      "hashes": [
+        "sha256:70b98107bd648308a7952b06e6ca9a50bc660be218d53c257cc1fc94fda10181"
+      ],
+      "index": "pypi",
+      "version": "==8.3.3"
+    },
+    "some-git-tool": {
+      "git": "https://github.com/acme/some-git-tool.git",
+      "ref": "0123456789abcdef0123456789abcdef01234567"
+    }
+  }
+}
