@@ -8,7 +8,11 @@ import { lstat } from 'node:fs/promises';
 import { basename } from 'node:path';
 
 import type { DocNode } from '../../core/models.js';
-import { directoryContainsMatchingFile, findFilesRecursively } from '../../utils/traversal.js';
+import {
+  directoryContainsMatchingFile,
+  findFilesRecursively,
+  sortByPosixRelativePath,
+} from '../../utils/traversal.js';
 import { BaseParser, FormatType, ParserError } from '../base.js';
 import { mergeRstDocuments, rstToDocNode } from './adapter.js';
 import { RstParser } from './parser.js';
@@ -60,9 +64,10 @@ export class RstFormatParser extends BaseParser {
   }
 
   private async parseDirectory(dirPath: string): Promise<DocNode> {
-    const files = (
+    const files = sortByPosixRelativePath(
+      dirPath,
       await findFilesRecursively(dirPath, (fileName) => this.isRstFileName(fileName))
-    ).sort();
+    );
 
     if (files.length === 0) {
       throw new ParserError(`No RST files found in ${dirPath}`, this.name);

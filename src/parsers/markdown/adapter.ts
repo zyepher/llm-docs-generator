@@ -11,6 +11,8 @@
  * - MarkdownContent → ContentBlock
  */
 
+import { basename } from 'node:path';
+
 import type { MarkdownDocument, MarkdownSection, MarkdownContent } from './parser.js';
 
 import {
@@ -68,9 +70,7 @@ export function markdownToDocNode(
  * @returns ID derived from filename
  */
 function extractIdFromPath(path: string): string {
-  const parts = path.split('/');
-  const filename = parts.at(-1) ?? 'document';
-  return filename
+  return basename(path)
     .replace(/\.(?:md|mdx|markdown)$/i, '')
     .toLowerCase()
     .replace(/\s+/g, '-');

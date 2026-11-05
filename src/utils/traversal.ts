@@ -304,6 +304,18 @@ export async function findFilesRecursively(
 }
 
 /**
+ * Order files found under `root` by their POSIX relative path, so a merged
+ * directory comes out in the same order on every platform (a native `\`
+ * separator sorts after letters, while `/` sorts before them).
+ */
+export function sortByPosixRelativePath(root: string, files: string[]): string[] {
+  return files
+    .map((file) => ({ file, key: relative(root, file).split(sep).join('/') }))
+    .sort((a, b) => compareStringsByCodeUnit(a.key, b.key))
+    .map(({ file }) => file);
+}
+
+/**
  * Detection counterpart to findFilesRecursively: stops at the first match
  * instead of collecting every path. Same unbounded, symlink-dropping semantics.
  */

@@ -5,12 +5,18 @@
  * Handles standard Markdown, MDX cleanup, and Apple's DocC-flavored markdown.
  */
 
+import { basename } from 'node:path';
+
 import { BaseParser, FormatType } from '../base.js';
 import { DocNodeType, type DocNode } from '../../core/models.js';
 import { MarkdownParser } from './parser.js';
 import { markdownToDocNode } from './adapter.js';
 
-import { directoryContainsMatchingFile, findFilesRecursively } from '../../utils/traversal.js';
+import {
+  directoryContainsMatchingFile,
+  findFilesRecursively,
+  sortByPosixRelativePath,
+} from '../../utils/traversal.js';
 
 /**
  * Markdown format parser
@@ -93,9 +99,10 @@ export class MarkdownFormatParser extends BaseParser {
    * Recursively finds all .md files and combines them
    */
   private async parseDirectory(dirPath: string): Promise<DocNode> {
-    const files = (
+    const files = sortByPosixRelativePath(
+      dirPath,
       await findFilesRecursively(dirPath, (fileName) => this.isMarkdownFileName(fileName))
-    ).sort();
+    );
 
     if (files.length === 0) {
       throw new Error(`No markdown or MDX files found in ${dirPath}`);
@@ -111,7 +118,7 @@ export class MarkdownFormatParser extends BaseParser {
 
     // Merge into single root
     const { mergeMarkdownDocuments } = await import('./adapter.js');
-    const dirName = dirPath.split('/').pop() || 'Documentation';
+    const dirName = basename(dirPath) || 'Documentation';
     return mergeMarkdownDocuments(docs, dirName);
   }
 

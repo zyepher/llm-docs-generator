@@ -12,6 +12,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { marked } from 'marked';
 import type { Token } from 'marked';
 
@@ -918,9 +919,7 @@ export class MarkdownParser {
     }
 
     // Finally the filename slug.
-    const parts = filePath.split('/');
-    const filename = parts.at(-1) ?? 'document';
-    return filename.replace(/\.(?:md|mdx|markdown)$/i, '');
+    return basename(filePath).replace(/\.(?:md|mdx|markdown)$/i, '');
   }
 
   /**

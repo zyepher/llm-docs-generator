@@ -10,7 +10,11 @@ import { lstat } from 'node:fs/promises';
 import { basename } from 'node:path';
 
 import type { DocNode } from '../../core/models.js';
-import { directoryContainsMatchingFile, findFilesRecursively } from '../../utils/traversal.js';
+import {
+  directoryContainsMatchingFile,
+  findFilesRecursively,
+  sortByPosixRelativePath,
+} from '../../utils/traversal.js';
 import { BaseParser, FormatType, ParserError } from '../base.js';
 import { htmlToDocNode, mergeHtmlDocuments } from './adapter.js';
 import { parseHtmlFile } from './parser.js';
@@ -61,9 +65,10 @@ export class HtmlFormatParser extends BaseParser {
   }
 
   private async parseDirectory(dirPath: string): Promise<DocNode> {
-    const files = (
+    const files = sortByPosixRelativePath(
+      dirPath,
       await findFilesRecursively(dirPath, (fileName) => this.isHtmlFileName(fileName))
-    ).sort();
+    );
 
     if (files.length === 0) {
       throw new ParserError(`No HTML files found in ${dirPath}`, this.name);
