@@ -1,0 +1,9 @@
+{
+  "id": "ctrl-zod-3",
+  "title": "Signup form validation with zod 3 (control)",
+  "kind": "control",
+  "library": { "name": "zod", "version": "3.22.4", "released": "2023-10-04" },
+  "notes": "Negative control. zod 3.22 is long known to the model; z.object, .refine with a path, safeParse, flatten().fieldErrors, and z.infer are the obvious tools. The pack arm must not do worse than baseline here.",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

@@ -1,0 +1,17 @@
+{
+  "id": "effect",
+  "pack": {
+    "title": "Effect",
+    "description": "Typed effects, errors, and concurrency for TypeScript",
+    "dependency": { "ecosystem": "npm", "name": "effect" },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/Effect-TS/effect",
+        "ref": "effect@{version}",
+        "paths": ["MIGRATION.md", "migration", "packages/effect/README.md"],
+        "include": ["**/*.md"]
+      }
+    ]
+  }
+}

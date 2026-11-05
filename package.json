@@ -51,6 +51,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
     "type-check": "tsc --noEmit",
+    "eval": "tsx evals/run.ts",
     "prepublishOnly": "npm run lint && npm run type-check && npm run build && npm run test",
     "clean": "rm -rf dist",
     "schema": "tsx scripts/generate-schemas.ts"

@@ -1,0 +1,17 @@
+{
+  "id": "date-fns",
+  "pack": {
+    "title": "date-fns",
+    "description": "Modern JavaScript date utility library",
+    "dependency": { "ecosystem": "npm", "name": "date-fns" },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/date-fns/date-fns",
+        "ref": "v{version}",
+        "paths": ["README.md", "docs"],
+        "include": ["**/*.md"]
+      }
+    ]
+  }
+}

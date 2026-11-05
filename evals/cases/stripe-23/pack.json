@@ -1,0 +1,36 @@
+{
+  "id": "stripe-node",
+  "pack": {
+    "title": "Stripe Node.js library",
+    "description": "Official Stripe API client for Node.js",
+    "dependency": { "ecosystem": "npm", "name": "stripe" },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/stripe/stripe-node",
+        "ref": "v{version}",
+        "paths": ["README.md", "CHANGELOG.md"],
+        "include": ["**/*.md"]
+      },
+      {
+        "type": "urls",
+        "mount": "api",
+        "urls": [
+          {
+            "url": "https://docs.stripe.com/api/checkout/sessions/create.md",
+            "path": "checkout/sessions/create.md"
+          },
+          {
+            "url": "https://docs.stripe.com/api/subscriptions/pause.md",
+            "path": "subscriptions/pause.md"
+          },
+          {
+            "url": "https://docs.stripe.com/api/subscriptions/update.md",
+            "path": "subscriptions/update.md"
+          }
+        ]
+      }
+    ],
+    "site": { "baseUrl": "https://docs.stripe.com" }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "mcp-sdk-v2",
+  "title": "Progress and cancellation in an MCP SDK v2 tool",
+  "kind": "post-cutoff",
+  "library": {
+    "name": "@modelcontextprotocol/server",
+    "version": "2.4.0",
+    "released": "2026-10-23"
+  },
+  "notes": "The v2 SDK (first stable 2.0.0 on 2026-07-27) split @modelcontextprotocol/sdk into @modelcontextprotocol/server and @modelcontextprotocol/client (both 2.4.0 here), removed server.tool(), and replaced the flat `extra` handler argument with a structured context: progress goes through ctx.mcpReq.notify with ctx.mcpReq._meta.progressToken, cancellation is ctx.mcpReq.signal, and InMemoryTransport is exported from the client and server packages. The naive solution uses the 1.x handler shape (raw-shape schema, extra.sendNotification, extra.signal) and fails the type check.",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}

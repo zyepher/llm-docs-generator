@@ -1,0 +1,9 @@
+{
+  "id": "sveltekit-3",
+  "title": "Server hooks in SvelteKit 3",
+  "kind": "post-cutoff",
+  "library": { "name": "@sveltejs/kit", "version": "3.1.1", "released": "2026-10-29" },
+  "notes": "SvelteKit 3.0.0 (2026-10-01) moved the hook types (Handle, HandleServerError, sequence) from @sveltejs/kit to @sveltejs/kit/hooks and changed handleError: it now runs for every error and receives a `kind` discriminant ('app' | 'framework' | 'validation' | 'unknown') plus `error` and `event`, instead of v2's { error, event, status, message } for unexpected errors only. The v2 idiom from memory fails the type check (missing exports, no status/message on the input) and the behaviour check (404s and expected errors get their message replaced). Peers: svelte 5.57.x, vite 8, TypeScript 6.",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}

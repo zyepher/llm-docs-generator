@@ -1,0 +1,9 @@
+{
+  "id": "hono-4-13",
+  "title": "QUERY route and JSON 405 responses with Hono 4.13",
+  "kind": "post-cutoff",
+  "library": { "name": "hono", "version": "4.13.16", "released": "2026-11-01" },
+  "notes": "Hono 4.13.0 (2026-08-03, after the June 2026 cutoff) added first-class QUERY method support (app.query) and the Method Not Allowed middleware (methodNotAllowed from hono/method-not-allowed, with an onMethodNotAllowed option for a custom response). Hono 4.12 has neither: from memory a model registers QUERY with app.on and hand-rolls the 405. The task asks for Hono's own 405 handling, so the behaviour check requires an import of hono/method-not-allowed in src/ and an Allow header that lists exactly the methods the router knows for the path, including the HEAD that Hono derives from GET routes (GET, HEAD for /items and /items/:id, QUERY for /search). The JSON 405 body requires the onMethodNotAllowed option, since the middleware's default response is plain text. QUERY via app.on still works in 4.13, so the QUERY route alone does not discriminate; the 405 handling does.",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

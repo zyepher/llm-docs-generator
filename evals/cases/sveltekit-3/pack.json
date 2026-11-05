@@ -1,0 +1,17 @@
+{
+  "id": "sveltekit",
+  "pack": {
+    "title": "SvelteKit",
+    "description": "Web application framework built on Svelte and Vite",
+    "dependency": { "ecosystem": "npm", "name": "@sveltejs/kit" },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/sveltejs/kit",
+        "ref": "@sveltejs/kit@{version}",
+        "paths": ["documentation/docs"],
+        "include": ["**/*.md"]
+      }
+    ]
+  }
+}

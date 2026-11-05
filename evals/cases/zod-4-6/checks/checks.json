@@ -1,0 +1,16 @@
+{
+  "checks": [
+    { "name": "deps-unchanged", "builtin": "deps-unchanged" },
+    { "name": "no-type-suppressions", "builtin": "no-type-suppressions" },
+    {
+      "name": "typecheck",
+      "command": ["tsc", "--noEmit", "-p", "tsconfig.eval.json"],
+      "timeoutSeconds": 180
+    },
+    {
+      "name": "behaviour",
+      "command": ["vitest", "run", "--config", "vitest.eval.config.mts"],
+      "timeoutSeconds": 180
+    }
+  ]
+}

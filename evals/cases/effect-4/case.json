@@ -1,0 +1,9 @@
+{
+  "id": "effect-4",
+  "title": "Retry with fallback in Effect 4",
+  "kind": "post-cutoff",
+  "library": { "name": "effect", "version": "4.1.2", "released": "2026-11-02" },
+  "notes": "Effect 4.0.0 shipped as stable on 2026-10-01, but v4 betas were public from early 2026 (before the model's June 2026 cutoff), so the model may have seen some v4 material; this case is weaker evidence than the others. In v4 the Either module became Result (Success/Failure with .success/.failure), Effect.either became Effect.result, and Effect.catchAll became Effect.catch. The v3 idiom from memory (Either, Effect.either, Effect.catchAll) fails the type check against 4.1.2.",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}
