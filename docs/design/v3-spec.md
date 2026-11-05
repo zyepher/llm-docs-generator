@@ -151,7 +151,8 @@ Common fields on every source: `mount` (default `""`, a relative POSIX path, no 
    found inside fetched pages.
 4. **`local`**: `path` (project-relative directory or file). Paths resolving under the OS temp
    directory are rejected with a message naming the fix; this closes the v2 audit finding
-   where a manifest pinned a deleted scratch directory. The origin identity is the
+   where a manifest pinned a deleted scratch directory. `LLM_DOCS_ALLOW_TEMP_SOURCES=1` lifts the rule
+   (tests and throwaway experiments only), on the same pattern as `LLM_DOCS_ALLOW_PRIVATE_NETWORK`. The origin identity is the
    project-relative path plus, when the project is a git repository, the host repository
    commit and a dirty flag.
 
@@ -308,8 +309,8 @@ sources.) Then a blank line, then the content.
   `import`/`export` lines are removed; MDX/JSX components: a known set of layout wrappers
   (`Tabs`, `Tab`, `TabItem`, `Steps`, `Step`, `Callout`, `Note`, `Tip`, `Warning`, `Info`,
   `Card`, `CardGroup`, `Accordion`, `AccordionGroup`, `CodeGroup`, `Frame`, `Details`) are
-  unwrapped keeping their children and, for `Tab`/`TabItem`/`Accordion`/`Card`, turning the
-  `title`/`label` prop into a bold line; other capitalized components are left as written and
+  unwrapped keeping their children and, for `Tab`/`TabItem`/`Accordion`/`Card`/`Step`, turning the
+  `title`/`label` prop into a bold line (and a `Card` `href` into a link on that line); other capitalized components are left as written and
   counted; DocC directives keep the existing handling (`@Metadata`, `@Options`, etc. removed;
   `@Tutorial` content kept); the comment-directive tab dialect keeps working; then transforms
   (4.4), then link rewriting (4.5).
