@@ -106,6 +106,11 @@ function groupOf(path: string): string {
   return slash === -1 ? '' : inside.slice(0, slash);
 }
 
+/** The order pages appear in the index (and the combined file): by top-level group, then path. */
+export function compareIndexOrder(a: string, b: string): number {
+  return compareStringsByCodeUnit(groupOf(a), groupOf(b)) || compareStringsByCodeUnit(a, b);
+}
+
 export function renderIndexPage(input: IndexPageInput): string {
   const { pack } = input;
   const lines: string[] = [

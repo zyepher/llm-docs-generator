@@ -1127,6 +1127,8 @@ function referenceDefinitionTargets(text: string, kinds: Uint8Array): LinkTarget
 export interface MarkdownHeading {
   level: number;
   text: string;
+  /** Offset of the start of the heading's (first) line. */
+  offset: number;
 }
 
 /** ATX headings and single-line setext headings outside code, in document order. */
@@ -1147,7 +1149,7 @@ export function collectHeadings(
     const atx = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/.exec(stripped);
 
     if (atx?.[1] !== undefined) {
-      headings.push({ level: atx[1].length, text: (atx[2] ?? '').trim() });
+      headings.push({ level: atx[1].length, text: (atx[2] ?? '').trim(), offset: line.start });
       continue;
     }
 
@@ -1161,7 +1163,11 @@ export function collectHeadings(
       (previous === undefined || previous.text.trim() === '') &&
       !/^ {0,3}(?:[-*+>|]|\d+[.)])/.test(line.text)
     ) {
-      headings.push({ level: next.text.trim().startsWith('=') ? 1 : 2, text: line.text.trim() });
+      headings.push({
+        level: next.text.trim().startsWith('=') ? 1 : 2,
+        text: line.text.trim(),
+        offset: line.start,
+      });
     }
   }
 
@@ -1182,22 +1188,29 @@ function githubHeadingSlug(heading: string): string {
     .replace(/\s/g, '-');
 }
 
+/** Each heading with its GitHub anchor (`-1`, `-2` suffixes for duplicates), in document order. */
+export function headingSlugs(
+  text: string,
+  options: MarkdownSyntaxOptions = {}
+): (MarkdownHeading & { slug: string })[] {
+  const counts = new Map<string, number>();
+
+  return collectHeadings(text, options).map((heading) => {
+    const plain = heading.text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
+    const base = githubHeadingSlug(plain);
+    const seen = counts.get(base) ?? 0;
+    counts.set(base, seen + 1);
+    return { ...heading, slug: seen === 0 ? base : `${base}-${seen}` };
+  });
+}
+
 /**
  * Fragment anchors a page defines: GitHub heading slugs with `-1`, `-2`
  * suffixes for duplicates, plus HTML `id`/`name` attributes. Used by
  * `verify --strict`; Phase 5 resolves citations with it.
  */
 export function headingAnchors(text: string, options: MarkdownSyntaxOptions = {}): Set<string> {
-  const anchors = new Set<string>();
-  const counts = new Map<string, number>();
-
-  for (const heading of collectHeadings(text, options)) {
-    const plain = heading.text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
-    const base = githubHeadingSlug(plain);
-    const seen = counts.get(base) ?? 0;
-    counts.set(base, seen + 1);
-    anchors.add(seen === 0 ? base : `${base}-${seen}`);
-  }
+  const anchors = new Set(headingSlugs(text, options).map((heading) => heading.slug));
 
   for (const match of text.matchAll(/<[a-z][\w-]*\s[^>]*?\b(?:id|name)\s*=\s*["']([^"']+)["']/gi)) {
     if (match[1] !== undefined) {

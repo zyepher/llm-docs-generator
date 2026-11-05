@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -45,6 +45,22 @@ async function makeProject(
     'llm-docs.json': `${JSON.stringify({ schemaVersion: 3, packs }, null, 2)}\n`,
   });
   return root;
+}
+
+async function snapshot(dir: string): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  const walk = async (current: string): Promise<void> => {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(path);
+      } else {
+        result[relative(dir, path).split(sep).join('/')] = await readFile(path, 'utf-8');
+      }
+    }
+  };
+  await walk(dir);
+  return result;
 }
 
 function problems(report: VerifyReport): string[] {
@@ -199,5 +215,53 @@ describe('syncPacks: reStructuredText, HTML, and OpenAPI pages', () => {
     expect((await syncPacks(root, undefined)).packs[0]?.error).toMatch(
       /docs\/api\/broken\.yaml could not be converted/
     );
+  });
+});
+
+describe('syncPacks: the combined layout', () => {
+  it('writes a deterministic combined file whose links are in-file anchors, and verifies', async () => {
+    const root = await makeProject(
+      {
+        demo: {
+          ...PACK,
+          layout: { combined: true },
+          sources: [{ ...SOURCE, passthrough: ['schema.json'] }],
+        },
+      },
+      {
+        ...MIXED,
+        'docs/schema.json': '{}',
+        'docs/guide/quickstart.rst': `${QUICKSTART}\nThe \`schema <../schema.json>\`_ is carried.\n`,
+      }
+    );
+    await syncPacks(root, undefined, { now: clock });
+    const pack = join(root, 'agent-docs', 'demo');
+    const combined = await readFile(join(pack, 'demo.full.md'), 'utf-8');
+    const manifest = await readPackManifest(pack);
+
+    expect(manifest.outputs.find((output) => output.kind === 'combined')).toMatchObject({
+      path: 'demo.full.md',
+      title: 'Widgets 2.0.0',
+    });
+    expect(combined.startsWith('# Widgets 2.0.0\n')).toBe(true);
+    expect([...combined.matchAll(/^<!-- page: (\S+) -->$/gm)].map((match) => match[1])).toEqual([
+      'pages/index.md',
+      'pages/api/client.md',
+      'pages/api/petstore/index.md',
+      'pages/api/petstore/pets.md',
+      'pages/guide/quickstart.md',
+    ]);
+    expect(combined).toContain('| [index.md](#index) | Widgets |');
+    expect(combined).toContain('[client](#api-client--options)');
+    expect(combined).toContain('[setup](#index--setup)');
+    expect(combined).toContain('<a id="api-client--options"></a>\n\n## Options');
+    expect(combined).toContain('[index](#index)');
+    expect(combined).toContain('[schema](files/schema.json)');
+    expect(problems(await verifyPacks(root, undefined, { strict: true }))).toEqual([]);
+
+    const first = await snapshot(pack);
+    await rm(pack, { recursive: true });
+    await syncPacks(root, undefined, { now: clock });
+    expect(await snapshot(pack)).toEqual(first);
   });
 });

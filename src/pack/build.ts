@@ -55,6 +55,7 @@ import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
+import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
 import { createPackLinkRewriter } from './links.js';
 import {
@@ -477,12 +478,6 @@ function assertBuildable(recipe: ResolvedPackRecipe): void {
       );
     }
   }
-
-  if (recipe.layout.combined) {
-    throw new ConfigError(
-      'The combined layout is not supported yet; set "layout.combined" to false.'
-    );
-  }
 }
 
 function manifestSourceEntries(selection: PackSelection): ManifestSourceEntry[] {
@@ -725,6 +720,7 @@ async function buildPack(
     const unknownComponents = new Map<string, number>();
     const links: PackManifest['links'] = { rewritten: 0, external: 0, unresolved: [] };
     let plainTextConversions = 0;
+    const writtenPages: { path: string; text: string }[] = [];
     // Selection cannot see the tag pages of an OpenAPI document: check those
     // paths against every other page here.
     const pagePaths = new Map<string, string>();
@@ -762,6 +758,7 @@ async function buildPack(
       await writeStagedFile(stagingDir, unit.outputPath, (target) =>
         writeTextFileSafely(target, result.text)
       );
+      writtenPages.push({ path: unit.outputPath, text: result.text });
       outputs.push({
         path: unit.outputPath,
         kind: 'page',
@@ -842,6 +839,22 @@ async function buildPack(
       tokens: estimateTokenCount(indexText),
       title: `${recipe.title} ${recipe.version}`,
     });
+
+    if (recipe.layout.combined) {
+      const combinedPath = `${resolved.id}.full.md`;
+      const combinedText = renderCombinedPack({ indexText, pages: writtenPages });
+      await writeStagedFile(stagingDir, combinedPath, (target) =>
+        writeTextFileSafely(target, combinedText)
+      );
+      outputs.push({
+        path: combinedPath,
+        kind: 'combined',
+        sha256: sha256Prefixed(combinedText),
+        bytes: Buffer.byteLength(combinedText, 'utf-8'),
+        tokens: estimateTokenCount(combinedText),
+        title: `${recipe.title} ${recipe.version}`,
+      });
+    }
 
     const manifest: PackManifest = { ...manifestWithoutOutputs, outputs };
     await writePackManifest(stagingDir, manifest);

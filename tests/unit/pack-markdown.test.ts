@@ -190,9 +190,9 @@ describe('headings', () => {
   it('collects ATX and setext headings outside code', () => {
     const text = '# One #\n\n```\n# not\n```\n\nTwo\n===\n\n> ## Quoted\n';
     expect(collectHeadings(text)).toEqual([
-      { level: 1, text: 'One' },
-      { level: 1, text: 'Two' },
-      { level: 2, text: 'Quoted' },
+      { level: 1, text: 'One', offset: 0 },
+      { level: 1, text: 'Two', offset: 24 },
+      { level: 2, text: 'Quoted', offset: 33 },
     ]);
   });
 
