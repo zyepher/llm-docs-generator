@@ -1248,7 +1248,13 @@ const LAYOUT_WRAPPERS: ReadonlySet<string> = new Set([
 ]);
 
 /** Wrappers whose `title`/`label` prop becomes a bold line. */
-const LABELED_WRAPPERS: ReadonlySet<string> = new Set(['Tab', 'TabItem', 'Accordion', 'Card']);
+const LABELED_WRAPPERS: ReadonlySet<string> = new Set([
+  'Tab',
+  'TabItem',
+  'Accordion',
+  'Card',
+  'Step',
+]);
 
 /** `Tabs.Tab` is a `Tab`: the last dotted segment names the component. */
 function componentBaseName(name: string): string {
@@ -1266,6 +1272,32 @@ function stringProp(attributes: string, name: string): string | undefined {
     .trim();
 
   return value === undefined || value === '' || /[<>{}]/.test(value) ? undefined : value;
+}
+
+/** A Markdown link destination for `url`, angle-bracketed when it holds spaces or parentheses. */
+function linkDestination(url: string): string {
+  return /[\s()]/.test(url) ? `<${url}>` : url;
+}
+
+/**
+ * The bold line a labeled wrapper becomes: its `title` (or `label`) prop, and
+ * for a `Card` with an `href`, that title as a link (the href alone when the
+ * card has no title).
+ */
+function wrapperLabel(base: string, attributes: string): string | undefined {
+  if (!LABELED_WRAPPERS.has(base)) {
+    return undefined;
+  }
+
+  const title = stringProp(attributes, 'title') ?? stringProp(attributes, 'label');
+  const href = base === 'Card' ? stringProp(attributes, 'href') : undefined;
+
+  if (href === undefined) {
+    return title === undefined ? undefined : `**${title}**`;
+  }
+
+  const text = (title ?? href).replace(/[[\]\\]/g, '\\$&');
+  return `**[${text}](${linkDestination(href)})**`;
 }
 
 interface WrapperFrame {
@@ -1286,8 +1318,8 @@ interface MdxUnwrapResult {
 
 /**
  * Unwrap the known layout wrappers (keeping their children, dedented by the
- * nesting they added), turn `title`/`label` of Tab, TabItem, Accordion, and
- * Card into a bold line, leave every other capitalized component as written
+ * nesting they added), turn `title`/`label` of Tab, TabItem, Accordion, Card,
+ * and Step into a bold line (a Card `href` makes it a link), leave every other capitalized component as written
  * (counted), and, for MDX, remove top-level `import`/`export` declarations.
  * Code is never touched.
  */
@@ -1339,7 +1371,7 @@ function unwrapMdxComponents(text: string, options: MarkdownSyntaxOptions): MdxU
     if (out.length > 0 && out.at(-1)?.trim() !== '') {
       out.push('');
     }
-    out.push(`${indent}**${label}**`);
+    out.push(`${indent}${label}`);
     out.push('');
     edited = true;
   };
@@ -1488,9 +1520,7 @@ function unwrapMdxComponents(text: string, options: MarkdownSyntaxOptions): MdxU
         continue;
       }
 
-      const label = LABELED_WRAPPERS.has(base)
-        ? (stringProp(tag.attributes, 'title') ?? stringProp(tag.attributes, 'label'))
-        : undefined;
+      const label = wrapperLabel(base, tag.attributes);
 
       if (label !== undefined) {
         labels.push(label);
@@ -1532,7 +1562,7 @@ function unwrapMdxComponents(text: string, options: MarkdownSyntaxOptions): MdxU
     }
 
     const inline = pieces
-      .map((piece) => (typeof piece === 'string' ? piece : `**${piece.label}** `))
+      .map((piece) => (typeof piece === 'string' ? piece : `${piece.label} `))
       .join('');
     for (const kept of inline.split('\n')) {
       push(dedent(kept));

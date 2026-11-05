@@ -381,7 +381,7 @@ describe('convertMarkdownPage', () => {
     );
   });
 
-  it('unwraps Mintlify CodeGroup and Card, keeping the Card title as a bold line', () => {
+  it('unwraps Mintlify CodeGroup and Card, keeping the Card title (linked to its href) as a bold line', () => {
     const source = [
       '<CodeGroup>',
       '```bash npm',
@@ -412,11 +412,45 @@ describe('convertMarkdownPage', () => {
         'yarn add mint',
         '```',
         '',
-        '**Quickstart**',
+        '**[Quickstart](/quickstart)**',
         '',
         'Get going.',
         '',
-        '**Multi line**',
+        '**[Multi line](/x)**',
+        '',
+      ].join('\n')
+    );
+  });
+
+  it('turns Step titles into bold lines and an untitled Card href into a linked line', () => {
+    const source = [
+      '<Steps>',
+      '  <Step title="Install the CLI">',
+      '    Run `npm i`.',
+      '  </Step>',
+      '  <Step title="Configure">',
+      '    Edit the config.',
+      '  </Step>',
+      '</Steps>',
+      '',
+      '<Card href="https://x.dev/a b">',
+      '  Read more.',
+      '</Card>',
+    ].join('\n');
+
+    expect(body(source, { syntax: 'mdx' })).toBe(
+      [
+        '**Install the CLI**',
+        '',
+        'Run `npm i`.',
+        '',
+        '**Configure**',
+        '',
+        'Edit the config.',
+        '',
+        '**[https://x.dev/a b](<https://x.dev/a b>)**',
+        '',
+        'Read more.',
         '',
       ].join('\n')
     );
