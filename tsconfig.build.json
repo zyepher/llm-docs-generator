@@ -1,0 +1,13 @@
+{
+  // Declarations only: tsup bundles the JavaScript, and TypeScript 7 (which
+  // ships no compiler API for tsup's dts step) emits the .d.ts files.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationMap": false,
+    "rootDir": "./src",
+    "outDir": "./dist"
+  }
+}
