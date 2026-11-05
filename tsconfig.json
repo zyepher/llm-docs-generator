@@ -35,16 +35,7 @@
 
     // Performance Optimizations
     "skipLibCheck": true,
-    "skipDefaultLibCheck": true,
-
-    // Module Resolution
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"],
-      "@core/*": ["src/core/*"],
-      "@config/*": ["src/config/*"],
-      "@utils/*": ["src/utils/*"]
-    }
+    "skipDefaultLibCheck": true
   },
   "include": [
     "src/**/*.ts"

@@ -34,7 +34,7 @@ export enum ContentBlockType {
  * Format-agnostic representation used by all parsers.
  */
 export const ContentBlockSchema = z.object({
-  type: z.nativeEnum(ContentBlockType),
+  type: z.enum(ContentBlockType),
   language: z.string().optional(), // e.g., 'swift', 'sql', 'json'
   content: z.string(),
   annotations: z.map(z.string(), z.unknown()).optional(), // Flexible metadata
@@ -62,15 +62,17 @@ export enum DocNodeType {
  *
  * Performance: O(1) access to children, O(log n) tree operations
  */
-export const DocNodeSchema: z.ZodType<DocNode, z.ZodTypeDef, unknown> = z.lazy(() =>
+// Defaults are factories so each parsed node gets its own array and Map
+// instead of sharing one mutable instance across every parse.
+export const DocNodeSchema: z.ZodType<DocNode, unknown> = z.lazy(() =>
   z.object({
-    type: z.nativeEnum(DocNodeType),
+    type: z.enum(DocNodeType),
     id: z.string(),
     title: z.string(),
     description: z.string().default(''),
-    content: z.array(ContentBlockSchema).default([]),
-    children: z.array(DocNodeSchema).default([]),
-    metadata: z.map(z.string(), z.unknown()).default(new Map()),
+    content: z.array(ContentBlockSchema).default(() => []),
+    children: z.array(DocNodeSchema).default(() => []),
+    metadata: z.map(z.string(), z.unknown()).default(() => new Map()),
   })
 );
 

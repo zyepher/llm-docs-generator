@@ -9,8 +9,6 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import packageJson from '../../package.json';
-
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cliPath = join(repoRoot, 'src/cli.ts');
 
@@ -50,7 +48,7 @@ describe('llm-docs CLI skeleton', () => {
   it('prints the package version', async () => {
     const result = await runCli(['--version']);
     expect(result.code).toBe(0);
-    expect(result.stdout.trim()).toBe(packageJson.version);
+    expect(result.stdout.trim()).toBe('3.0.0');
   });
 
   it('lists the implemented commands as JSON', async () => {
@@ -58,7 +56,7 @@ describe('llm-docs CLI skeleton', () => {
     expect(result.code).toBe(0);
 
     const capabilities: unknown = JSON.parse(result.stdout);
-    expect(capabilities).toMatchObject({ name: 'llm-docs', version: packageJson.version });
+    expect(capabilities).toMatchObject({ name: 'llm-docs', version: '3.0.0' });
     expect(capabilities).toHaveProperty(
       'commands',
       expect.arrayContaining([

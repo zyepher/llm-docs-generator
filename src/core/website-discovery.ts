@@ -9,7 +9,7 @@ export const DEFAULT_WEBSITE_FETCH_TIMEOUT_MS = 10_000;
 export const DEFAULT_WEBSITE_MAX_BYTES_PER_RESPONSE = 65_536;
 export const DEFAULT_WEBSITE_MAX_CANDIDATES = 200;
 
-const USER_AGENT = 'llm-docs-generator/1.0 website-discovery';
+const USER_AGENT = 'llm-docs website-discovery';
 
 const WEBSITE_RESOURCE_ROLE_ORDER: Record<WebsiteResourceRole, number> = {
   'explicit-url': 0,
@@ -27,16 +27,9 @@ const WEBSITE_EVIDENCE_RELATION_ORDER: Record<WebsiteCandidateEvidenceRelation, 
 
 export type WebsiteResourceRole = 'explicit-url' | 'llms-txt' | 'sitemap-xml';
 export type WebsiteCandidateEvidenceRelation =
-  | 'bare-url'
-  | 'canonical'
-  | 'link'
-  | 'markdown-link'
-  | 'sitemap-loc';
+  'bare-url' | 'canonical' | 'link' | 'markdown-link' | 'sitemap-loc';
 export type WebsiteCandidateEvidenceFlag =
-  | 'docs-like-url'
-  | 'github-url'
-  | 'machine-readable-url'
-  | 'source-like-url';
+  'docs-like-url' | 'github-url' | 'machine-readable-url' | 'source-like-url';
 
 export interface DiscoverWebsiteOptions {
   url: string;

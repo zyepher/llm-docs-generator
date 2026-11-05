@@ -20,9 +20,6 @@ yarn-error.log*
 coverage/
 .nyc_output/
 
-# Package manager
-package-lock.json
-
 # Temporary files
 *.tmp
 .temp/
