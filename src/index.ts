@@ -58,6 +58,12 @@ export type {
   SyncOptions,
   SyncReport,
 } from './pack/build.js';
+export type {
+  RefreshFileChange,
+  RefreshFileStatus,
+  RefreshRefChange,
+  RefreshReport,
+} from './pack/refresh.js';
 export { verifyPacks } from './pack/verify.js';
 export type {
   CheckFinding,

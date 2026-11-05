@@ -97,12 +97,15 @@ async function conversionLog(): Promise<string[]> {
   }
 }
 
+/** Failures and warnings, except the license check (these fixtures carry no license file). */
 function problems(report: VerifyReport): string[] {
-  return report.results.flatMap((result) =>
-    result.findings
-      .filter((finding) => finding.status === 'fail' || finding.status === 'warn')
-      .map((finding) => `${result.check} ${finding.status}: ${finding.message}`)
-  );
+  return report.results
+    .filter((result) => result.check !== 'license')
+    .flatMap((result) =>
+      result.findings
+        .filter((finding) => finding.status === 'fail' || finding.status === 'warn')
+        .map((finding) => `${result.check} ${finding.status}: ${finding.message}`)
+    );
 }
 
 const DOCS = {

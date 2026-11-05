@@ -64,8 +64,8 @@ import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
 import { createPackLinkRewriter } from './links.js';
+import { resolvePackLicense } from './license.js';
 import {
-  licenseStatusFor,
   MANIFEST_FILE_NAME,
   ManifestError,
   readPackManifest,
@@ -77,6 +77,7 @@ import {
   type PackManifest,
 } from './manifest.js';
 import { collectHeadings, convertMarkdownPage, type PackFileRef } from './markdown.js';
+import { diffRefresh, type RefreshReport } from './refresh.js';
 import { renderSourcePage } from './render-ir.js';
 import { verifyPackFiles } from './verify.js';
 
@@ -98,6 +99,8 @@ export interface PackSyncResult {
   /** 2 for a config or recipe problem, 3 for a runtime failure. */
   exitCode?: 2 | 3;
   warnings: string[];
+  /** What a refresh found upstream (`refresh` only). */
+  refresh?: RefreshReport;
 }
 
 export type OrphanStatus = 'orphan' | 'pruned' | 'would-prune' | 'kept';
@@ -130,6 +133,13 @@ export interface SyncOptions {
   offline?: boolean;
   /** Delete pack directories that are not in the config. */
   prune?: boolean;
+  /**
+   * Re-acquire every source, network ones included, at the recorded recipe
+   * and report what changed upstream (spec 5 `refresh`); `check` then writes
+   * nothing. Without it, network sources are acquired only when the recipe
+   * changed or the pack files no longer verify.
+   */
+  refresh?: boolean;
   resolveDependencyVersion?: DependencyVersionResolver | undefined;
   afterSync?: AfterSyncStep | undefined;
   /** Clock for `acquiredAt` (tests pin it). */
@@ -890,7 +900,11 @@ async function buildPack(
       );
     }
 
-    const declared = recipe.license;
+    const license = resolvePackLicense(
+      recipe.license,
+      acquisitions.map((acquisition) => acquisition.license)
+    );
+    warnings.push(...license.warnings);
     const manifestWithoutOutputs: Omit<PackManifest, 'outputs'> = {
       schemaVersion: 3,
       tool: { name: TOOL_NAME, version: TOOL_VERSION },
@@ -900,8 +914,7 @@ async function buildPack(
       recipeHash: resolved.recipeHash,
       acquiredAt,
       origins,
-      // Phase 2c: license detection for git sources fills `detected` (spec 4.10).
-      license: { declared, detected: null, status: licenseStatusFor(declared) },
+      license: license.license,
       sources,
       links,
       transforms: [...transformCounts.entries()].map(([name, count]) => ({ name, pages: count })),
@@ -974,6 +987,44 @@ async function buildPack(
   }
 }
 
+/** Re-acquire every source of a built pack, report the upstream changes, and rebuild unless `check`. */
+async function refreshOnePack(
+  context: SyncContext,
+  resolved: ResolvedPack,
+  existing: ExistingPack,
+  workRoot: string
+): Promise<PackSyncResult> {
+  const { id, recipe } = resolved;
+
+  if (existing.kind !== 'pack') {
+    throw new ConfigError(
+      `Pack "${id}" has no readable manifest to refresh; run 'llm-docs sync ${id}'.`
+    );
+  }
+  if (existing.manifest.recipeHash !== resolved.recipeHash) {
+    throw new ConfigError(
+      `The recipe of pack "${id}" changed since its last sync, so there is no recorded recipe to refresh; run 'llm-docs sync ${id}'.`
+    );
+  }
+
+  const acquisitions = withPlaceholders(await acquireAll(context, recipe, workRoot, () => true));
+  const report = diffRefresh(
+    existing.manifest,
+    await selectPackFiles(recipe, acquisitions),
+    acquisitions.map((acquisition) => acquisition.origin)
+  );
+
+  if (!report.changed) {
+    return { id, status: 'unchanged', warnings: [], refresh: report };
+  }
+  if (context.options.check === true) {
+    return { id, status: 'would-build', reason: 'upstream changed', warnings: [], refresh: report };
+  }
+
+  const warnings = await buildPack(context, resolved, existing, acquisitions, workRoot);
+  return { id, status: 'built', reason: 'upstream changed', warnings, refresh: report };
+}
+
 async function syncOnePack(context: SyncContext, id: string): Promise<PackSyncResult> {
   const resolved = await resolvePackRecipe(context.loaded.config, id, {
     resolveDependencyVersion: context.options.resolveDependencyVersion,
@@ -983,6 +1034,10 @@ async function syncOnePack(context: SyncContext, id: string): Promise<PackSyncRe
   const workRoot = await mkdtemp(join(tmpdir(), 'llm-docs-'));
 
   try {
+    if (context.options.refresh === true) {
+      return await refreshOnePack(context, resolved, existing, workRoot);
+    }
+
     const local = await acquireAll(context, resolved.recipe, workRoot, (index) => {
       const source = resolved.recipe.sources[index];
       return source !== undefined && !sourceUsesNetwork(source);

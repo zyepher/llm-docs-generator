@@ -4,10 +4,11 @@
  * and the shared selection step that classifies those files (page, converted
  * document, passthrough), applies the caps, and checks output paths.
  *
- * Phase 2c registers the `git`, `urls`, and `llms-txt` acquirers in
- * ACQUIRERS. Each writes into `context.workDir` (a fresh temp directory the
- * caller removes, also on failure) and reports files with origin-relative
- * POSIX paths. src/sources/convert.ts runs the `convert` selections.
+ * The `git` acquirer lives in src/sources/git.ts and the `urls` and
+ * `llms-txt` acquirers in src/sources/web.ts. Each writes into
+ * `context.workDir` (a fresh temp directory the caller removes, also on
+ * failure) and reports files with origin-relative POSIX paths.
+ * src/sources/convert.ts runs the `convert` selections.
  */
 
 import { readFile, realpath, stat } from 'node:fs/promises';
@@ -26,12 +27,15 @@ import {
   type SourceType,
 } from '../config/project.js';
 import { captureGitState } from '../core/git-state.js';
+import type { DetectedLicense } from '../pack/license.js';
 import type { ManifestFetch, ManifestOrigin } from '../pack/manifest.js';
 import { isSameOrDescendant } from '../utils/fs-path.js';
 import { errorMessage } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
+import { acquireGit } from './git.js';
+import { acquireLlmsTxt, acquireUrls } from './web.js';
 
 export interface AcquiredFile {
   /** Origin-relative POSIX path: what include/exclude match and output paths derive from. */
@@ -58,6 +62,8 @@ export interface SourceAcquisition {
    * to an excluded page from a dead one.
    */
   inventory?: string[];
+  /** The license detected from the origin's license files (git sources, spec 4.10). */
+  license?: DetectedLicense | null;
 }
 
 export interface AcquireContext {
@@ -81,12 +87,11 @@ export interface SourceAcquirer<S extends ResolvedSource> {
 
 type AcquirerRegistry = { [K in SourceType]: SourceAcquirer<ResolvedSourceOfType<K>> | null };
 
-/** Phase 2c fills `git`, `urls`, and `llms-txt` (spec 4.1). */
 const ACQUIRERS: AcquirerRegistry = {
   local: { network: false, acquire: acquireLocal },
-  git: null,
-  urls: null,
-  'llms-txt': null,
+  git: { network: true, acquire: acquireGit },
+  urls: { network: true, acquire: acquireUrls },
+  'llms-txt': { network: true, acquire: acquireLlmsTxt },
 };
 
 function notSupportedError(type: SourceType): ConfigError {
@@ -141,10 +146,11 @@ export async function acquireSource(
 // Matching and classification
 // ---------------------------------------------------------------------------
 
-type FileClass = 'excluded' | 'passthrough' | 'agent-output' | 'convert' | 'include' | 'ignored';
+export type FileClass =
+  'excluded' | 'passthrough' | 'agent-output' | 'convert' | 'include' | 'ignored';
 
 /** Compile a list of globs into one predicate over origin-relative POSIX paths. */
-function compileGlobs(globs: readonly string[]): (path: string) => boolean {
+export function compileGlobs(globs: readonly string[]): (path: string) => boolean {
   if (globs.length === 0) {
     return () => false;
   }
@@ -157,13 +163,16 @@ function compileGlobs(globs: readonly string[]): (path: string) => boolean {
  * everything; then passthrough (so a file matched by both passthrough and a
  * converter's include is carried byte-identical, never converted); then, for
  * the `agent` converter, the `X.md` written next to a converted original `X`;
- * then a converter's include, then include.
+ * then a converter's include, then include. An llms-txt source's include and
+ * exclude filter the listed URLs (spec 2.3) before anything is fetched, so
+ * every stored path it returns is taken.
  */
-function createSourceMatcher(source: ResolvedSource): (path: string) => FileClass {
-  const excluded = compileGlobs(source.exclude);
+export function createSourceMatcher(source: ResolvedSource): (path: string) => FileClass {
+  const urlFiltered = source.type === 'llms-txt';
+  const excluded = compileGlobs(urlFiltered ? [] : source.exclude);
   const passthrough = compileGlobs(source.passthrough);
   const converted = compileGlobs(source.convert?.include ?? []);
-  const included = compileGlobs(source.include);
+  const included = compileGlobs(urlFiltered ? ['**'] : source.include);
 
   return (path) => {
     if (excluded(path)) {

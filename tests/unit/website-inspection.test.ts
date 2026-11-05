@@ -121,7 +121,7 @@ describe('inspectWebsite', () => {
     });
 
     const explicitUrl = `${baseUrl}/docs/page`;
-    const inspection = await inspectWebsite({ url: explicitUrl });
+    const inspection = await inspectWebsite({ url: explicitUrl, allowPrivateHosts: true });
 
     expect(requests.map((path) => new URL(path, baseUrl).pathname)).toEqual([
       '/docs/page',
@@ -246,7 +246,10 @@ describe('inspectWebsite', () => {
       writeHttpResponse(response, 404, 'text/plain', 'not found');
     });
 
-    const inspection = await inspectWebsite({ url: `${baseUrl}/docs/page` });
+    const inspection = await inspectWebsite({
+      url: `${baseUrl}/docs/page`,
+      allowPrivateHosts: true,
+    });
     const warning = `Response truncated at 65536 bytes for explicit-url resource: ${baseUrl}/docs/page`;
 
     expect(inspection.inspectedResources[0]).toMatchObject({
@@ -278,7 +281,40 @@ describe('inspectWebsite', () => {
       'Embedded credentials are not supported in discover --url.'
     );
     await expect(inspectWebsite({ url: 'http://169.254.169.254/latest' })).rejects.toThrow(
-      /Refusing to fetch a private, link-local, or cloud-metadata address/
+      /only https:\/\/ URLs are fetched/
     );
+    await expect(inspectWebsite({ url: 'https://169.254.169.254/latest' })).rejects.toThrow(
+      /169\.254\.169\.254 is a link-local address/
+    );
+    await expect(inspectWebsite({ url: 'https://[::ffff:10.0.0.1]/' })).rejects.toThrow(
+      /is a private address/
+    );
+  });
+
+  it('refuses a hostname that resolves to a private address and records it as a warning', async () => {
+    const { baseUrl, requests } = await startTestServer((_request, response) => {
+      writeHttpResponse(response, 200, 'text/html', '<html></html>');
+    });
+    const port = new URL(baseUrl).port;
+    const inspection = await inspectWebsite({
+      url: `https://docs.example.test:${port}/`,
+      resolver: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+
+    expect(requests).toEqual([]);
+    expect(inspection.inspectedResources.every((resource) => resource.status === null)).toBe(true);
+    expect(inspection.warnings[0]).toMatch(/127\.0\.0\.1 is a loopback address/);
+  });
+
+  it('serves plain http to loopback only with the private-network switch', async () => {
+    const { baseUrl } = await startTestServer((_request, response) => {
+      writeHttpResponse(response, 200, 'text/html', '<html></html>');
+    });
+
+    await expect(inspectWebsite({ url: `${baseUrl}/` })).rejects.toThrow(
+      /plain http is allowed only to loopback/
+    );
+    const inspection = await inspectWebsite({ url: `${baseUrl}/`, allowPrivateHosts: true });
+    expect(inspection.inspectedResources[0]?.status).toBe(200);
   });
 });

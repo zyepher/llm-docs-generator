@@ -176,6 +176,15 @@ const LICENSE_STATUS_BY_SPDX: Readonly<Record<string, LicenseStatus>> = {
   'AGPL-3.0': 'copyleft',
 };
 
+/** Lower is less restrictive, for combining SPDX expressions. */
+const STATUS_RANK: Readonly<Record<LicenseStatus, number>> = {
+  permissive: 0,
+  attribution: 1,
+  copyleft: 2,
+  unknown: 3,
+  proprietary: 4,
+};
+
 export function licenseStatusFor(spdx: string | null): LicenseStatus {
   if (spdx === null) {
     return 'unknown';
@@ -185,8 +194,22 @@ export function licenseStatusFor(spdx: string | null): LicenseStatus {
     return 'proprietary';
   }
 
-  // `GPL-3.0-only` and `GPL-3.0-or-later` share their base id's status.
-  const base = spdx.replace(/-(?:only|or-later)$/, '');
+  // SPDX expressions: OR takes the most permissive choice, AND the most restrictive term.
+  const expression = spdx.replace(/[()]/g, ' ').trim();
+  if (/\s(?:OR|AND)\s/i.test(expression)) {
+    const pick = (statuses: LicenseStatus[], best: boolean): LicenseStatus =>
+      [...statuses].sort((a, b) => (STATUS_RANK[a] - STATUS_RANK[b]) * (best ? 1 : -1))[0] ??
+      'unknown';
+    return pick(
+      expression
+        .split(/\s+OR\s+/i)
+        .map((choice) => pick(choice.split(/\s+AND\s+/i).map(licenseStatusFor), false)),
+      true
+    );
+  }
+
+  // `GPL-3.0-only` and `GPL-3.0-or-later` share their base id's status; an exception keeps it.
+  const base = expression.replace(/\s+WITH\s+.*$/i, '').replace(/-(?:only|or-later)$/, '');
   return Object.hasOwn(LICENSE_STATUS_BY_SPDX, base)
     ? (LICENSE_STATUS_BY_SPDX[base] ?? 'unknown')
     : 'unknown';
