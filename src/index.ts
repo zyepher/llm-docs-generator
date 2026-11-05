@@ -26,14 +26,3 @@ export {
 export { ContentBlockType, DocNodeType, createContentBlock, createDocNode } from './core/models.js';
 export type { ContentBlock, DocNode } from './core/models.js';
 export { estimateTokenCount } from './utils/text-metrics.js';
-export { DEFAULT_CHUNK_MAX_CHARACTERS, chunkDocNode } from './core/chunker.js';
-export type {
-  ChunkDocNodeOptions,
-  ChunkDocNodeResult,
-  SemanticChunk,
-  SemanticChunkMetadata,
-  SemanticChunkSource,
-  SemanticChunkSourceLines,
-  SemanticChunkWarning,
-  SemanticChunkWarningCode,
-} from './core/chunker.js';
