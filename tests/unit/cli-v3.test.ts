@@ -261,6 +261,7 @@ describe('llm-docs v3 CLI', () => {
     ]);
   });
 
+  // Eleven CLI runs, several spawning freshly written fake tools: slow under a parallel suite.
   it('adds a converted pack, verifies it, and reconverts or reports stale originals', async () => {
     const root = await makeProject({
       'docs/index.md': '# Manuals\n\nSee the [spec](spec.md).\n',
@@ -270,8 +271,10 @@ describe('llm-docs v3 CLI', () => {
     });
     const binDir = join(root, '.tools');
     await installFakeConverters(binDir);
+    // Windows spells it `Path`; a second, differently cased key in the child env would be ambiguous.
+    const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
     const env = {
-      PATH: `${binDir}${delimiter}${process.env.PATH ?? ''}`,
+      [pathKey]: `${binDir}${delimiter}${process.env[pathKey] ?? ''}`,
       LLM_DOCS_CACHE_DIR: join(root, '.cache'),
     };
 
@@ -330,7 +333,7 @@ describe('llm-docs v3 CLI', () => {
     expect(staleSync.code).toBe(0);
     expect(staleSync.stderr).toContain('warning: Agent conversion notes/wiring.pdf.md is stale');
     expect((await runCli(root, ['verify', 'notes'], env)).code).toBe(1);
-  });
+  }, 180_000);
 
   it('rejects converter flags it cannot honor with one usage line', async () => {
     const root = await makeProject(DOCS);

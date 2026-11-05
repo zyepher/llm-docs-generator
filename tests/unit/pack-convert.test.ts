@@ -13,6 +13,8 @@ import { sha256Prefixed } from '../../src/utils/hash.js';
 import { installFakeConverters, writeCommandConverter } from '../helpers/fake-converters.js';
 
 const tempDirs: string[] = [];
+// Several syncs per test, each spawning converters (cmd.exe shims on Windows).
+const SPAWN_HEAVY_TIMEOUT_MS = 120_000;
 const ENV_KEYS = [ALLOW_TEMP_SOURCES_ENV, 'PATH', 'LLM_DOCS_CACHE_DIR', 'FAKE_CONVERTER_LOG'];
 let savedEnv: Record<string, string | undefined> = {};
 let binDir: string;
@@ -109,7 +111,7 @@ const DOCS = {
   'docs/install.docx': 'Hold the reset button.\n',
 };
 
-describe('markitdown and docling converters', () => {
+describe('markitdown and docling converters', { timeout: SPAWN_HEAVY_TIMEOUT_MS }, () => {
   it('converts documents with markitdown through the Markdown page path', async () => {
     const root = await makeProject({ convert: { tool: 'markitdown' } }, DOCS);
     const report = await syncPacks(root, undefined);
@@ -238,7 +240,7 @@ describe('markitdown and docling converters', () => {
   });
 });
 
-describe('command converters', () => {
+describe('command converters', { timeout: SPAWN_HEAVY_TIMEOUT_MS }, () => {
   it('reads {output} when the argv names it, else stdout', async () => {
     const script = await writeCommandConverter(await tempDir('llm-docs-command-'));
     const include = ['**/*.pdf'];
@@ -357,7 +359,7 @@ describe('command converters', () => {
   });
 });
 
-describe('agent conversions', () => {
+describe('agent conversions', { timeout: SPAWN_HEAVY_TIMEOUT_MS }, () => {
   const AGENT = { convert: { tool: 'agent', include: ['**/*.pdf'] } };
   const AGENT_DOCS = {
     ...DOCS,
