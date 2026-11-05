@@ -70,7 +70,8 @@ async function createGitRunner(workDir: string, repo: URL): Promise<GitRunner> {
   });
 
   const config = [
-    `core.hooksPath=${emptyHooks}`,
+    // Forward slashes: Git for Windows reads them, and no value escaping applies.
+    `core.hooksPath=${emptyHooks.replace(/\\/g, '/')}`,
     'core.symlinks=false',
     'core.fsmonitor=false',
     'protocol.allow=never',

@@ -10,6 +10,8 @@
  * copyright lines, line wrapping, quotes, and punctuation never matter.
  */
 
+import { posix } from 'node:path';
+
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { licenseStatusFor, type PackManifest } from './manifest.js';
 
@@ -136,7 +138,7 @@ export function detectLicense(files: readonly LicenseFile[]): {
   warnings: string[];
 } {
   const ranked = [...files].sort((a, b) => {
-    const name = (path: string): string => path.slice(path.lastIndexOf('/') + 1).toLowerCase();
+    const name = (path: string): string => posix.basename(path).toLowerCase();
     const keys = (path: string): (number | string)[] => [
       -depth(path),
       name(path).includes('doc') ? 0 : 1,

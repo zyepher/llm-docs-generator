@@ -207,9 +207,12 @@ describe('acquireGit', () => {
     const repo = await makeRepo();
     const other = await makeRepo();
     await git(repo.dir, 'submodule', 'add', '--quiet', other.url, 'docs/vendor');
-    await execFileAsync('ln', ['-s', 'index.md', join(repo.dir, 'docs', 'alias.md')]);
-    await execFileAsync('ln', ['-s', 'index.md', join(repo.dir, 'docs', 'alias.txt')]);
-    await git(repo.dir, 'add', '-A');
+    // Symlinks enter the index directly (mode 120000), so the test needs no
+    // file-system symlink support (Windows without Developer Mode has none).
+    const target = await git(repo.dir, 'hash-object', '-w', 'docs/index.md');
+    for (const name of ['docs/alias.md', 'docs/alias.txt']) {
+      await git(repo.dir, 'update-index', '--add', '--cacheinfo', `120000,${target},${name}`);
+    }
     await git(repo.dir, 'commit', '--quiet', '-m', 'links');
     await git(repo.dir, 'tag', 'v3');
 
@@ -231,10 +234,13 @@ describe('acquireGit', () => {
     const repo = await makeRepo();
     const marker = join(await temp('llm-docs-marker-'), 'hook-ran');
     const hooks = join(repo.dir, 'hooks');
-    await writeFiles(hooks, { 'post-checkout': `#!/bin/sh\ntouch "${marker}"\n` });
+    // Git runs hooks with its own sh, which takes forward slashes on Windows too.
+    await writeFiles(hooks, {
+      'post-checkout': `#!/bin/sh\ntouch "${marker.replace(/\\/g, '/')}"\n`,
+    });
     await chmod(join(hooks, 'post-checkout'), 0o755);
     const hostileConfig = join(await temp('llm-docs-hostile-'), 'gitconfig');
-    await writeFile(hostileConfig, `[core]\n\thooksPath = ${hooks}\n`);
+    await writeFile(hostileConfig, `[core]\n\thooksPath = ${hooks.replace(/\\/g, '/')}\n`);
 
     // Control: plain git with this config runs the hook.
     const control = await temp('llm-docs-control-');
