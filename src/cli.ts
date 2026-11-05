@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { Command, CommanderError } from 'commander';
@@ -65,6 +66,11 @@ const COMMANDS = [
   {
     name: 'sync',
     summary: 'Build or rebuild packs so they match their recipes',
+    status: 'implemented',
+  },
+  {
+    name: 'refresh',
+    summary: 'Re-acquire packs at their recorded recipes and report what changed upstream',
     status: 'implemented',
   },
   {
@@ -161,6 +167,15 @@ async function creatingProjectRoot(options: ProjectOptions): Promise<string> {
 
 interface AddOptions extends ProjectOptions {
   local?: string;
+  git?: string;
+  ref?: string;
+  path?: string[];
+  url?: string[];
+  urlsFile?: string;
+  llmsTxt?: string;
+  include?: string[];
+  stripPrefix?: string;
+  site?: string;
   dependency?: string;
   version?: string;
   mount?: string;
@@ -170,14 +185,36 @@ interface AddOptions extends ProjectOptions {
   dryRun?: boolean;
 }
 
+/** One URL per line; blank lines and `#` comments are ignored. */
+function readUrlsFile(path: string): string[] {
+  let text: string;
+
+  try {
+    text = readFileSync(resolve(path), 'utf-8');
+  } catch (error) {
+    throw new UsageError(`Cannot read --urls-file ${path}: ${errorMessage(error)}`);
+  }
+
+  const urls = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/(?:^|\s)#.*$/, '').trim())
+    .filter((line) => line !== '');
+
+  if (urls.length === 0) {
+    throw new UsageError(`--urls-file ${path} lists no URLs.`);
+  }
+
+  return urls;
+}
+
 /**
- * Source flags of `add`, each building one source object. Phase 2c adds
- * `--git/--ref/--path`, `--url`, `--urls-file`, and `--llms-txt/--include`
- * here; Phase 2d adds `--convert` and `--site` handling next to them.
+ * Source flags of `add`, each building one source object. Phase 2d adds
+ * `--convert` next to them.
  */
 const ADD_SOURCE_FLAGS: ReadonlyArray<{
   flags: string;
   description: string;
+  repeatable?: true;
   read(options: AddOptions): Record<string, unknown> | undefined;
 }> = [
   {
@@ -186,7 +223,94 @@ const ADD_SOURCE_FLAGS: ReadonlyArray<{
     read: (options) =>
       options.local === undefined ? undefined : { type: 'local', path: options.local },
   },
+  {
+    flags: '--git <repo>',
+    description: 'Take the docs from a git repository (https://) at --ref, limited to --path',
+    read: (options) => {
+      if (options.git === undefined) {
+        return undefined;
+      }
+      if (options.ref === undefined) {
+        throw new UsageError('--git needs --ref <tag, branch, or commit>.');
+      }
+      return {
+        type: 'git',
+        repo: options.git,
+        ref: options.ref,
+        ...(options.path === undefined ? {} : { paths: options.path }),
+      };
+    },
+  },
+  {
+    flags: '--url <url>',
+    description: 'Fetch exactly this page (repeatable)',
+    repeatable: true,
+    read: (options) =>
+      options.url === undefined ? undefined : { type: 'urls', urls: options.url },
+  },
+  {
+    flags: '--urls-file <file>',
+    description: 'Fetch the pages listed in a file, one URL per line (# comments)',
+    read: (options) =>
+      options.urlsFile === undefined
+        ? undefined
+        : { type: 'urls', urls: readUrlsFile(options.urlsFile) },
+  },
+  {
+    flags: '--llms-txt <url>',
+    description: 'Fetch the pages an llms.txt index lists that pass --include',
+    read: (options) => {
+      if (options.llmsTxt === undefined) {
+        return undefined;
+      }
+      return {
+        type: 'llms-txt',
+        url: options.llmsTxt,
+        ...(options.stripPrefix === undefined ? {} : { stripPrefix: options.stripPrefix }),
+      };
+    },
+  },
 ];
+
+/** Flags that refine a source flag, with the source type each one needs (undefined: any). */
+const ADD_SOURCE_MODIFIERS: ReadonlyArray<{
+  flags: string;
+  description: string;
+  key: 'ref' | 'path' | 'include' | 'stripPrefix';
+  repeatable?: true;
+  needs?: string;
+}> = [
+  {
+    flags: '--ref <ref>',
+    description: 'Tag, branch, or 40-hex commit for --git',
+    key: 'ref',
+    needs: 'git',
+  },
+  {
+    flags: '--path <path>',
+    description: 'Repository path to take for --git (repeatable; default the whole repository)',
+    key: 'path',
+    repeatable: true,
+    needs: 'git',
+  },
+  {
+    flags: '--include <glob>',
+    description:
+      'Glob a page must match: URL paths for --llms-txt, file paths otherwise (repeatable)',
+    key: 'include',
+    repeatable: true,
+  },
+  {
+    flags: '--strip-prefix <prefix>',
+    description: 'URL path prefix removed from --llms-txt page paths',
+    key: 'stripPrefix',
+    needs: 'llms-txt',
+  },
+];
+
+function collect(value: string, previous: string[] | undefined): string[] {
+  return [...(previous ?? []), value];
+}
 
 function parseDependency(value: string): { ecosystem: Ecosystem; name: string } {
   const separator = value.indexOf(':');
@@ -250,6 +374,27 @@ function buildPackRecipe(options: AddOptions): PackConfig {
     source.mount = options.mount;
   }
 
+  for (const modifier of ADD_SOURCE_MODIFIERS) {
+    if (
+      options[modifier.key] !== undefined &&
+      modifier.needs !== undefined &&
+      source.type !== modifier.needs
+    ) {
+      throw new UsageError(`${modifier.flags.split(' ')[0]} only applies to --${modifier.needs}.`);
+    }
+  }
+
+  if (options.include !== undefined) {
+    if (Object.hasOwn(source, 'include')) {
+      throw new UsageError('--include and --recipe both set "include".');
+    }
+    source.include = options.include;
+  }
+
+  if (source.type === 'llms-txt' && source.include === undefined) {
+    throw new UsageError('--llms-txt needs at least one --include <glob> over page URL paths.');
+  }
+
   const checkedSource = sourceConfigSchema.safeParse(source);
 
   if (!checkedSource.success) {
@@ -269,6 +414,9 @@ function buildPackRecipe(options: AddOptions): PackConfig {
   }
   if (pack.version === undefined && pack.dependency === undefined) {
     throw new UsageError('Pass --version <v> or --dependency <ecosystem>:<name>.');
+  }
+  if (options.site !== undefined) {
+    pack.site = { baseUrl: options.site };
   }
   // Keep the source exactly as the user wrote it (not the parsed copy) so the config stays minimal.
   pack.sources = [source];
@@ -352,6 +500,48 @@ function printSyncReport(report: SyncReport): void {
       report.changed
         ? 'sync --check: packs are out of date.'
         : 'sync --check: everything is up to date.'
+    );
+  }
+}
+
+function printRefreshReport(report: SyncReport): void {
+  for (const pack of report.packs) {
+    const refresh = pack.refresh;
+
+    if (pack.status === 'failed' || refresh === undefined) {
+      say(`${pack.id}: failed: ${pack.error ?? 'unknown error'}`);
+      continue;
+    }
+
+    const { counts } = refresh;
+    const summary = `${counts.changed} changed, ${counts.added} added, ${counts.removed} removed, ${counts.unchanged} unchanged`;
+    const outcome = {
+      unchanged: 'no upstream changes',
+      built: 'upstream changed; rebuilt',
+      'would-build': 'upstream changed; would rebuild',
+    }[pack.status];
+    say(`${pack.id}: ${outcome} (${summary})`);
+
+    for (const ref of refresh.refs) {
+      say(
+        `  git ref ${ref.ref} of ${ref.repo} now resolves to ${ref.commit.slice(0, 12)} (was ${ref.previousCommit.slice(0, 12)})`
+      );
+    }
+    for (const file of refresh.files) {
+      if (file.status !== 'unchanged') {
+        say(`  ${file.status.padEnd(8)} ${file.output}`);
+      }
+    }
+    for (const warning of pack.warnings) {
+      say(`  warning: ${warning}`);
+    }
+  }
+
+  if (report.check) {
+    say(
+      report.changed
+        ? 'refresh --check: upstream changed.'
+        : 'refresh --check: every pack matches upstream.'
     );
   }
 }
@@ -447,9 +637,14 @@ function buildProgram(): Command {
     .description(summaryOf('add'))
     .argument('<id>', 'Pack id (lowercase letters, digits, ".", "_", "-")');
 
-  for (const flag of ADD_SOURCE_FLAGS) {
-    add.option(flag.flags, flag.description);
+  for (const flag of [...ADD_SOURCE_FLAGS, ...ADD_SOURCE_MODIFIERS]) {
+    if (flag.repeatable === true) {
+      add.option(flag.flags, flag.description, collect);
+    } else {
+      add.option(flag.flags, flag.description);
+    }
   }
+  add.option('--site <baseUrl>', 'The docs website, so links to it resolve to pack pages');
 
   withProjectOptions(
     add
@@ -550,7 +745,10 @@ function buildProgram(): Command {
       .command('verify')
       .description(summaryOf('verify'))
       .argument('[ids...]', 'Packs to verify (default: all, plus orphan pack directories)')
-      .option('--strict', 'Also check link fragments against heading anchors')
+      .option(
+        '--strict',
+        'Also check link fragments against heading anchors, and fail on an unknown or proprietary license'
+      )
   ).action(async (ids: string[], options: ProjectOptions & { strict?: boolean }) => {
     const projectRoot = await existingProjectRoot(options);
     const report = await verifyPacks(projectRoot, ids, { strict: options.strict === true });
@@ -562,13 +760,34 @@ function buildProgram(): Command {
     process.exitCode = report.ok ? 0 : EXIT_CHECK_FAILED;
   });
 
+  withProjectOptions(
+    program
+      .command('refresh')
+      .description(summaryOf('refresh'))
+      .argument('[ids...]', 'Packs to refresh (default: all)')
+      .option('--check', 'Write nothing; exit 1 when anything changed upstream')
+  ).action(async (ids: string[], options: ProjectOptions & { check?: boolean }) => {
+    const projectRoot = await existingProjectRoot(options);
+    const report = await syncPacks(projectRoot, ids, {
+      refresh: true,
+      check: options.check === true,
+      command: `llm-docs refresh${ids.length > 0 ? ` ${ids.join(' ')}` : ''}`,
+    });
+
+    if (options.json === true) {
+      writeJson(report);
+    }
+    printRefreshReport(report);
+    process.exitCode = syncExitCode(report);
+  });
+
   program
     .command('discover')
     .description(summaryOf('discover'))
     .requiredOption('--url <site>', 'Website to inspect (its llms.txt and sitemap.xml)')
     .option(
       '--allow-private-hosts',
-      'Allow private and link-local IP literals (refused by default as an SSRF guard)'
+      'Allow private, loopback, and link-local addresses (refused by default as an SSRF guard)'
     )
     .option('--json', 'Print only the JSON evidence, without the stderr summary')
     .action(async (options: { url: string; allowPrivateHosts?: boolean; json?: boolean }) => {
