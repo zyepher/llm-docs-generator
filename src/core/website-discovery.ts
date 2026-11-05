@@ -1,15 +1,16 @@
-import { isIP } from 'node:net';
-
-import { request } from 'undici';
-
+import {
+  ALLOW_PRIVATE_NETWORK_ENV,
+  assertUrlAllowed,
+  createHttpClient,
+  type HostResolver,
+  type HttpClient,
+} from '../sources/http.js';
 import { errorMessage } from '../utils/guards.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 
 export const DEFAULT_WEBSITE_FETCH_TIMEOUT_MS = 10_000;
 export const DEFAULT_WEBSITE_MAX_BYTES_PER_RESPONSE = 65_536;
 export const DEFAULT_WEBSITE_MAX_CANDIDATES = 200;
-
-const USER_AGENT = 'llm-docs website-discovery';
 
 const WEBSITE_RESOURCE_ROLE_ORDER: Record<WebsiteResourceRole, number> = {
   'explicit-url': 0,
@@ -37,12 +38,13 @@ export interface DiscoverWebsiteOptions {
   maxBytesPerResponse?: number;
   maxCandidates?: number;
   /**
-   * Allow fetching private/link-local/metadata IP literals. Default false:
-   * link-local (incl. cloud metadata 169.254.169.254) and RFC1918 ranges are
-   * refused as an SSRF guard. Loopback is always allowed (local dev). Hostnames
-   * are not DNS-resolved, so DNS-rebinding is out of scope.
+   * Allow private, loopback, and link-local addresses (and plain http to
+   * loopback). Default: LLM_DOCS_ALLOW_PRIVATE_NETWORK=1. The shared client
+   * vets every resolved address and pins the connection (spec 4.1).
    */
   allowPrivateHosts?: boolean;
+  /** Resolver override for tests. */
+  resolver?: HostResolver;
 }
 
 export interface WebsiteInspectedResource {
@@ -116,23 +118,6 @@ interface FetchedWebsiteResource {
   error: string | null;
 }
 
-interface ReadBodyResult {
-  text: string;
-  byteSize: number;
-  truncated: boolean;
-}
-
-class BodyReadError extends Error {
-  constructor(
-    message: string,
-    readonly byteSize: number,
-    readonly truncated: boolean
-  ) {
-    super(message);
-    this.name = 'BodyReadError';
-  }
-}
-
 export interface CandidateAccumulator {
   url: string;
   sameOrigin: boolean;
@@ -156,7 +141,9 @@ type CandidateFilter = (normalizedUrl: string) => boolean;
 export async function inspectWebsite(
   options: DiscoverWebsiteOptions
 ): Promise<WebsiteDiscoveryInspection> {
-  const normalizedUrl = normalizeWebsiteUrl(options.url, options.allowPrivateHosts ?? false);
+  const allowPrivateNetwork =
+    options.allowPrivateHosts === true || process.env[ALLOW_PRIVATE_NETWORK_ENV] === '1';
+  const normalizedUrl = normalizeWebsiteUrl(options.url, allowPrivateNetwork);
   const websiteUrl = new URL(normalizedUrl);
   const timeoutMs = resolvePositiveSafeInteger(
     options.timeoutMs,
@@ -183,56 +170,67 @@ export async function inspectWebsite(
   };
   const inspectedResources: WebsiteInspectedResource[] = [];
 
-  for (const plannedResource of resourcePlan) {
-    const fetched = await fetchWebsiteResource({
-      plannedResource,
-      timeoutMs,
-      maxBytesPerResponse,
-    });
-    inspectedResources.push(fetched.resource);
+  const client = createHttpClient(
+    options.resolver === undefined
+      ? { allowPrivateNetwork }
+      : { allowPrivateNetwork, resolver: options.resolver }
+  );
 
-    if (fetched.error !== null) {
-      warnings.push(
-        `Fetch failed for ${plannedResource.sourceRole} resource: ${plannedResource.url}. ${fetched.error}`
-      );
-      continue;
-    }
-
-    if (fetched.resource.status === null) {
-      continue;
-    }
-
-    if (fetched.resource.status < 200 || fetched.resource.status >= 300) {
-      warnings.push(
-        `Non-2xx HTTP ${fetched.resource.status} for ${plannedResource.sourceRole} resource: ${plannedResource.url}`
-      );
-      continue;
-    }
-
-    if (fetched.resource.truncated) {
-      warnings.push(
-        `Response truncated at ${maxBytesPerResponse} bytes for ${plannedResource.sourceRole} resource: ${plannedResource.url}`
-      );
-    }
-
-    if (!isSupportedContentType(plannedResource.sourceRole, fetched.resource.contentType)) {
-      warnings.push(
-        `Unsupported content type for ${plannedResource.sourceRole} resource: ${formatContentTypeForWarning(
-          fetched.resource.contentType
-        )} at ${plannedResource.url}`
-      );
-      continue;
-    }
-
-    if (fetched.text !== null) {
-      extractCandidatesFromResource({
+  try {
+    for (const plannedResource of resourcePlan) {
+      const fetched = await fetchWebsiteResource({
+        client,
         plannedResource,
-        text: fetched.text,
-        websiteOrigin: websiteUrl.origin,
-        state: candidateState,
-        warnings,
+        timeoutMs,
+        maxBytesPerResponse,
       });
+      inspectedResources.push(fetched.resource);
+
+      if (fetched.error !== null) {
+        warnings.push(
+          `Fetch failed for ${plannedResource.sourceRole} resource: ${plannedResource.url}. ${fetched.error}`
+        );
+        continue;
+      }
+
+      if (fetched.resource.status === null) {
+        continue;
+      }
+
+      if (fetched.resource.status < 200 || fetched.resource.status >= 300) {
+        warnings.push(
+          `Non-2xx HTTP ${fetched.resource.status} for ${plannedResource.sourceRole} resource: ${plannedResource.url}`
+        );
+        continue;
+      }
+
+      if (fetched.resource.truncated) {
+        warnings.push(
+          `Response truncated at ${maxBytesPerResponse} bytes for ${plannedResource.sourceRole} resource: ${plannedResource.url}`
+        );
+      }
+
+      if (!isSupportedContentType(plannedResource.sourceRole, fetched.resource.contentType)) {
+        warnings.push(
+          `Unsupported content type for ${plannedResource.sourceRole} resource: ${formatContentTypeForWarning(
+            fetched.resource.contentType
+          )} at ${plannedResource.url}`
+        );
+        continue;
+      }
+
+      if (fetched.text !== null) {
+        extractCandidatesFromResource({
+          plannedResource,
+          text: fetched.text,
+          websiteOrigin: websiteUrl.origin,
+          state: candidateState,
+          warnings,
+        });
+      }
     }
+  } finally {
+    await client.close();
   }
 
   const candidates = finalizeCandidates(candidateState.candidatesByUrl);
@@ -261,7 +259,7 @@ export async function inspectWebsite(
   };
 }
 
-function normalizeWebsiteUrl(input: string, allowPrivateHosts: boolean): string {
+function normalizeWebsiteUrl(input: string, allowPrivateNetwork: boolean): string {
   const trimmed = input.trim();
 
   if (trimmed === '') {
@@ -284,93 +282,12 @@ function normalizeWebsiteUrl(input: string, allowPrivateHosts: boolean): string 
     throw new Error('Embedded credentials are not supported in discover --url.');
   }
 
-  if (!allowPrivateHosts && isBlockedPrivateHost(url.hostname)) {
-    throw new Error(
-      `Refusing to fetch a private, link-local, or cloud-metadata address for discover --url: ${url.hostname} (use --allow-private-hosts to override).`
-    );
-  }
-
+  // Scheme and IP-literal checks fail here, before any request; hostnames are
+  // vetted after DNS resolution by the client on every request.
+  assertUrlAllowed(url, allowPrivateNetwork);
   url.hash = '';
 
   return url.href;
-}
-
-/**
- * SSRF guard: block link-local (incl. cloud metadata 169.254.169.254) and
- * RFC1918 private IP literals (and their IPv6 equivalents). Loopback is allowed
- * (local development and the same host the agent already controls). Non-literal
- * hostnames are not DNS-resolved here, so DNS-rebinding is explicitly out of
- * scope for this syntactic check.
- */
-function isBlockedPrivateHost(hostname: string): boolean {
-  // URL hostnames keep IPv6 literals bracketed ("[fe80::1]"), and isIP() does
-  // not recognize the bracketed form (isIP("[fe80::1]") === 0), so strip the
-  // surrounding brackets before classifying — otherwise the entire IPv6 branch
-  // below is dead code and every IPv6 private/link-local address slips through.
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  const ipVersion = isIP(host);
-
-  if (ipVersion === 4) {
-    return isBlockedIpv4(host);
-  }
-
-  if (ipVersion === 6) {
-    // IPv4-mapped/compatible IPv6 (e.g. ::ffff:169.254.169.254, which the URL
-    // parser emits as ::ffff:a9fe:a9fe) must be judged by the embedded IPv4
-    // address, not the IPv6 prefix — otherwise a mapped metadata IP bypasses.
-    const embeddedIpv4 = extractEmbeddedIpv4(host);
-    if (embeddedIpv4 !== undefined) {
-      return isBlockedIpv4(embeddedIpv4);
-    }
-
-    // fe80::/10 (link-local) and fc00::/7 (unique local). ::1 loopback allowed.
-    return /^fe[89ab]/.test(host) || /^f[cd]/.test(host);
-  }
-
-  return false;
-}
-
-function isBlockedIpv4(host: string): boolean {
-  const octets = host.split('.').map((part) => Number.parseInt(part, 10));
-  const [a, b] = octets;
-  if (a === undefined || b === undefined) {
-    return false;
-  }
-  if (a === 169 && b === 254) {
-    return true; // link-local, incl. cloud metadata
-  }
-  if (a === 10) {
-    return true; // RFC1918
-  }
-  if (a === 172 && b >= 16 && b <= 31) {
-    return true; // RFC1918
-  }
-  if (a === 192 && b === 168) {
-    return true; // RFC1918
-  }
-  return false; // loopback (127/8) and public addresses allowed
-}
-
-/**
- * Extract the embedded IPv4 address from an IPv4-mapped or IPv4-compatible IPv6
- * literal, in either the dotted-quad tail form (::ffff:169.254.169.254) or the
- * hex-hextet form the URL parser normalizes to (::ffff:a9fe:a9fe). Returns
- * undefined for ordinary IPv6 addresses.
- */
-function extractEmbeddedIpv4(host: string): string | undefined {
-  const dotted = host.match(/(?:^|:)((?:\d{1,3}\.){3}\d{1,3})$/);
-  if (dotted !== null && dotted[1] !== undefined) {
-    return dotted[1];
-  }
-
-  const mapped = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (mapped !== null && mapped[1] !== undefined && mapped[2] !== undefined) {
-    const high = Number.parseInt(mapped[1], 16);
-    const low = Number.parseInt(mapped[2], 16);
-    return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
-  }
-
-  return undefined;
 }
 
 function buildResourcePlan(normalizedUrl: string): PlannedWebsiteResource[] {
@@ -382,127 +299,55 @@ function buildResourcePlan(normalizedUrl: string): PlannedWebsiteResource[] {
 }
 
 async function fetchWebsiteResource(options: {
+  client: HttpClient;
   plannedResource: PlannedWebsiteResource;
   timeoutMs: number;
   maxBytesPerResponse: number;
 }): Promise<FetchedWebsiteResource> {
-  const { plannedResource, timeoutMs, maxBytesPerResponse } = options;
-  const abortController = new AbortController();
-  let timedOut = false;
-  let status: number | null = null;
-  let contentType: string | null = null;
-  let etag: string | null = null;
-  let lastModified: string | null = null;
-  let byteSize = 0;
-  let truncated = false;
+  const { client, plannedResource, timeoutMs, maxBytesPerResponse } = options;
   const observedAt = new Date().toISOString();
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    abortController.abort();
-  }, timeoutMs);
 
   try {
-    const response = await request(plannedResource.url, {
-      method: 'GET',
-      headersTimeout: timeoutMs,
-      bodyTimeout: timeoutMs,
-      // No redirect interceptor is composed in, so undici never follows a 3xx here.
-      signal: abortController.signal,
-      headers: {
-        Accept: 'text/html,text/plain,text/markdown,application/xml,text/xml,*/*;q=0.1',
-        'User-Agent': USER_AGENT,
-      },
+    const response = await client.get(plannedResource.url, {
+      maxBytes: maxBytesPerResponse,
+      truncate: true,
+      acceptErrorStatus: true,
+      timeoutMs,
+      accept: 'text/html,text/plain,text/markdown,application/xml,text/xml,*/*;q=0.1',
     });
-    status = response.statusCode;
-    contentType = normalizeContentType(readHeaderValue(response.headers['content-type']));
-    etag = normalizeFreshnessHeaderValue(readHeaderValue(response.headers.etag));
-    lastModified = normalizeFreshnessHeaderValue(
-      readHeaderValue(response.headers['last-modified'])
-    );
-    const readBody = await readBodyWithLimit(response.body, maxBytesPerResponse);
-    byteSize = readBody.byteSize;
-    truncated = readBody.truncated;
 
     return {
       resource: {
         url: plannedResource.url,
-        status,
-        contentType,
-        byteSize,
-        truncated,
+        status: response.status,
+        contentType: normalizeContentType(response.contentType ?? null),
+        byteSize: response.body.byteLength,
+        truncated: response.truncated,
         sourceRole: plannedResource.sourceRole,
         freshness: {
           observedAt,
-          etag,
-          lastModified,
+          etag: response.etag ?? null,
+          lastModified: response.lastModified ?? null,
         },
       },
-      text: readBody.text,
+      text: response.body.toString('utf-8'),
       error: null,
     };
   } catch (error) {
-    if (error instanceof BodyReadError) {
-      byteSize = error.byteSize;
-      truncated = error.truncated;
-    }
-
     return {
       resource: {
         url: plannedResource.url,
-        status,
-        contentType,
-        byteSize,
-        truncated,
+        status: null,
+        contentType: null,
+        byteSize: 0,
+        truncated: false,
         sourceRole: plannedResource.sourceRole,
-        freshness: {
-          observedAt,
-          etag,
-          lastModified,
-        },
+        freshness: { observedAt, etag: null, lastModified: null },
       },
       text: null,
-      error: timedOut ? `Timed out after ${timeoutMs} ms` : formatFetchError(error),
+      error: errorMessage(error),
     };
-  } finally {
-    clearTimeout(timeout);
   }
-}
-
-async function readBodyWithLimit(
-  body: AsyncIterable<Buffer | Uint8Array | string> & { destroy?: () => void },
-  maxBytes: number
-): Promise<ReadBodyResult> {
-  const chunks: Buffer[] = [];
-  let byteSize = 0;
-  let truncated = false;
-
-  try {
-    for await (const chunk of body) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      const remainingBytes = maxBytes - byteSize;
-
-      if (remainingBytes > 0) {
-        const retained =
-          buffer.byteLength > remainingBytes ? buffer.subarray(0, remainingBytes) : buffer;
-        chunks.push(retained);
-        byteSize += retained.byteLength;
-      }
-
-      if (buffer.byteLength > remainingBytes) {
-        truncated = true;
-        body.destroy?.();
-        break;
-      }
-    }
-  } catch (error) {
-    throw new BodyReadError(formatFetchError(error), byteSize, truncated);
-  }
-
-  return {
-    text: Buffer.concat(chunks, byteSize).toString('utf-8'),
-    byteSize,
-    truncated,
-  };
 }
 
 export function extractCandidatesFromResource(options: {
@@ -1090,14 +935,6 @@ function isSupportedContentType(role: WebsiteResourceRole, contentType: string |
   }
 }
 
-function readHeaderValue(value: string | string[] | undefined): string | null {
-  if (value === undefined) {
-    return null;
-  }
-
-  return Array.isArray(value) ? (value[0] ?? null) : value;
-}
-
 function normalizeContentType(value: string | null): string | null {
   if (value === null) {
     return null;
@@ -1106,16 +943,6 @@ function normalizeContentType(value: string | null): string | null {
   const mediaType = value.split(';')[0]?.trim().toLowerCase();
 
   return mediaType === '' || mediaType === undefined ? null : mediaType;
-}
-
-function normalizeFreshnessHeaderValue(value: string | null): string | null {
-  if (value === null) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-
-  return trimmed === '' ? null : trimmed;
 }
 
 function formatContentTypeForWarning(contentType: string | null): string {
@@ -1225,8 +1052,4 @@ function resolvePositiveSafeInteger(
   }
 
   return value;
-}
-
-function formatFetchError(error: unknown): string {
-  return errorMessage(error);
 }
