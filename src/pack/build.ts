@@ -44,6 +44,7 @@ import {
   sourceUsesNetwork,
   type PackSelection,
   type SelectedFile,
+  type SelectedPage,
   type SourceAcquisition,
 } from '../sources/acquire.js';
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
@@ -69,6 +70,7 @@ import {
   type PackManifest,
 } from './manifest.js';
 import { collectHeadings, convertMarkdownPage, type PackFileRef } from './markdown.js';
+import { renderSourcePage } from './render-ir.js';
 import { verifyPackFiles } from './verify.js';
 
 const STAGING_DIR = '.staging';
@@ -611,12 +613,6 @@ async function readUtf8(selected: SelectedFile): Promise<string> {
   }
 }
 
-const UNSUPPORTED_FORMATS: Readonly<Record<string, string>> = {
-  rst: 'reStructuredText',
-  html: 'HTML',
-  openapi: 'OpenAPI',
-};
-
 async function writeStagedFile(
   stagingDir: string,
   path: string,
@@ -668,22 +664,48 @@ async function buildPack(
         ? selected.file.sourceLabel
         : undefined,
   });
+
+  // Render every page first: an OpenAPI document expands to pages named after
+  // its tags, and links anywhere in the pack may point at them. Each of those
+  // pages answers links by its own path (`<spec stem>/<tag>.md`), as if it
+  // were a file at the origin.
+  const units: { page: SelectedPage; ref: PackFileRef; text: string }[] = [];
+  const renderWarnings: string[] = [];
+  for (const page of pages) {
+    if (page.format === 'markdown' || page.format === 'mdx') {
+      units.push({ page, ref: fileRef(page), text: await readUtf8(page) });
+      continue;
+    }
+
+    const rendered = await renderSourcePage(page);
+    renderWarnings.push(...rendered.warnings);
+    for (const unit of rendered.pages) {
+      const ref = fileRef(page);
+      if (page.format === 'openapi') {
+        const mountRoot = posix.join('pages', recipe.sources[page.sourceIndex]?.mount ?? '');
+        const sourcePath = posix.relative(mountRoot, unit.outputPath);
+        const base = ref.localPath?.slice(0, ref.localPath.length - ref.sourcePath.length);
+        Object.assign(ref, {
+          sourcePath,
+          url: undefined,
+          localPath: base === undefined ? undefined : `${base}${sourcePath}`,
+        });
+      }
+      units.push({ page, ref: { ...ref, outputPath: unit.outputPath }, text: unit.text });
+    }
+  }
+
   const rewriteLinks = createPackLinkRewriter({
     recipe,
     origins,
-    pages: pages.map(fileRef),
+    // The OpenAPI document itself stays a link target too (its index page).
+    pages: [
+      ...pages.filter((page) => page.format === 'openapi').map(fileRef),
+      ...units.map((unit) => unit.ref),
+    ],
     passthrough: passthrough.map(fileRef),
     inventories: acquisitions.map((acquisition) => acquisition.inventory),
   });
-
-  for (const page of pages) {
-    const name = UNSUPPORTED_FORMATS[page.format];
-    if (name !== undefined) {
-      throw new ConfigError(
-        `${page.file.sourceLabel}: ${name} pages are not supported yet; exclude the file or carry it with "passthrough".`
-      );
-    }
-  }
 
   await mkdir(join(packsDir, STAGING_DIR), { recursive: true });
   const stagingDir = join(packsDir, STAGING_DIR, `${resolved.id}-${randomSuffix()}`);
@@ -695,6 +717,7 @@ async function buildPack(
     const warnings = [
       ...acquisitions.flatMap((acquisition) => acquisition.warnings),
       ...selection.warnings,
+      ...renderWarnings,
     ];
     const transformCounts = new Map<TransformName, number>(
       recipe.sources.flatMap((source) => source.transforms.map((name) => [name, 0] as const))
@@ -702,29 +725,45 @@ async function buildPack(
     const unknownComponents = new Map<string, number>();
     const links: PackManifest['links'] = { rewritten: 0, external: 0, unresolved: [] };
     let plainTextConversions = 0;
+    // Selection cannot see the tag pages of an OpenAPI document: check those
+    // paths against every other page here.
+    const pagePaths = new Map<string, string>();
 
-    for (const page of pages) {
+    for (const { page, ref: unit, text } of units) {
       const source = recipe.sources[page.sourceIndex];
       if (source === undefined) {
         throw new Error(`Page ${page.outputPath} has no source.`);
       }
 
+      const folded = unit.outputPath.normalize('NFC').toLowerCase();
+      const previous = pagePaths.get(folded);
+      if (previous !== undefined) {
+        throw new ConfigError(
+          `${previous} and ${page.file.sourceLabel} would both be written to ${unit.outputPath}; exclude one of them or give a source a different "mount".`
+        );
+      }
+      pagePaths.set(folded, page.file.sourceLabel);
+
       const result = convertMarkdownPage({
-        text: await readUtf8(page),
+        text,
         syntax: page.format === 'mdx' ? 'mdx' : 'markdown',
         sourceIndex: page.sourceIndex,
-        sourcePath: page.file.path,
-        outputPath: page.outputPath,
+        sourcePath: unit.sourcePath,
+        outputPath: unit.outputPath,
         transforms: source.transforms,
-        provenance: { packId: resolved.id, version: recipe.version, source: page.file.sourceLabel },
+        provenance: {
+          packId: resolved.id,
+          version: recipe.version,
+          source: page.file.sourceLabel,
+        },
         rewriteLinks,
       });
 
-      await writeStagedFile(stagingDir, page.outputPath, (target) =>
+      await writeStagedFile(stagingDir, unit.outputPath, (target) =>
         writeTextFileSafely(target, result.text)
       );
       outputs.push({
-        path: page.outputPath,
+        path: unit.outputPath,
         kind: 'page',
         sha256: sha256Prefixed(result.text),
         bytes: Buffer.byteLength(result.text, 'utf-8'),
@@ -742,7 +781,7 @@ async function buildPack(
       links.rewritten += result.links.rewritten;
       links.external += result.links.external;
       links.unresolved.push(
-        ...result.links.unresolved.map((entry) => ({ page: page.outputPath, ...entry }))
+        ...result.links.unresolved.map((entry) => ({ page: unit.outputPath, ...entry }))
       );
       plainTextConversions += result.links.plainTextConversions;
     }

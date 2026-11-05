@@ -216,6 +216,7 @@ export class OpenApiFormatParser extends BaseParser {
       metadata.set('version', version);
     }
     metadata.set('title', title);
+    metadata.set('servers', collectServers(document, versionInfo));
 
     const root = createDocNode(
       DocNodeType.ROOT,
@@ -1345,6 +1346,34 @@ function groupOperationsByCategory(
         metadata,
       }
     );
+  });
+}
+
+/**
+ * The base URLs the document declares, one line each: OpenAPI `servers[].url`
+ * with its description, or Swagger's `schemes`, `host`, and `basePath`.
+ */
+function collectServers(document: ApiDocument, versionInfo: ApiVersionInfo): string[] {
+  if (versionInfo.sourceKind === 'swagger') {
+    const host = readTrimmedString(document.host);
+    if (host === undefined) {
+      return [];
+    }
+    const basePath = readTrimmedString(document.basePath) ?? '';
+    const schemes = readStringArray(document.schemes);
+    return (schemes.length > 0 ? schemes : ['https']).map(
+      (scheme) => `${scheme}://${host}${basePath}`
+    );
+  }
+
+  const servers = Array.isArray(document.servers) ? document.servers : [];
+  return servers.flatMap((server) => {
+    const url = isRecord(server) ? readTrimmedString(server.url) : undefined;
+    if (url === undefined || !isRecord(server)) {
+      return [];
+    }
+    const description = readTrimmedString(server.description);
+    return [description === undefined ? url : `${url} (${description})`];
   });
 }
 

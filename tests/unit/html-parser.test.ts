@@ -295,7 +295,7 @@ describe('static HTML parser foundation', () => {
     }
   });
 
-  it('preserves links as text and metadata without fetching linked resources or executing scripts', async () => {
+  it('keeps links as Markdown links and metadata without fetching linked resources or executing scripts', async () => {
     const dir = await createTempDir();
     const sourcePath = join(dir, 'index.html');
     const linkedPath = join(dir, 'linked.html');
@@ -314,7 +314,7 @@ describe('static HTML parser foundation', () => {
     const root = await new HtmlFormatParser().parse(sourcePath);
     const parsedText = collectText(root);
 
-    expect(parsedText).toContain('Read linked page (./linked.html).');
+    expect(parsedText).toContain('Read [linked page](./linked.html).');
     expect(parsedText).not.toContain('Linked Secret');
     expect(parsedText).not.toContain('Fetched content');
     expect(parsedText).not.toContain('EXECUTED');

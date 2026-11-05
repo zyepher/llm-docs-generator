@@ -474,7 +474,7 @@ describe('syncPacks', () => {
     expect(report.packs[0]?.warnings).toContain(manifest.warnings[0]);
   });
 
-  it('applies mount, records transforms, and reports unsupported formats clearly', async () => {
+  it('applies mount, records transforms, and reports unsupported sources clearly', async () => {
     const root = await makeProject(
       {
         demo: {
@@ -503,11 +503,6 @@ describe('syncPacks', () => {
       { name: 'strip-html-comments', pages: 1 },
       { name: 'strip-mintlify-banner', pages: 0 },
     ]);
-
-    await writeFile(join(root, 'docs', 'c.rst'), 'Title\n=====\n');
-    expect((await syncPacks(root, undefined)).packs[0]?.error).toMatch(
-      /docs\/c\.rst: reStructuredText pages are not supported yet/
-    );
 
     await setPacks(root, {
       demo: { ...PACK, sources: [{ type: 'git', repo: 'https://github.com/a/b', ref: 'v1' }] },
