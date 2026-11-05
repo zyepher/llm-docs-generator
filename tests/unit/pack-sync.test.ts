@@ -86,7 +86,12 @@ const DOCS = {
   'docs/guide/api.mdx': "import X from 'x'\n\n# API\n\n<Note>Careful.</Note>\n",
   'docs/notes.txt': 'not a page',
 };
-const PACK = { title: 'Demo', version: '1.0.0', sources: [{ type: 'local', path: 'docs' }] };
+const PACK = {
+  title: 'Demo',
+  version: '1.0.0',
+  license: 'MIT',
+  sources: [{ type: 'local', path: 'docs' }],
+};
 const fixedClock =
   (iso: string): SyncOptions['now'] =>
   () =>
@@ -506,11 +511,13 @@ describe('syncPacks', () => {
     );
 
     await setPacks(root, {
-      demo: { ...PACK, sources: [{ type: 'git', repo: 'https://github.com/a/b', ref: 'v1' }] },
+      demo: { ...PACK, sources: [{ type: 'git', repo: 'https://127.0.0.1/a/b', ref: 'v1' }] },
     });
-    expect((await syncPacks(root, undefined)).packs[0]?.error).toMatch(
-      /"git" sources are not supported yet/
-    );
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({
+      status: 'failed',
+      exitCode: 2,
+      error: expect.stringMatching(/127\.0\.0\.1 is a loopback address/),
+    });
   });
 
   it('refuses to overwrite a directory that is not a pack, and names unknown ids', async () => {
@@ -641,7 +648,7 @@ describe('verifyPacks', () => {
     expect(problems(report)[0]).toBe(
       "demo manifest-schema fail: manifest.json manifest.json is missing; run 'llm-docs sync demo'"
     );
-    expect(report.results.filter((result) => result.status === 'skipped')).toHaveLength(5);
+    expect(report.results.filter((result) => result.status === 'skipped')).toHaveLength(6);
 
     await writeFile(join(root, 'llm-docs.json'), '{"schemaVersion":3,"packs":{},"oops":1}');
     expect(problems(await verifyPacks(root, undefined))).toEqual([

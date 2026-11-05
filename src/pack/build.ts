@@ -55,8 +55,8 @@ import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
+import { resolvePackLicense } from './license.js';
 import {
-  licenseStatusFor,
   MANIFEST_FILE_NAME,
   ManifestError,
   readPackManifest,
@@ -766,7 +766,11 @@ async function buildPack(
       );
     }
 
-    const declared = recipe.license;
+    const license = resolvePackLicense(
+      recipe.license,
+      acquisitions.map((acquisition) => acquisition.license)
+    );
+    warnings.push(...license.warnings);
     const manifestWithoutOutputs: Omit<PackManifest, 'outputs'> = {
       schemaVersion: 3,
       tool: { name: TOOL_NAME, version: TOOL_VERSION },
@@ -776,8 +780,7 @@ async function buildPack(
       recipeHash: resolved.recipeHash,
       acquiredAt,
       origins,
-      // Phase 2c: license detection for git sources fills `detected` (spec 4.10).
-      license: { declared, detected: null, status: licenseStatusFor(declared) },
+      license: license.license,
       sources,
       links,
       transforms: [...transformCounts.entries()].map(([name, count]) => ({ name, pages: count })),

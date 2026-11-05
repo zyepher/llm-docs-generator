@@ -108,11 +108,22 @@ function parsedUrl(value: string): URL | undefined {
   }
 }
 
+/**
+ * https, or plain http to a loopback literal: the network policy (spec 4.1)
+ * fetches the latter only under LLM_DOCS_ALLOW_PRIVATE_NETWORK=1, for tests.
+ */
+function isDocsUrl(url: URL): boolean {
+  return (
+    url.protocol === 'https:' ||
+    (url.protocol === 'http:' && /^(?:127(?:\.\d{1,3}){3}|\[::1\]|localhost)$/i.test(url.hostname))
+  );
+}
+
 /** An https URL without credentials; `{version}`-style placeholders may appear in it. */
 const httpsUrlSchema = z.string().refine(
   (value) => {
     const url = parsedUrl(value);
-    return url !== undefined && url.protocol === 'https:' && !hasCredentials(url);
+    return url !== undefined && isDocsUrl(url) && !hasCredentials(url);
   },
   { error: 'must be an https:// URL without credentials' }
 );
@@ -812,7 +823,7 @@ function resolveUrlEntries(
     const url = substitute(typeof entry === 'string' ? entry : entry.url, where);
     const parsed = parsedUrl(url);
 
-    if (parsed === undefined || parsed.protocol !== 'https:') {
+    if (parsed === undefined || !isDocsUrl(parsed)) {
       throw new ConfigError(`${CONFIG_FILE_NAME} ${where}: "${url}" is not an https:// URL.`);
     }
 
@@ -849,6 +860,11 @@ function storedPathForUrl(url: URL): string {
     pathname = url.pathname;
   }
 
+  return storedPathForPathname(pathname);
+}
+
+/** The stored path for a percent-decoded URL pathname (spec 2.3); llms-txt sources share it. */
+export function storedPathForPathname(pathname: string): string {
   if (pathname.endsWith('/')) {
     return `${pathname}index.md`.replace(/^\/+/, '');
   }

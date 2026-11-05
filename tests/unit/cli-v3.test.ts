@@ -135,7 +135,11 @@ describe('llm-docs v3 CLI', () => {
       'links',
       'recipe',
       'lockfile',
+      'license',
     ]);
+    // A local pack with no declared license warns, and fails only under --strict.
+    expect(verify.stderr).toContain('demo license warn: license unknown');
+    expect((await runCli(root, ['verify', '--strict'])).code).toBe(1);
 
     await writeFile(join(root, 'agent-docs', 'demo', 'pages', 'index.md'), 'tampered\n');
     const failed = await runCli(root, ['verify', 'demo']);
@@ -244,9 +248,9 @@ describe('llm-docs v3 CLI', () => {
       capabilities.commands[1].options.map((option: { flags: string }) => option.flags)
     ).toContain('--local <path>');
     expect(capabilities.sourceTypes).toEqual([
-      { type: 'git', supported: false },
-      { type: 'urls', supported: false },
-      { type: 'llms-txt', supported: false },
+      { type: 'git', supported: true },
+      { type: 'urls', supported: true },
+      { type: 'llms-txt', supported: true },
       { type: 'local', supported: true },
     ]);
     expect(capabilities.limits).toMatchObject({ maxFiles: 5000 });

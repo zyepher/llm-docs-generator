@@ -3,8 +3,8 @@
  * results, per pack and per project. Read-only and offline.
  *
  * Implemented here: config-schema, manifest-schema, outputs, unlisted-files,
- * links, recipe, lockfile. The remaining checks register in PACK_CHECKS and
- * PROJECT_CHECKS: `license` (Phase 2c), `conversion` (Phase 2d), `citations`
+ * links, recipe, lockfile, license. The remaining checks register in
+ * PACK_CHECKS and PROJECT_CHECKS: `conversion` (Phase 2d), `citations`
  * (Phase 5), `agent-block` (Phase 4).
  */
 
@@ -400,10 +400,27 @@ async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
   }
 }
 
+/** Spec 4.10: an unknown or proprietary license warns, and fails under --strict. */
+async function checkLicense(context: PackCheckContext): Promise<CheckOutcome> {
+  const { status, declared } = context.manifest.license;
+
+  if (status !== 'unknown' && status !== 'proprietary') {
+    return [];
+  }
+
+  const message =
+    status === 'proprietary'
+      ? 'license is proprietary: check the terms before sharing this pack'
+      : declared === null
+        ? 'license unknown: no license file was detected; set "license" in the recipe once you know the terms'
+        : `license unknown: "${declared}" is not a recognized SPDX id`;
+
+  return [{ status: context.options.strict === true ? 'fail' : 'warn', message }];
+}
+
 /**
  * Per-pack checks after `manifest-schema`, in report order. Later phases add
- * theirs here: `citations` (Phase 5), `conversion` (Phase 2d), `license`
- * (Phase 2c, warn for unknown and proprietary, fail under --strict).
+ * theirs here: `citations` (Phase 5), `conversion` (Phase 2d).
  */
 const PACK_CHECKS: readonly PackCheck[] = [
   { name: 'outputs', run: checkOutputs },
@@ -411,6 +428,7 @@ const PACK_CHECKS: readonly PackCheck[] = [
   { name: 'links', run: checkLinks },
   { name: 'recipe', run: checkRecipe },
   { name: 'lockfile', run: checkLockfile },
+  { name: 'license', run: checkLicense },
 ];
 
 /** The pack-file checks a build runs on its staging directory and a sync runs to decide skipping. */
