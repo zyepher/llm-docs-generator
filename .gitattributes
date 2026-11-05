@@ -1,0 +1,3 @@
+# Check out text files with LF on every platform (Windows runners default to
+# CRLF), so Prettier's endOfLine check and byte-level fixtures behave the same.
+* text=auto eol=lf
