@@ -4,10 +4,10 @@ import type { TransformName } from '../../src/config/project.js';
 import {
   collectHeadings,
   convertMarkdownPage,
-  createPackLinkRewriter,
   findLinkTargets,
   headingAnchors,
   scanMarkdownRegions,
+  type LinkRewriter,
   type MarkdownRegionKind,
   type MarkdownSyntaxOptions,
 } from '../../src/pack/markdown.js';
@@ -164,6 +164,23 @@ describe('findLinkTargets', () => {
     }
   });
 
+  it('reports the whole construct and its label', () => {
+    const text =
+      '![alt](<a b.png> "t") <a class="x" href=\'h.md\'>\n\n> [def]: <./d.md> "T"\n<https://x.dev>';
+    expect(
+      findLinkTargets(text).map((link) => [
+        link.kind,
+        text.slice(link.span.start, link.span.end),
+        text.slice(link.label.start, link.label.end),
+      ])
+    ).toEqual([
+      ['image', '![alt](<a b.png> "t")', 'alt'],
+      ['html-attribute', "href='h.md'", 'href'],
+      ['reference-definition', '[def]: <./d.md>', 'def'],
+      ['autolink', '<https://x.dev>', 'https://x.dev'],
+    ]);
+  });
+
   it('ignores links inside HTML comments', () => {
     expect(findLinkTargets('<!-- [a](a.md) <a href="b.md"> -->')).toEqual([]);
   });
@@ -192,21 +209,12 @@ describe('headings', () => {
   });
 });
 
-const identity = createPackLinkRewriter({
-  recipe: {
-    title: 't',
-    description: null,
-    dependency: null,
-    version: '1',
-    sources: [],
-    site: null,
-    layout: { combined: false },
-    license: null,
-    limits: { maxFileBytes: 1 },
-  },
-  origins: [],
-  pages: [],
-  passthrough: [],
+const identity: LinkRewriter = (page) => ({
+  text: page.text,
+  rewritten: 0,
+  external: 0,
+  unresolved: [],
+  plainTextConversions: 0,
 });
 
 function convert(

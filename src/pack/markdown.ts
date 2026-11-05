@@ -816,12 +816,29 @@ function mapOutsideCode(
 export type LinkTargetKind =
   'inline' | 'image' | 'reference-definition' | 'autolink' | 'html-attribute';
 
+/** A half-open `[start, end)` range of the text. */
+export interface TextRange {
+  start: number;
+  end: number;
+}
+
 /** One link destination in a page; `start`/`end` delimit `target` in the text. */
 export interface LinkTarget {
   kind: LinkTargetKind;
   target: string;
   start: number;
   end: number;
+  /**
+   * The whole construct: `[label](target "title")`, `![alt](target)`, a
+   * definition from its `[` through its destination, `<url>`, or one HTML
+   * attribute `name="value"`.
+   */
+  span: TextRange;
+  /**
+   * The link text, image alt, or definition label (inside the brackets); the
+   * attribute name for an HTML attribute; the target itself for an autolink.
+   */
+  label: TextRange;
 }
 
 /**
@@ -873,11 +890,15 @@ export function findLinkTargets(text: string, options: MarkdownSyntaxOptions = {
       const autolink = kind === KIND_TEXT ? AUTOLINK.exec(slice) : null;
 
       if (autolink !== null) {
+        const start = index + 1;
+        const end = index + autolink[0].length - 1;
         targets.push({
           kind: 'autolink',
           target: autolink[0].slice(1, -1),
-          start: index + 1,
-          end: index + autolink[0].length - 1,
+          start,
+          end,
+          span: { start: index, end: end + 1 },
+          label: { start, end },
         });
         index += autolink[0].length;
         continue;
@@ -913,10 +934,19 @@ function htmlAttributeTargets(tag: JsxTag): LinkTarget[] {
       continue;
     }
 
-    const valueOffset =
-      match.index + match[0].length - value.length - (match[4] === undefined ? 1 : 0);
+    const name = match[1] ?? '';
+    const quoted = match[4] === undefined ? 1 : 0;
+    const valueOffset = match.index + match[0].length - value.length - quoted;
     const start = attributesOffset + valueOffset;
-    targets.push({ kind: 'html-attribute', target: value, start, end: start + value.length });
+    const nameStart = attributesOffset + match.index + match[0].indexOf(name);
+    targets.push({
+      kind: 'html-attribute',
+      target: value,
+      start,
+      end: start + value.length,
+      span: { start: nameStart, end: start + value.length + quoted },
+      label: { start: nameStart, end: nameStart + name.length },
+    });
   }
 
   return targets;
@@ -980,11 +1010,19 @@ function matchInlineLink(text: string, kinds: Uint8Array, start: number): LinkTa
         target: text.slice(destination.start, destination.end),
         start: destination.start,
         end: destination.end,
+        span: { start, end: destination.close + 1 },
+        label: { start: open + 1, end: close },
       };
 }
 
-/** CommonMark inline destination after `(` at `open`: `<...>` or a balanced run, then an optional title and `)`. */
-function parseInlineDestination(text: string, open: number): { start: number; end: number } | null {
+/**
+ * CommonMark inline destination after `(` at `open`: `<...>` or a balanced
+ * run, then an optional title and `)` (at `close`).
+ */
+function parseInlineDestination(
+  text: string,
+  open: number
+): { start: number; end: number; close: number } | null {
   let index = open + 1;
   const skipSpace = (): void => {
     let newlines = 0;
@@ -1054,7 +1092,7 @@ function parseInlineDestination(text: string, open: number): { start: number; en
     skipSpace();
   }
 
-  return text[index] === ')' ? { start, end } : null;
+  return text[index] === ')' ? { start, end, close: index } : null;
 }
 
 const REFERENCE_DEFINITION =
@@ -1070,8 +1108,17 @@ function referenceDefinitionTargets(text: string, kinds: Uint8Array): LinkTarget
 
     const prefix = match[1] ?? '';
     const value = match[2] ?? match[3] ?? '';
-    const start = match.index + prefix.length + (match[2] === undefined ? 0 : 1);
-    targets.push({ kind: 'reference-definition', target: value, start, end: start + value.length });
+    const angled = match[2] === undefined ? 0 : 1;
+    const start = match.index + prefix.length + angled;
+    const open = match.index + prefix.indexOf('[');
+    targets.push({
+      kind: 'reference-definition',
+      target: value,
+      start,
+      end: start + value.length,
+      span: { start: open, end: start + value.length + angled },
+      label: { start: open + 1, end: match.index + prefix.lastIndexOf(']:') },
+    });
   }
 
   return targets;
@@ -1625,7 +1672,7 @@ const PAGE_TRANSFORMS: Readonly<Record<TransformName, PageTransform>> = {
 };
 
 // ---------------------------------------------------------------------------
-// Link rewriting seam (spec 4.5, Phase 2b)
+// Link rewriting seam (spec 4.5; the rewriter is src/pack/links.ts)
 // ---------------------------------------------------------------------------
 
 /** A page or passthrough file of the pack being built. */
@@ -1635,6 +1682,10 @@ export interface PackFileRef {
   sourcePath: string;
   /** Pack-relative POSIX output path. */
   outputPath: string;
+  /** Upstream URL of the file (repository blob URL, fetched URL); absent for local files. */
+  url?: string | undefined;
+  /** Project-relative POSIX path, for files of local sources. */
+  localPath?: string | undefined;
 }
 
 /** Everything a rewriter may consult: the recipe (site, aliases), origins, and every output. */
@@ -1643,6 +1694,12 @@ export interface PackLinkContext {
   origins: readonly ManifestOrigin[];
   pages: readonly PackFileRef[];
   passthrough: readonly PackFileRef[];
+  /**
+   * Per source index: every origin-relative file path present at the origin,
+   * selected or not, when the acquirer can list them. A link to an excluded
+   * page then goes upstream (or is reported as such) instead of being dead.
+   */
+  inventories?: readonly (readonly string[] | undefined)[];
 }
 
 export interface LinkRewriteInput extends PackFileRef {
@@ -1661,21 +1718,6 @@ export interface LinkRewriteResult {
 }
 
 export type LinkRewriter = (page: LinkRewriteInput) => LinkRewriteResult;
-
-/**
- * The rewriter for one pack build. Phase 2b replaces this identity body with
- * spec 4.5 (in-pack targets, site paths and aliases, pinned blob URLs, the
- * plain-text last resort), finding links with `findLinkTargets`.
- */
-export function createPackLinkRewriter(_context: PackLinkContext): LinkRewriter {
-  return (page) => ({
-    text: page.text,
-    rewritten: 0,
-    external: 0,
-    unresolved: [],
-    plainTextConversions: 0,
-  });
-}
 
 // ---------------------------------------------------------------------------
 // The page pipeline

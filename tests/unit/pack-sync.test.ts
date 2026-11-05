@@ -411,31 +411,35 @@ describe('syncPacks', () => {
     }
   );
 
-  it('fails a page with a dead relative link, and passes once the target is carried', async () => {
+  it('turns a dead relative link into plain text, and links the target once it is carried', async () => {
     const root = await makeProject(
       { demo: PACK },
       { 'docs/a.md': '# A\n\n![diagram](img/d.png) and [code](`x`)\n', 'docs/img/d.png': 'png' }
     );
-    const failed = await syncPacks(root, undefined);
-    expect(failed.packs[0]?.error).toMatch(
-      /pages\/a\.md: link target is not a file in the pack: img\/d\.png/
+    const built = await syncPacks(root, undefined);
+    const page = join(root, 'agent-docs', 'demo', 'pages', 'a.md');
+    let manifest = await readPackManifest(join(root, 'agent-docs', 'demo'));
+
+    expect(built.packs[0]?.status).toBe('built');
+    expect(await readFile(page, 'utf-8')).toContain(
+      '[diagram] (unresolved: img/d.png) and [code] (unresolved: `x`)'
     );
-    expect(await readdir(join(root, 'agent-docs'))).toEqual(['.gitignore']);
+    expect(manifest.links.unresolved).toEqual([
+      { page: 'pages/a.md', target: '`x`', reason: 'not-found' },
+      { page: 'pages/a.md', target: 'img/d.png', reason: 'not-in-pack' },
+    ]);
+    expect(manifest.warnings).toContain(
+      '2 unresolvable relative links were converted to plain text.'
+    );
 
     await setPacks(root, {
       demo: { ...PACK, sources: [{ type: 'local', path: 'docs', passthrough: ['img/**'] }] },
     });
-    // The image lands under files/, so the page link still misses: link rewriting is Phase 2b.
-    expect((await syncPacks(root, undefined)).packs[0]?.status).toBe('failed');
-
-    await setPacks(root, {
-      demo: {
-        ...PACK,
-        sources: [{ type: 'local', path: 'docs', exclude: ['img/**'], include: ['**/*.md'] }],
-      },
-    });
-    await writeFile(join(root, 'docs', 'a.md'), '# A\n');
     expect((await syncPacks(root, undefined)).packs[0]?.status).toBe('built');
+    manifest = await readPackManifest(join(root, 'agent-docs', 'demo'));
+    expect(await readFile(page, 'utf-8')).toContain('![diagram](../files/img/d.png)');
+    expect(manifest.links.unresolved.map((entry) => entry.target)).toEqual(['`x`']);
+    expect((await verifyPacks(root, undefined, { strict: true })).ok).toBe(true);
   });
 
   it('carries passthrough files byte-identical and warns about unhandled included files', async () => {

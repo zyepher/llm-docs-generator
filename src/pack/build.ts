@@ -55,6 +55,7 @@ import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
+import { createPackLinkRewriter } from './links.js';
 import {
   licenseStatusFor,
   MANIFEST_FILE_NAME,
@@ -67,7 +68,7 @@ import {
   type ManifestSourceEntry,
   type PackManifest,
 } from './manifest.js';
-import { collectHeadings, convertMarkdownPage, createPackLinkRewriter } from './markdown.js';
+import { collectHeadings, convertMarkdownPage, type PackFileRef } from './markdown.js';
 import { verifyPackFiles } from './verify.js';
 
 const STAGING_DIR = '.staging';
@@ -657,16 +658,22 @@ async function buildPack(
   const origins = acquisitions.map((acquisition) => acquisition.origin);
   const pages = selection.files.filter((selected) => selected.kind === 'page');
   const passthrough = selection.files.filter((selected) => selected.kind === 'passthrough');
-  const fileRef = (selected: SelectedFile) => ({
+  const fileRef = (selected: SelectedFile): PackFileRef => ({
     sourceIndex: selected.sourceIndex,
     sourcePath: selected.file.path,
     outputPath: selected.outputPath,
+    url: selected.file.url,
+    localPath:
+      recipe.sources[selected.sourceIndex]?.type === 'local'
+        ? selected.file.sourceLabel
+        : undefined,
   });
   const rewriteLinks = createPackLinkRewriter({
     recipe,
     origins,
     pages: pages.map(fileRef),
     passthrough: passthrough.map(fileRef),
+    inventories: acquisitions.map((acquisition) => acquisition.inventory),
   });
 
   for (const page of pages) {
