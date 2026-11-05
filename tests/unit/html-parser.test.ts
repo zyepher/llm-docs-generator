@@ -4,6 +4,8 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { canCreateSymlinks } from '../helpers/symlinks.js';
+
 import { FormatDetector } from '../../src/core/detector.js';
 import {
   ContentBlockType,
@@ -319,65 +321,71 @@ describe('static HTML parser foundation', () => {
     expect(root.metadata.get('links')).toEqual([{ text: 'linked page', href: './linked.html' }]);
   });
 
-  it('detects and parses nested directories deterministically without following symlinks', async () => {
-    const dir = await createTempDir();
-    const sourceDir = join(dir, 'docs');
-    const nestedDir = join(sourceDir, 'api');
-    const symlinkTarget = join(dir, 'external');
+  it.skipIf(!canCreateSymlinks)(
+    'detects and parses nested directories deterministically without following symlinks',
+    async () => {
+      const dir = await createTempDir();
+      const sourceDir = join(dir, 'docs');
+      const nestedDir = join(sourceDir, 'api');
+      const symlinkTarget = join(dir, 'external');
 
-    await mkdir(nestedDir, { recursive: true });
-    await mkdir(symlinkTarget, { recursive: true });
-    await writeFile(join(sourceDir, 'zoo.html'), '<title>Zoo</title><p>Zed.</p>', 'utf-8');
-    await writeFile(join(nestedDir, 'api.htm'), '<title>API</title><p>Reference.</p>', 'utf-8');
-    await writeFile(join(sourceDir, 'notes.txt'), '<title>Notes</title>', 'utf-8');
-    await writeFile(join(symlinkTarget, 'hidden.html'), '<title>Hidden</title>', 'utf-8');
-    await symlink(symlinkTarget, join(sourceDir, 'linked-docs'));
-    await symlink(join(symlinkTarget, 'hidden.html'), join(sourceDir, 'linked-file.html'));
+      await mkdir(nestedDir, { recursive: true });
+      await mkdir(symlinkTarget, { recursive: true });
+      await writeFile(join(sourceDir, 'zoo.html'), '<title>Zoo</title><p>Zed.</p>', 'utf-8');
+      await writeFile(join(nestedDir, 'api.htm'), '<title>API</title><p>Reference.</p>', 'utf-8');
+      await writeFile(join(sourceDir, 'notes.txt'), '<title>Notes</title>', 'utf-8');
+      await writeFile(join(symlinkTarget, 'hidden.html'), '<title>Hidden</title>', 'utf-8');
+      await symlink(symlinkTarget, join(sourceDir, 'linked-docs'));
+      await symlink(join(symlinkTarget, 'hidden.html'), join(sourceDir, 'linked-file.html'));
 
-    const parser = new HtmlFormatParser();
-    const detector = new FormatDetector();
+      const parser = new HtmlFormatParser();
+      const detector = new FormatDetector();
 
-    expect(await parser.detect(sourceDir)).toBe(true);
-    expect(await detector.detect(sourceDir)).toBe(FormatType.HTML);
+      expect(await parser.detect(sourceDir)).toBe(true);
+      expect(await detector.detect(sourceDir)).toBe(FormatType.HTML);
 
-    const root = await parser.parse(sourceDir);
-    const sourcePaths = root.metadata.get('sourcePaths');
+      const root = await parser.parse(sourceDir);
+      const sourcePaths = root.metadata.get('sourcePaths');
 
-    expect(root).toMatchObject({
-      type: DocNodeType.ROOT,
-      title: 'docs',
-    });
-    expect(root.metadata.get('format')).toBe('html');
-    expect(root.metadata.get('sourcePath')).toBe(sourceDir);
-    expect(root.metadata.get('sourceKind')).toBe('rendered-html-fallback');
-    expect(root.metadata.get('count')).toBe(2);
-    expect(sourcePaths).toEqual([join(nestedDir, 'api.htm'), join(sourceDir, 'zoo.html')]);
-    expect(root.children.map((child) => child.title)).toEqual(['API', 'Zoo']);
-    expect(collectText(root)).not.toContain('Hidden');
-  });
+      expect(root).toMatchObject({
+        type: DocNodeType.ROOT,
+        title: 'docs',
+      });
+      expect(root.metadata.get('format')).toBe('html');
+      expect(root.metadata.get('sourcePath')).toBe(sourceDir);
+      expect(root.metadata.get('sourceKind')).toBe('rendered-html-fallback');
+      expect(root.metadata.get('count')).toBe(2);
+      expect(sourcePaths).toEqual([join(nestedDir, 'api.htm'), join(sourceDir, 'zoo.html')]);
+      expect(root.children.map((child) => child.title)).toEqual(['API', 'Zoo']);
+      expect(collectText(root)).not.toContain('Hidden');
+    }
+  );
 
-  it('rejects non-HTML files and root symlinks through the facade and helper', async () => {
-    const dir = await createTempDir();
-    const textPath = join(dir, 'guide.txt');
-    const targetPath = join(dir, 'target.html');
-    const symlinkPath = join(dir, 'linked.html');
+  it.skipIf(!canCreateSymlinks)(
+    'rejects non-HTML files and root symlinks through the facade and helper',
+    async () => {
+      const dir = await createTempDir();
+      const textPath = join(dir, 'guide.txt');
+      const targetPath = join(dir, 'target.html');
+      const symlinkPath = join(dir, 'linked.html');
 
-    await writeFile(textPath, '<!doctype html><h1>Guide</h1>', 'utf-8');
-    await writeFile(targetPath, '<title>Linked</title>', 'utf-8');
-    await symlink(targetPath, symlinkPath);
+      await writeFile(textPath, '<!doctype html><h1>Guide</h1>', 'utf-8');
+      await writeFile(targetPath, '<title>Linked</title>', 'utf-8');
+      await symlink(targetPath, symlinkPath);
 
-    const parser = new HtmlFormatParser();
-    const detector = new FormatDetector();
+      const parser = new HtmlFormatParser();
+      const detector = new FormatDetector();
 
-    expect(await parser.detect(textPath)).toBe(false);
-    await expect(parser.parse(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
-    await expect(parseHtmlFile(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
-    await expect(detector.detect(textPath)).rejects.toThrow(/Unable to detect format/);
+      expect(await parser.detect(textPath)).toBe(false);
+      await expect(parser.parse(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
+      await expect(parseHtmlFile(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
+      await expect(detector.detect(textPath)).rejects.toThrow(/Unable to detect format/);
 
-    expect(await parser.detect(symlinkPath)).toBe(false);
-    await expect(parser.parse(symlinkPath)).rejects.toThrow(/Invalid HTML source path/);
-    await expect(parseHtmlFile(symlinkPath)).rejects.toThrow(/Invalid HTML file path/);
-  });
+      expect(await parser.detect(symlinkPath)).toBe(false);
+      await expect(parser.parse(symlinkPath)).rejects.toThrow(/Invalid HTML source path/);
+      await expect(parseHtmlFile(symlinkPath)).rejects.toThrow(/Invalid HTML file path/);
+    }
+  );
 
   it('preserves nested list items with indentation (regression: nested lists dropped)', async () => {
     const dir = await createTempDir();

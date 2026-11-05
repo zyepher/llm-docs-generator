@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { canCreateSymlinks } from '../helpers/symlinks.js';
+
 import { FormatDetector } from '../../src/core/detector.js';
 import { ContentBlockType, DocNodeType, type DocNode } from '../../src/core/models.js';
 import { FormatType } from '../../src/parsers/base.js';
@@ -208,52 +210,55 @@ describe('markdown directory fixture', () => {
 });
 
 describe('markdown directory merging', () => {
-  it('merges .md and .mdx files in sorted path order under a root named for the directory', async () => {
-    const base = await createTempDir();
-    const source = join(base, 'docs-source');
-    await writeTree(source, {
-      'index.md': ['# Project Docs', '', 'Intro text.', '', '## Install', '', 'Run setup.'].join(
-        '\n'
-      ),
-      'guides/usage.mdx': [
-        "import { Note } from './Note'",
-        '',
-        '# Usage Guide',
-        '',
-        '<Note>Use the public API.</Note>',
-        '',
-        '## Example',
-        '',
-        '```tsx',
-        'export const example = <Widget />',
-        '```',
-      ].join('\n'),
-      'ignored.txt': '# Not parsed\n',
-    });
-    await writeFile(
-      join(base, 'outside-linked.md'),
-      '# Linked Secret\n\nThis must not be parsed.\n',
-      'utf-8'
-    );
-    await symlink(join(base, 'outside-linked.md'), join(source, 'linked.md'));
+  it.skipIf(!canCreateSymlinks)(
+    'merges .md and .mdx files in sorted path order under a root named for the directory',
+    async () => {
+      const base = await createTempDir();
+      const source = join(base, 'docs-source');
+      await writeTree(source, {
+        'index.md': ['# Project Docs', '', 'Intro text.', '', '## Install', '', 'Run setup.'].join(
+          '\n'
+        ),
+        'guides/usage.mdx': [
+          "import { Note } from './Note'",
+          '',
+          '# Usage Guide',
+          '',
+          '<Note>Use the public API.</Note>',
+          '',
+          '## Example',
+          '',
+          '```tsx',
+          'export const example = <Widget />',
+          '```',
+        ].join('\n'),
+        'ignored.txt': '# Not parsed\n',
+      });
+      await writeFile(
+        join(base, 'outside-linked.md'),
+        '# Linked Secret\n\nThis must not be parsed.\n',
+        'utf-8'
+      );
+      await symlink(join(base, 'outside-linked.md'), join(source, 'linked.md'));
 
-    const root = await new MarkdownFormatParser().parse(source);
+      const root = await new MarkdownFormatParser().parse(source);
 
-    expect(root).toMatchObject({ type: DocNodeType.ROOT, id: 'root', title: 'docs-source' });
-    expect(root.metadata.get('count')).toBe(2);
-    expect(root.children.map((child) => child.title)).toEqual(['Usage Guide', 'Project Docs']);
-    // Directory merging keeps H2s as sections; only single files map them to categories.
-    expect(root.children[1]?.children[0]).toMatchObject({
-      type: DocNodeType.SECTION,
-      title: 'Install',
-    });
+      expect(root).toMatchObject({ type: DocNodeType.ROOT, id: 'root', title: 'docs-source' });
+      expect(root.metadata.get('count')).toBe(2);
+      expect(root.children.map((child) => child.title)).toEqual(['Usage Guide', 'Project Docs']);
+      // Directory merging keeps H2s as sections; only single files map them to categories.
+      expect(root.children[1]?.children[0]).toMatchObject({
+        type: DocNodeType.SECTION,
+        title: 'Install',
+      });
 
-    const text = collectText(root);
-    expect(text).toContain('export const example = <Widget />');
-    expect(text).not.toContain("import { Note } from './Note'");
-    expect(text).not.toContain('Not parsed');
-    expect(text).not.toContain('Linked Secret');
-  });
+      const text = collectText(root);
+      expect(text).toContain('export const example = <Widget />');
+      expect(text).not.toContain("import { Note } from './Note'");
+      expect(text).not.toContain('Not parsed');
+      expect(text).not.toContain('Linked Secret');
+    }
+  );
 
   it('parses a nested DocC-style directory and keeps @-prefixed prose that is not a directive', async () => {
     const base = await createTempDir();

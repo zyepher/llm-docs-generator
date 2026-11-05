@@ -4,6 +4,8 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { canCreateSymlinks } from '../helpers/symlinks.js';
+
 import { FormatDetector } from '../../src/core/detector.js';
 import {
   ContentBlockType,
@@ -211,40 +213,43 @@ describe('reStructuredText parser foundation', () => {
     );
   });
 
-  it('detects and parses nested directories deterministically without following symlinks', async () => {
-    const dir = await createTempDir();
-    const sourceDir = join(dir, 'docs');
-    const nestedDir = join(sourceDir, 'api');
-    const symlinkTarget = join(dir, 'external');
+  it.skipIf(!canCreateSymlinks)(
+    'detects and parses nested directories deterministically without following symlinks',
+    async () => {
+      const dir = await createTempDir();
+      const sourceDir = join(dir, 'docs');
+      const nestedDir = join(sourceDir, 'api');
+      const symlinkTarget = join(dir, 'external');
 
-    await mkdir(nestedDir, { recursive: true });
-    await mkdir(symlinkTarget, { recursive: true });
-    await writeFile(join(sourceDir, 'tutorial.rst'), 'Tutorial\n========\n', 'utf-8');
-    await writeFile(join(nestedDir, 'index.rst'), 'API\n===\n', 'utf-8');
-    await writeFile(join(sourceDir, 'notes.txt'), 'Notes\n=====\n', 'utf-8');
-    await writeFile(join(symlinkTarget, 'hidden.rst'), 'Hidden\n======\n', 'utf-8');
-    await symlink(symlinkTarget, join(sourceDir, 'linked-docs'));
+      await mkdir(nestedDir, { recursive: true });
+      await mkdir(symlinkTarget, { recursive: true });
+      await writeFile(join(sourceDir, 'tutorial.rst'), 'Tutorial\n========\n', 'utf-8');
+      await writeFile(join(nestedDir, 'index.rst'), 'API\n===\n', 'utf-8');
+      await writeFile(join(sourceDir, 'notes.txt'), 'Notes\n=====\n', 'utf-8');
+      await writeFile(join(symlinkTarget, 'hidden.rst'), 'Hidden\n======\n', 'utf-8');
+      await symlink(symlinkTarget, join(sourceDir, 'linked-docs'));
 
-    const parser = new RstFormatParser();
-    const detector = new FormatDetector();
+      const parser = new RstFormatParser();
+      const detector = new FormatDetector();
 
-    expect(await parser.detect(sourceDir)).toBe(true);
-    expect(await detector.detect(sourceDir)).toBe(FormatType.RST);
+      expect(await parser.detect(sourceDir)).toBe(true);
+      expect(await detector.detect(sourceDir)).toBe(FormatType.RST);
 
-    const root = await parser.parse(sourceDir);
-    const sourcePaths = root.metadata.get('sourcePaths');
+      const root = await parser.parse(sourceDir);
+      const sourcePaths = root.metadata.get('sourcePaths');
 
-    expect(root).toMatchObject({
-      type: DocNodeType.ROOT,
-      title: 'docs',
-    });
-    expect(root.metadata.get('format')).toBe('rst');
-    expect(root.metadata.get('sourcePath')).toBe(sourceDir);
-    expect(root.metadata.get('count')).toBe(2);
-    expect(sourcePaths).toEqual([join(nestedDir, 'index.rst'), join(sourceDir, 'tutorial.rst')]);
-    expect(root.children.map((child) => child.title)).toEqual(['API', 'Tutorial']);
-    expect(collectText(root)).not.toContain('Hidden');
-  });
+      expect(root).toMatchObject({
+        type: DocNodeType.ROOT,
+        title: 'docs',
+      });
+      expect(root.metadata.get('format')).toBe('rst');
+      expect(root.metadata.get('sourcePath')).toBe(sourceDir);
+      expect(root.metadata.get('count')).toBe(2);
+      expect(sourcePaths).toEqual([join(nestedDir, 'index.rst'), join(sourceDir, 'tutorial.rst')]);
+      expect(root.children.map((child) => child.title)).toEqual(['API', 'Tutorial']);
+      expect(collectText(root)).not.toContain('Hidden');
+    }
+  );
 
   it('rejects non-RST files even when they contain RST-looking content', async () => {
     const dir = await createTempDir();
@@ -261,20 +266,23 @@ describe('reStructuredText parser foundation', () => {
     await expect(detector.detect(sourcePath)).rejects.toThrow(/Unable to detect format/);
   });
 
-  it('rejects root symlink files through the facade and parseRstFile helper', async () => {
-    const dir = await createTempDir();
-    const targetPath = join(dir, 'target.rst');
-    const symlinkPath = join(dir, 'linked.rst');
+  it.skipIf(!canCreateSymlinks)(
+    'rejects root symlink files through the facade and parseRstFile helper',
+    async () => {
+      const dir = await createTempDir();
+      const targetPath = join(dir, 'target.rst');
+      const symlinkPath = join(dir, 'linked.rst');
 
-    await writeFile(targetPath, 'Linked\n======\n', 'utf-8');
-    await symlink(targetPath, symlinkPath);
+      await writeFile(targetPath, 'Linked\n======\n', 'utf-8');
+      await symlink(targetPath, symlinkPath);
 
-    const parser = new RstFormatParser();
+      const parser = new RstFormatParser();
 
-    expect(await parser.detect(symlinkPath)).toBe(false);
-    await expect(parser.parse(symlinkPath)).rejects.toThrow(/Invalid RST source path/);
-    await expect(parseRstFile(symlinkPath)).rejects.toThrow(/Invalid RST file path/);
-  });
+      expect(await parser.detect(symlinkPath)).toBe(false);
+      await expect(parser.parse(symlinkPath)).rejects.toThrow(/Invalid RST source path/);
+      await expect(parseRstFile(symlinkPath)).rejects.toThrow(/Invalid RST file path/);
+    }
+  );
 
   it('exposes parseRstFile for parser-library use without a CLI generation workflow', async () => {
     const dir = await createTempDir();

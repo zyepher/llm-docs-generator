@@ -3,15 +3,27 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { devNull, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 import { captureGitState } from '../../src/core/git-state.js';
 
 const tempDirs: string[] = [];
+
+// An empty global config isolates the tests from the developer's ~/.gitconfig.
+// It must be a real file: Git for Windows cannot open os.devNull (`\\.\nul`)
+// as a config file.
+const isolatedConfigDir = mkdtempSync(join(tmpdir(), 'llm-docs-git-config-'));
+const emptyGlobalConfig = join(isolatedConfigDir, 'gitconfig');
+writeFileSync(emptyGlobalConfig, '');
+
+afterAll(() => {
+  rmSync(isolatedConfigDir, { recursive: true, force: true });
+});
 
 async function makeTempDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(await realpath(tmpdir()), prefix));
@@ -24,7 +36,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf-8',
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_GLOBAL: devNull },
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_GLOBAL: emptyGlobalConfig },
   }).trim();
 }
 

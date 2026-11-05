@@ -13,6 +13,8 @@ import { dirname, join, relative, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { canCreateSymlinks } from '../helpers/symlinks.js';
+
 import { syncPacks, type SyncOptions } from '../../src/pack/build.js';
 import { readPackManifest } from '../../src/pack/manifest.js';
 import { verifyPacks, type VerifyReport } from '../../src/pack/verify.js';
@@ -382,7 +384,7 @@ describe('syncPacks', () => {
     );
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(!canCreateSymlinks)(
     'rejects a selected symlink and a source that escapes the project',
     async () => {
       const root = await makeProject(

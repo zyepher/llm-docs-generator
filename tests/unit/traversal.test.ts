@@ -4,11 +4,14 @@ import { join, sep } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { canCreateSymlinks } from '../helpers/symlinks.js';
+
 import {
   assertNoParentSymlinkComponents,
   directoryContainsMatchingFile,
   findFilesRecursively,
   resolveTraversalBound,
+  sortByPosixRelativePath,
   walkBoundedDirectoryTree,
   type BoundedWalkCounters,
   type BoundedWalkOptions,
@@ -97,7 +100,7 @@ describe('walkBoundedDirectoryTree', () => {
     expect(events.filter((event) => event.kind === 'entries-exhausted')).toHaveLength(1);
   });
 
-  it('yields a symlink event and never follows the link', async () => {
+  it.skipIf(!canCreateSymlinks)('yields a symlink event and never follows the link', async () => {
     const root = await makeTempDir('llm-docs-walk-symlink-');
     await writeTree(root, { 'real/inside.md': 'inside', 'top.md': 'top' });
     await symlink(join(root, 'real'), join(root, 'link'), 'dir');
@@ -155,30 +158,35 @@ describe('walkBoundedDirectoryTree', () => {
     ).toBeDefined();
   });
 
-  it('carries the original error on an unreadable directory and skips only that subtree', async () => {
-    const root = await makeTempDir('llm-docs-walk-unreadable-');
-    await writeTree(root, { 'blocked/hidden.md': 'hidden', 'zz.md': 'zz' });
-    const blocked = join(root, 'blocked');
-    await chmod(blocked, 0o000);
+  // chmod cannot make a directory unreadable on Windows (it only toggles the
+  // read-only attribute), and root ignores the mode bits anywhere.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'carries the original error on an unreadable directory and skips only that subtree',
+    async () => {
+      const root = await makeTempDir('llm-docs-walk-unreadable-');
+      await writeTree(root, { 'blocked/hidden.md': 'hidden', 'zz.md': 'zz' });
+      const blocked = join(root, 'blocked');
+      await chmod(blocked, 0o000);
 
-    try {
-      const events = await collectEvents({ root, ...unbounded });
-      const unreadable = events.find((event) => event.kind === 'unreadable-directory');
+      try {
+        const events = await collectEvents({ root, ...unbounded });
+        const unreadable = events.find((event) => event.kind === 'unreadable-directory');
 
-      expect(unreadable).toBeDefined();
-      if (unreadable?.kind === 'unreadable-directory') {
-        expect(unreadable.absolutePath).toBe(blocked);
-        expect(unreadable.relativePath).toBe('blocked');
-        expect(unreadable.error).toBeInstanceOf(Error);
-        expect(String(unreadable.error)).toContain('EACCES');
+        expect(unreadable).toBeDefined();
+        if (unreadable?.kind === 'unreadable-directory') {
+          expect(unreadable.absolutePath).toBe(blocked);
+          expect(unreadable.relativePath).toBe('blocked');
+          expect(unreadable.error).toBeInstanceOf(Error);
+          expect(String(unreadable.error)).toContain('EACCES');
+        }
+
+        // The sibling after the unreadable subtree is still visited.
+        expect(relativePaths(events, 'file')).toEqual(['zz.md']);
+      } finally {
+        await chmod(blocked, 0o755);
       }
-
-      // The sibling after the unreadable subtree is still visited.
-      expect(relativePaths(events, 'file')).toEqual(['zz.md']);
-    } finally {
-      await chmod(blocked, 0o755);
     }
-  });
+  );
 
   it('reports the readdir error object for a root that is not a directory', async () => {
     const root = await makeTempDir('llm-docs-walk-root-error-');
@@ -211,22 +219,25 @@ describe('walkBoundedDirectoryTree', () => {
     expect(counters.visitedFiles).toBe(2);
   });
 
-  it('tracks visited entries and files in the caller supplied counters', async () => {
-    const root = await makeTempDir('llm-docs-walk-counters-');
-    await writeTree(root, {
-      'nested/one.md': 'one',
-      'nested/two.md': 'two',
-      'top.md': 'top',
-    });
-    await symlink(join(root, 'top.md'), join(root, 'link.md'), 'file');
+  it.skipIf(!canCreateSymlinks)(
+    'tracks visited entries and files in the caller supplied counters',
+    async () => {
+      const root = await makeTempDir('llm-docs-walk-counters-');
+      await writeTree(root, {
+        'nested/one.md': 'one',
+        'nested/two.md': 'two',
+        'top.md': 'top',
+      });
+      await symlink(join(root, 'top.md'), join(root, 'link.md'), 'file');
 
-    const counters: BoundedWalkCounters = { visitedEntries: 0, visitedFiles: 0 };
-    await collectEvents({ root, ...unbounded, counters });
+      const counters: BoundedWalkCounters = { visitedEntries: 0, visitedFiles: 0 };
+      await collectEvents({ root, ...unbounded, counters });
 
-    // Root lists link.md, nested, top.md; nested lists one.md and two.md.
-    expect(counters.visitedEntries).toBe(5);
-    expect(counters.visitedFiles).toBe(3);
-  });
+      // Root lists link.md, nested, top.md; nested lists one.md and two.md.
+      expect(counters.visitedEntries).toBe(5);
+      expect(counters.visitedFiles).toBe(3);
+    }
+  );
 });
 
 describe('resolveTraversalBound', () => {
@@ -246,52 +257,72 @@ describe('resolveTraversalBound', () => {
 });
 
 describe('assertNoParentSymlinkComponents', () => {
-  it('rejects a path whose parent directory is a symbolic link', async () => {
-    const root = await makeTempDir('llm-docs-walk-parent-symlink-');
-    const realDir = join(root, 'real');
-    await mkdir(realDir, { recursive: true });
-    await writeFile(join(realDir, 'file.md'), 'file', 'utf-8');
-    await symlink(realDir, join(root, 'link'), 'dir');
+  it.skipIf(!canCreateSymlinks)(
+    'rejects a path whose parent directory is a symbolic link',
+    async () => {
+      const root = await makeTempDir('llm-docs-walk-parent-symlink-');
+      const realDir = join(root, 'real');
+      await mkdir(realDir, { recursive: true });
+      await writeFile(join(realDir, 'file.md'), 'file', 'utf-8');
+      await symlink(realDir, join(root, 'link'), 'dir');
 
-    await expect(
-      assertNoParentSymlinkComponents({ label: 'Source', path: join(root, 'link', 'file.md') })
-    ).rejects.toThrow('Source path must not contain a symbolic link component');
+      await expect(
+        assertNoParentSymlinkComponents({ label: 'Source', path: join(root, 'link', 'file.md') })
+      ).rejects.toThrow('Source path must not contain a symbolic link component');
 
-    await expect(
-      assertNoParentSymlinkComponents({ label: 'Docs', path: join(realDir, 'file.md') })
-    ).resolves.toBeUndefined();
-  });
+      await expect(
+        assertNoParentSymlinkComponents({ label: 'Docs', path: join(realDir, 'file.md') })
+      ).resolves.toBeUndefined();
+    }
+  );
 });
 
 describe('parser directory helpers', () => {
-  it('walks unbounded, ignores the skip list, and orders each directory by code unit', async () => {
-    const root = await makeTempDir('llm-docs-walk-parser-');
-    await writeTree(root, {
-      'Zed.md': 'zed',
-      'apple.md': 'apple',
-      'node_modules/vendored.md': 'vendored',
-      'a/b/c/d/e/f/g/h/i/j/deep.md': 'deep',
-      'skip.txt': 'skip',
-    });
-    await symlink(join(root, 'apple.md'), join(root, 'link.md'), 'file');
+  it.skipIf(!canCreateSymlinks)(
+    'walks unbounded, ignores the skip list, and orders each directory by code unit',
+    async () => {
+      const root = await makeTempDir('llm-docs-walk-parser-');
+      await writeTree(root, {
+        'Zed.md': 'zed',
+        'apple.md': 'apple',
+        'node_modules/vendored.md': 'vendored',
+        'a/b/c/d/e/f/g/h/i/j/deep.md': 'deep',
+        'skip.txt': 'skip',
+      });
+      await symlink(join(root, 'apple.md'), join(root, 'link.md'), 'file');
 
-    const matchesMarkdown = (fileName: string): boolean => fileName.endsWith('.md');
-    const found = await findFilesRecursively(root, matchesMarkdown);
+      const matchesMarkdown = (fileName: string): boolean => fileName.endsWith('.md');
+      const found = await findFilesRecursively(root, matchesMarkdown);
 
-    expect(
-      found.map((path) =>
-        path
-          .slice(root.length + 1)
-          .split(sep)
-          .join('/')
-      )
-    ).toEqual(['Zed.md', 'a/b/c/d/e/f/g/h/i/j/deep.md', 'apple.md', 'node_modules/vendored.md']);
-    // Uppercase sorts before lowercase under code-unit ordering, unlike localeCompare.
-    expect(found[0]?.endsWith('Zed.md')).toBe(true);
+      expect(
+        found.map((path) =>
+          path
+            .slice(root.length + 1)
+            .split(sep)
+            .join('/')
+        )
+      ).toEqual(['Zed.md', 'a/b/c/d/e/f/g/h/i/j/deep.md', 'apple.md', 'node_modules/vendored.md']);
+      // Uppercase sorts before lowercase under code-unit ordering, unlike localeCompare.
+      expect(found[0]?.endsWith('Zed.md')).toBe(true);
 
-    await expect(directoryContainsMatchingFile(root, matchesMarkdown)).resolves.toBe(true);
-    await expect(
-      directoryContainsMatchingFile(root, (fileName) => fileName.endsWith('.rst'))
-    ).resolves.toBe(false);
+      await expect(directoryContainsMatchingFile(root, matchesMarkdown)).resolves.toBe(true);
+      await expect(
+        directoryContainsMatchingFile(root, (fileName) => fileName.endsWith('.rst'))
+      ).resolves.toBe(false);
+    }
+  );
+
+  it('orders found files by POSIX relative path whatever the native separator', async () => {
+    const root = await makeTempDir('llm-docs-walk-posix-order-');
+    await writeTree(root, { 'a/b.md': 'b', 'aZ.md': 'z', 'a.md': 'a' });
+
+    const found = await findFilesRecursively(root, (fileName) => fileName.endsWith('.md'));
+
+    // `/` sorts before `Z`, so a/b.md precedes aZ.md; a native `\\` would not.
+    expect(sortByPosixRelativePath(root, found)).toEqual([
+      join(root, 'a.md'),
+      join(root, 'a', 'b.md'),
+      join(root, 'aZ.md'),
+    ]);
   });
 });
