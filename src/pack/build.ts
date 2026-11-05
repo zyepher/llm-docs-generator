@@ -45,6 +45,7 @@ import {
   type PackSelection,
   type SelectedConversion,
   type SelectedFile,
+  type SelectedPage,
   type SourceAcquisition,
 } from '../sources/acquire.js';
 import {
@@ -60,7 +61,9 @@ import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
+import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
+import { createPackLinkRewriter } from './links.js';
 import {
   licenseStatusFor,
   MANIFEST_FILE_NAME,
@@ -73,7 +76,8 @@ import {
   type ManifestSourceEntry,
   type PackManifest,
 } from './manifest.js';
-import { collectHeadings, convertMarkdownPage, createPackLinkRewriter } from './markdown.js';
+import { collectHeadings, convertMarkdownPage, type PackFileRef } from './markdown.js';
+import { renderSourcePage } from './render-ir.js';
 import { verifyPackFiles } from './verify.js';
 
 const STAGING_DIR = '.staging';
@@ -475,12 +479,6 @@ function assertBuildable(recipe: ResolvedPackRecipe): void {
   for (const source of recipe.sources) {
     assertSourceSupported(source);
   }
-
-  if (recipe.layout.combined) {
-    throw new ConfigError(
-      'The combined layout is not supported yet; set "layout.combined" to false.'
-    );
-  }
 }
 
 /** One entry per acquired file, including the `.md` an agent wrote for a converted original. */
@@ -618,12 +616,6 @@ async function readUtf8(selected: SelectedFile): Promise<string> {
   }
 }
 
-const UNSUPPORTED_FORMATS: Readonly<Record<string, string>> = {
-  rst: 'reStructuredText',
-  html: 'HTML',
-  openapi: 'OpenAPI',
-};
-
 async function writeStagedFile(
   stagingDir: string,
   path: string,
@@ -672,26 +664,119 @@ async function buildPack(
   const conversions = selection.files.filter(
     (selected): selected is SelectedConversion => selected.kind === 'convert'
   );
-  const fileRef = (selected: SelectedFile) => ({
+  const fileRef = (selected: SelectedFile): PackFileRef => ({
     sourceIndex: selected.sourceIndex,
     sourcePath: selected.file.path,
     outputPath: selected.outputPath,
+    url: selected.file.url,
+    localPath:
+      recipe.sources[selected.sourceIndex]?.type === 'local'
+        ? selected.file.sourceLabel
+        : undefined,
   });
+
+  // Render every page first: an OpenAPI document expands to pages named after
+  // its tags, and links anywhere in the pack may point at them. Each of those
+  // pages answers links by its own path (`<spec stem>/<tag>.md`), as if it
+  // were a file at the origin.
+  // Markdown, MDX, rendered formats, and converted documents all become units
+  // that go through the Markdown page path below.
+  const units: {
+    page: SelectedPage | SelectedConversion;
+    ref: PackFileRef;
+    text: string;
+    syntax: 'markdown' | 'mdx';
+    extraSources: readonly string[];
+  }[] = [];
+  const renderWarnings: string[] = [];
+  for (const page of pages) {
+    if (page.format === 'markdown' || page.format === 'mdx') {
+      units.push({
+        page,
+        ref: fileRef(page),
+        text: await readUtf8(page),
+        syntax: page.format,
+        extraSources: [],
+      });
+      continue;
+    }
+
+    const rendered = await renderSourcePage(page);
+    renderWarnings.push(...rendered.warnings);
+    for (const unit of rendered.pages) {
+      const ref = fileRef(page);
+      if (page.format === 'openapi') {
+        const mountRoot = posix.join('pages', recipe.sources[page.sourceIndex]?.mount ?? '');
+        const sourcePath = posix.relative(mountRoot, unit.outputPath);
+        const base = ref.localPath?.slice(0, ref.localPath.length - ref.sourcePath.length);
+        Object.assign(ref, {
+          sourcePath,
+          url: undefined,
+          localPath: base === undefined ? undefined : `${base}${sourcePath}`,
+        });
+      }
+      units.push({
+        page,
+        ref: { ...ref, outputPath: unit.outputPath },
+        text: unit.text,
+        syntax: 'markdown',
+        extraSources: [],
+      });
+    }
+  }
+
+  // Convert documents before links are rewritten, so links to a converted
+  // document resolve to its page. One converter per source, resolved (tool on
+  // PATH, version) on first use.
+  const converters = new Map<number, DocumentConverter>();
+  const converterBySource = new Map<string, ManifestConverter>();
+  for (const conversion of conversions) {
+    const spec = recipe.sources[conversion.sourceIndex]?.convert;
+    if (spec === undefined || spec === null) {
+      throw new Error(`Conversion ${conversion.outputPath} has no converter.`);
+    }
+
+    let converter = converters.get(conversion.sourceIndex);
+    if (converter === undefined) {
+      converter = await createDocumentConverter(spec, {
+        projectRoot: context.projectRoot,
+        workDir: join(workRoot, `convert-${conversion.sourceIndex}`),
+      });
+      converters.set(conversion.sourceIndex, converter);
+      renderWarnings.push(...converter.warnings);
+    }
+
+    const converted = await converter.convert(
+      conversion,
+      previous?.sources.find(
+        (entry) => entry.source === conversion.sourceIndex && entry.path === conversion.file.path
+      )
+    );
+    renderWarnings.push(...converted.warnings);
+    converterBySource.set(`${conversion.sourceIndex}:${conversion.file.path}`, converted.converter);
+    units.push({
+      page: conversion,
+      ref: fileRef(conversion),
+      text: converted.markdown,
+      syntax: 'markdown',
+      extraSources:
+        converted.agentOutputPath === undefined
+          ? []
+          : [`${conversion.sourceIndex}:${converted.agentOutputPath}`],
+    });
+  }
+
   const rewriteLinks = createPackLinkRewriter({
     recipe,
     origins,
-    pages: [...pages, ...conversions].map(fileRef),
+    // The OpenAPI document itself stays a link target too (its index page).
+    pages: [
+      ...pages.filter((page) => page.format === 'openapi').map(fileRef),
+      ...units.map((unit) => unit.ref),
+    ],
     passthrough: passthrough.map(fileRef),
+    inventories: acquisitions.map((acquisition) => acquisition.inventory),
   });
-
-  for (const page of pages) {
-    const name = UNSUPPORTED_FORMATS[page.format];
-    if (name !== undefined) {
-      throw new ConfigError(
-        `${page.file.sourceLabel}: ${name} pages are not supported yet; exclude the file or carry it with "passthrough".`
-      );
-    }
-  }
 
   await mkdir(join(packsDir, STAGING_DIR), { recursive: true });
   const stagingDir = join(packsDir, STAGING_DIR, `${resolved.id}-${randomSuffix()}`);
@@ -703,6 +788,7 @@ async function buildPack(
     const warnings = [
       ...acquisitions.flatMap((acquisition) => acquisition.warnings),
       ...selection.warnings,
+      ...renderWarnings,
     ];
     const transformCounts = new Map<TransformName, number>(
       recipe.sources.flatMap((source) => source.transforms.map((name) => [name, 0] as const))
@@ -710,35 +796,47 @@ async function buildPack(
     const unknownComponents = new Map<string, number>();
     const links: PackManifest['links'] = { rewritten: 0, external: 0, unresolved: [] };
     let plainTextConversions = 0;
+    const writtenPages: { path: string; text: string }[] = [];
+    // Selection cannot see the tag pages of an OpenAPI document: check those
+    // paths against every other page here.
+    const pagePaths = new Map<string, string>();
 
-    // Markdown, MDX, and converted documents all go through the Markdown page path.
-    const writePage = async (
-      page: SelectedFile,
-      text: string,
-      syntax: 'markdown' | 'mdx',
-      extraSources: readonly string[]
-    ): Promise<void> => {
+    for (const { page, ref: unit, text, syntax, extraSources } of units) {
       const source = recipe.sources[page.sourceIndex];
       if (source === undefined) {
         throw new Error(`Page ${page.outputPath} has no source.`);
       }
 
+      const folded = unit.outputPath.normalize('NFC').toLowerCase();
+      const previous = pagePaths.get(folded);
+      if (previous !== undefined) {
+        throw new ConfigError(
+          `${previous} and ${page.file.sourceLabel} would both be written to ${unit.outputPath}; exclude one of them or give a source a different "mount".`
+        );
+      }
+      pagePaths.set(folded, page.file.sourceLabel);
+
       const result = convertMarkdownPage({
         text,
         syntax,
         sourceIndex: page.sourceIndex,
-        sourcePath: page.file.path,
-        outputPath: page.outputPath,
+        sourcePath: unit.sourcePath,
+        outputPath: unit.outputPath,
         transforms: source.transforms,
-        provenance: { packId: resolved.id, version: recipe.version, source: page.file.sourceLabel },
+        provenance: {
+          packId: resolved.id,
+          version: recipe.version,
+          source: page.file.sourceLabel,
+        },
         rewriteLinks,
       });
 
-      await writeStagedFile(stagingDir, page.outputPath, (target) =>
+      await writeStagedFile(stagingDir, unit.outputPath, (target) =>
         writeTextFileSafely(target, result.text)
       );
+      writtenPages.push({ path: unit.outputPath, text: result.text });
       outputs.push({
-        path: page.outputPath,
+        path: unit.outputPath,
         kind: 'page',
         sha256: sha256Prefixed(result.text),
         bytes: Buffer.byteLength(result.text, 'utf-8'),
@@ -756,54 +854,9 @@ async function buildPack(
       links.rewritten += result.links.rewritten;
       links.external += result.links.external;
       links.unresolved.push(
-        ...result.links.unresolved.map((entry) => ({ page: page.outputPath, ...entry }))
+        ...result.links.unresolved.map((entry) => ({ page: unit.outputPath, ...entry }))
       );
       plainTextConversions += result.links.plainTextConversions;
-    };
-
-    for (const page of pages) {
-      await writePage(page, await readUtf8(page), page.format === 'mdx' ? 'mdx' : 'markdown', []);
-    }
-
-    // One converter per source, resolved (tool on PATH, version) on first use.
-    const converters = new Map<number, DocumentConverter>();
-    const converterBySource = new Map<string, ManifestConverter>();
-
-    for (const conversion of conversions) {
-      const spec = recipe.sources[conversion.sourceIndex]?.convert;
-      if (spec === undefined || spec === null) {
-        throw new Error(`Conversion ${conversion.outputPath} has no converter.`);
-      }
-
-      let converter = converters.get(conversion.sourceIndex);
-      if (converter === undefined) {
-        converter = await createDocumentConverter(spec, {
-          projectRoot: context.projectRoot,
-          workDir: join(workRoot, `convert-${conversion.sourceIndex}`),
-        });
-        converters.set(conversion.sourceIndex, converter);
-        warnings.push(...converter.warnings);
-      }
-
-      const converted = await converter.convert(
-        conversion,
-        previous?.sources.find(
-          (entry) => entry.source === conversion.sourceIndex && entry.path === conversion.file.path
-        )
-      );
-      warnings.push(...converted.warnings);
-      converterBySource.set(
-        `${conversion.sourceIndex}:${conversion.file.path}`,
-        converted.converter
-      );
-      await writePage(
-        conversion,
-        converted.markdown,
-        'markdown',
-        converted.agentOutputPath === undefined
-          ? []
-          : [`${conversion.sourceIndex}:${converted.agentOutputPath}`]
-      );
     }
 
     const sources = baseSources.map((entry) => {
@@ -867,6 +920,22 @@ async function buildPack(
       tokens: estimateTokenCount(indexText),
       title: `${recipe.title} ${recipe.version}`,
     });
+
+    if (recipe.layout.combined) {
+      const combinedPath = `${resolved.id}.full.md`;
+      const combinedText = renderCombinedPack({ indexText, pages: writtenPages });
+      await writeStagedFile(stagingDir, combinedPath, (target) =>
+        writeTextFileSafely(target, combinedText)
+      );
+      outputs.push({
+        path: combinedPath,
+        kind: 'combined',
+        sha256: sha256Prefixed(combinedText),
+        bytes: Buffer.byteLength(combinedText, 'utf-8'),
+        tokens: estimateTokenCount(combinedText),
+        title: `${recipe.title} ${recipe.version}`,
+      });
+    }
 
     const manifest: PackManifest = { ...manifestWithoutOutputs, outputs };
     await writePackManifest(stagingDir, manifest);

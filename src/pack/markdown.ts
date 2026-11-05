@@ -816,12 +816,29 @@ function mapOutsideCode(
 export type LinkTargetKind =
   'inline' | 'image' | 'reference-definition' | 'autolink' | 'html-attribute';
 
+/** A half-open `[start, end)` range of the text. */
+export interface TextRange {
+  start: number;
+  end: number;
+}
+
 /** One link destination in a page; `start`/`end` delimit `target` in the text. */
 export interface LinkTarget {
   kind: LinkTargetKind;
   target: string;
   start: number;
   end: number;
+  /**
+   * The whole construct: `[label](target "title")`, `![alt](target)`, a
+   * definition from its `[` through its destination, `<url>`, or one HTML
+   * attribute `name="value"`.
+   */
+  span: TextRange;
+  /**
+   * The link text, image alt, or definition label (inside the brackets); the
+   * attribute name for an HTML attribute; the target itself for an autolink.
+   */
+  label: TextRange;
 }
 
 /**
@@ -873,11 +890,15 @@ export function findLinkTargets(text: string, options: MarkdownSyntaxOptions = {
       const autolink = kind === KIND_TEXT ? AUTOLINK.exec(slice) : null;
 
       if (autolink !== null) {
+        const start = index + 1;
+        const end = index + autolink[0].length - 1;
         targets.push({
           kind: 'autolink',
           target: autolink[0].slice(1, -1),
-          start: index + 1,
-          end: index + autolink[0].length - 1,
+          start,
+          end,
+          span: { start: index, end: end + 1 },
+          label: { start, end },
         });
         index += autolink[0].length;
         continue;
@@ -913,10 +934,19 @@ function htmlAttributeTargets(tag: JsxTag): LinkTarget[] {
       continue;
     }
 
-    const valueOffset =
-      match.index + match[0].length - value.length - (match[4] === undefined ? 1 : 0);
+    const name = match[1] ?? '';
+    const quoted = match[4] === undefined ? 1 : 0;
+    const valueOffset = match.index + match[0].length - value.length - quoted;
     const start = attributesOffset + valueOffset;
-    targets.push({ kind: 'html-attribute', target: value, start, end: start + value.length });
+    const nameStart = attributesOffset + match.index + match[0].indexOf(name);
+    targets.push({
+      kind: 'html-attribute',
+      target: value,
+      start,
+      end: start + value.length,
+      span: { start: nameStart, end: start + value.length + quoted },
+      label: { start: nameStart, end: nameStart + name.length },
+    });
   }
 
   return targets;
@@ -980,11 +1010,19 @@ function matchInlineLink(text: string, kinds: Uint8Array, start: number): LinkTa
         target: text.slice(destination.start, destination.end),
         start: destination.start,
         end: destination.end,
+        span: { start, end: destination.close + 1 },
+        label: { start: open + 1, end: close },
       };
 }
 
-/** CommonMark inline destination after `(` at `open`: `<...>` or a balanced run, then an optional title and `)`. */
-function parseInlineDestination(text: string, open: number): { start: number; end: number } | null {
+/**
+ * CommonMark inline destination after `(` at `open`: `<...>` or a balanced
+ * run, then an optional title and `)` (at `close`).
+ */
+function parseInlineDestination(
+  text: string,
+  open: number
+): { start: number; end: number; close: number } | null {
   let index = open + 1;
   const skipSpace = (): void => {
     let newlines = 0;
@@ -1054,7 +1092,7 @@ function parseInlineDestination(text: string, open: number): { start: number; en
     skipSpace();
   }
 
-  return text[index] === ')' ? { start, end } : null;
+  return text[index] === ')' ? { start, end, close: index } : null;
 }
 
 const REFERENCE_DEFINITION =
@@ -1070,8 +1108,17 @@ function referenceDefinitionTargets(text: string, kinds: Uint8Array): LinkTarget
 
     const prefix = match[1] ?? '';
     const value = match[2] ?? match[3] ?? '';
-    const start = match.index + prefix.length + (match[2] === undefined ? 0 : 1);
-    targets.push({ kind: 'reference-definition', target: value, start, end: start + value.length });
+    const angled = match[2] === undefined ? 0 : 1;
+    const start = match.index + prefix.length + angled;
+    const open = match.index + prefix.indexOf('[');
+    targets.push({
+      kind: 'reference-definition',
+      target: value,
+      start,
+      end: start + value.length,
+      span: { start: open, end: start + value.length + angled },
+      label: { start: open + 1, end: match.index + prefix.lastIndexOf(']:') },
+    });
   }
 
   return targets;
@@ -1080,6 +1127,8 @@ function referenceDefinitionTargets(text: string, kinds: Uint8Array): LinkTarget
 export interface MarkdownHeading {
   level: number;
   text: string;
+  /** Offset of the start of the heading's (first) line. */
+  offset: number;
 }
 
 /** ATX headings and single-line setext headings outside code, in document order. */
@@ -1100,7 +1149,7 @@ export function collectHeadings(
     const atx = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/.exec(stripped);
 
     if (atx?.[1] !== undefined) {
-      headings.push({ level: atx[1].length, text: (atx[2] ?? '').trim() });
+      headings.push({ level: atx[1].length, text: (atx[2] ?? '').trim(), offset: line.start });
       continue;
     }
 
@@ -1114,7 +1163,11 @@ export function collectHeadings(
       (previous === undefined || previous.text.trim() === '') &&
       !/^ {0,3}(?:[-*+>|]|\d+[.)])/.test(line.text)
     ) {
-      headings.push({ level: next.text.trim().startsWith('=') ? 1 : 2, text: line.text.trim() });
+      headings.push({
+        level: next.text.trim().startsWith('=') ? 1 : 2,
+        text: line.text.trim(),
+        offset: line.start,
+      });
     }
   }
 
@@ -1135,22 +1188,29 @@ function githubHeadingSlug(heading: string): string {
     .replace(/\s/g, '-');
 }
 
+/** Each heading with its GitHub anchor (`-1`, `-2` suffixes for duplicates), in document order. */
+export function headingSlugs(
+  text: string,
+  options: MarkdownSyntaxOptions = {}
+): (MarkdownHeading & { slug: string })[] {
+  const counts = new Map<string, number>();
+
+  return collectHeadings(text, options).map((heading) => {
+    const plain = heading.text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
+    const base = githubHeadingSlug(plain);
+    const seen = counts.get(base) ?? 0;
+    counts.set(base, seen + 1);
+    return { ...heading, slug: seen === 0 ? base : `${base}-${seen}` };
+  });
+}
+
 /**
  * Fragment anchors a page defines: GitHub heading slugs with `-1`, `-2`
  * suffixes for duplicates, plus HTML `id`/`name` attributes. Used by
  * `verify --strict`; Phase 5 resolves citations with it.
  */
 export function headingAnchors(text: string, options: MarkdownSyntaxOptions = {}): Set<string> {
-  const anchors = new Set<string>();
-  const counts = new Map<string, number>();
-
-  for (const heading of collectHeadings(text, options)) {
-    const plain = heading.text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
-    const base = githubHeadingSlug(plain);
-    const seen = counts.get(base) ?? 0;
-    counts.set(base, seen + 1);
-    anchors.add(seen === 0 ? base : `${base}-${seen}`);
-  }
+  const anchors = new Set(headingSlugs(text, options).map((heading) => heading.slug));
 
   for (const match of text.matchAll(/<[a-z][\w-]*\s[^>]*?\b(?:id|name)\s*=\s*["']([^"']+)["']/gi)) {
     if (match[1] !== undefined) {
@@ -1248,7 +1308,13 @@ const LAYOUT_WRAPPERS: ReadonlySet<string> = new Set([
 ]);
 
 /** Wrappers whose `title`/`label` prop becomes a bold line. */
-const LABELED_WRAPPERS: ReadonlySet<string> = new Set(['Tab', 'TabItem', 'Accordion', 'Card']);
+const LABELED_WRAPPERS: ReadonlySet<string> = new Set([
+  'Tab',
+  'TabItem',
+  'Accordion',
+  'Card',
+  'Step',
+]);
 
 /** `Tabs.Tab` is a `Tab`: the last dotted segment names the component. */
 function componentBaseName(name: string): string {
@@ -1266,6 +1332,32 @@ function stringProp(attributes: string, name: string): string | undefined {
     .trim();
 
   return value === undefined || value === '' || /[<>{}]/.test(value) ? undefined : value;
+}
+
+/** A Markdown link destination for `url`, angle-bracketed when it holds spaces or parentheses. */
+function linkDestination(url: string): string {
+  return /[\s()]/.test(url) ? `<${url}>` : url;
+}
+
+/**
+ * The bold line a labeled wrapper becomes: its `title` (or `label`) prop, and
+ * for a `Card` with an `href`, that title as a link (the href alone when the
+ * card has no title).
+ */
+function wrapperLabel(base: string, attributes: string): string | undefined {
+  if (!LABELED_WRAPPERS.has(base)) {
+    return undefined;
+  }
+
+  const title = stringProp(attributes, 'title') ?? stringProp(attributes, 'label');
+  const href = base === 'Card' ? stringProp(attributes, 'href') : undefined;
+
+  if (href === undefined) {
+    return title === undefined ? undefined : `**${title}**`;
+  }
+
+  const text = (title ?? href).replace(/[[\]\\]/g, '\\$&');
+  return `**[${text}](${linkDestination(href)})**`;
 }
 
 interface WrapperFrame {
@@ -1286,8 +1378,8 @@ interface MdxUnwrapResult {
 
 /**
  * Unwrap the known layout wrappers (keeping their children, dedented by the
- * nesting they added), turn `title`/`label` of Tab, TabItem, Accordion, and
- * Card into a bold line, leave every other capitalized component as written
+ * nesting they added), turn `title`/`label` of Tab, TabItem, Accordion, Card,
+ * and Step into a bold line (a Card `href` makes it a link), leave every other capitalized component as written
  * (counted), and, for MDX, remove top-level `import`/`export` declarations.
  * Code is never touched.
  */
@@ -1339,7 +1431,7 @@ function unwrapMdxComponents(text: string, options: MarkdownSyntaxOptions): MdxU
     if (out.length > 0 && out.at(-1)?.trim() !== '') {
       out.push('');
     }
-    out.push(`${indent}**${label}**`);
+    out.push(`${indent}${label}`);
     out.push('');
     edited = true;
   };
@@ -1488,9 +1580,7 @@ function unwrapMdxComponents(text: string, options: MarkdownSyntaxOptions): MdxU
         continue;
       }
 
-      const label = LABELED_WRAPPERS.has(base)
-        ? (stringProp(tag.attributes, 'title') ?? stringProp(tag.attributes, 'label'))
-        : undefined;
+      const label = wrapperLabel(base, tag.attributes);
 
       if (label !== undefined) {
         labels.push(label);
@@ -1532,7 +1622,7 @@ function unwrapMdxComponents(text: string, options: MarkdownSyntaxOptions): MdxU
     }
 
     const inline = pieces
-      .map((piece) => (typeof piece === 'string' ? piece : `**${piece.label}** `))
+      .map((piece) => (typeof piece === 'string' ? piece : `${piece.label} `))
       .join('');
     for (const kept of inline.split('\n')) {
       push(dedent(kept));
@@ -1595,7 +1685,7 @@ const PAGE_TRANSFORMS: Readonly<Record<TransformName, PageTransform>> = {
 };
 
 // ---------------------------------------------------------------------------
-// Link rewriting seam (spec 4.5, Phase 2b)
+// Link rewriting seam (spec 4.5; the rewriter is src/pack/links.ts)
 // ---------------------------------------------------------------------------
 
 /** A page or passthrough file of the pack being built. */
@@ -1605,6 +1695,10 @@ export interface PackFileRef {
   sourcePath: string;
   /** Pack-relative POSIX output path. */
   outputPath: string;
+  /** Upstream URL of the file (repository blob URL, fetched URL); absent for local files. */
+  url?: string | undefined;
+  /** Project-relative POSIX path, for files of local sources. */
+  localPath?: string | undefined;
 }
 
 /** Everything a rewriter may consult: the recipe (site, aliases), origins, and every output. */
@@ -1613,6 +1707,12 @@ export interface PackLinkContext {
   origins: readonly ManifestOrigin[];
   pages: readonly PackFileRef[];
   passthrough: readonly PackFileRef[];
+  /**
+   * Per source index: every origin-relative file path present at the origin,
+   * selected or not, when the acquirer can list them. A link to an excluded
+   * page then goes upstream (or is reported as such) instead of being dead.
+   */
+  inventories?: readonly (readonly string[] | undefined)[];
 }
 
 export interface LinkRewriteInput extends PackFileRef {
@@ -1631,21 +1731,6 @@ export interface LinkRewriteResult {
 }
 
 export type LinkRewriter = (page: LinkRewriteInput) => LinkRewriteResult;
-
-/**
- * The rewriter for one pack build. Phase 2b replaces this identity body with
- * spec 4.5 (in-pack targets, site paths and aliases, pinned blob URLs, the
- * plain-text last resort), finding links with `findLinkTargets`.
- */
-export function createPackLinkRewriter(_context: PackLinkContext): LinkRewriter {
-  return (page) => ({
-    text: page.text,
-    rewritten: 0,
-    external: 0,
-    unresolved: [],
-    plainTextConversions: 0,
-  });
-}
 
 // ---------------------------------------------------------------------------
 // The page pipeline

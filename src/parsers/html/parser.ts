@@ -292,7 +292,17 @@ class HtmlContentExtractor {
           return;
         }
       }
-      const title = this.extractInlineText(node);
+      // A heading is not a link: links in it become their text, and a
+      // permalink glyph (`<a href="#id">¶</a>`) is dropped.
+      const title = this.extractInlineText(node)
+        .replace(
+          /\[((?:\\.|[^\]\\])*)\]\((<[^>]*>|[^)\s]*)\)/g,
+          (_match, label: string, destination: string) =>
+            destination.startsWith('#') && !/[\p{L}\p{N}]/u.test(label)
+              ? ''
+              : label.replace(/\\([[\]\\])/g, '$1')
+        )
+        .trim();
       if (title !== '') {
         this.startSection(level, title);
       }
@@ -440,7 +450,10 @@ class HtmlContentExtractor {
     if (content !== '') {
       this.currentContent().push(
         createContentBlock(ContentBlockType.DATA, content, {
-          annotations: new Map([['type', 'table']]),
+          annotations: new Map<string, unknown>([
+            ['type', 'table'],
+            ['rows', rows],
+          ]),
         })
       );
     }
@@ -524,10 +537,7 @@ class HtmlContentExtractor {
       const href = normalizeInlineWhitespace(node.attrs.get('href') ?? '');
       if (href !== '') {
         this.links.push({ text, href });
-        if (text !== '' && text !== href) {
-          return `${text} (${href})`;
-        }
-        return text || href;
+        return markdownLink(text || href, href);
       }
       return text;
     }
@@ -1004,6 +1014,19 @@ function sectionToDocNode(section: HtmlSection): DocNode {
     children: section.children.map((child) => sectionToDocNode(child)),
     metadata: new Map([['level', section.level]]),
   });
+}
+
+/**
+ * An anchor as a Markdown link, so the pack's link rewriter sees it. The text
+ * escapes brackets; a destination with spaces or parentheses is
+ * angle-bracketed.
+ */
+function markdownLink(text: string, href: string): string {
+  const label = text.replace(/\n+/g, ' ').replace(/[[\]\\]/g, '\\$&');
+  const destination = /[\s()<>]/.test(href)
+    ? `<${href.replace(/[<>]/g, (char) => encodeURIComponent(char))}>`
+    : href;
+  return `[${label}](${destination})`;
 }
 
 function normalizeInlineWhitespace(content: string): string {

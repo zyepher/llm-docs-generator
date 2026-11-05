@@ -4,10 +4,10 @@ import type { TransformName } from '../../src/config/project.js';
 import {
   collectHeadings,
   convertMarkdownPage,
-  createPackLinkRewriter,
   findLinkTargets,
   headingAnchors,
   scanMarkdownRegions,
+  type LinkRewriter,
   type MarkdownRegionKind,
   type MarkdownSyntaxOptions,
 } from '../../src/pack/markdown.js';
@@ -164,6 +164,23 @@ describe('findLinkTargets', () => {
     }
   });
 
+  it('reports the whole construct and its label', () => {
+    const text =
+      '![alt](<a b.png> "t") <a class="x" href=\'h.md\'>\n\n> [def]: <./d.md> "T"\n<https://x.dev>';
+    expect(
+      findLinkTargets(text).map((link) => [
+        link.kind,
+        text.slice(link.span.start, link.span.end),
+        text.slice(link.label.start, link.label.end),
+      ])
+    ).toEqual([
+      ['image', '![alt](<a b.png> "t")', 'alt'],
+      ['html-attribute', "href='h.md'", 'href'],
+      ['reference-definition', '[def]: <./d.md>', 'def'],
+      ['autolink', '<https://x.dev>', 'https://x.dev'],
+    ]);
+  });
+
   it('ignores links inside HTML comments', () => {
     expect(findLinkTargets('<!-- [a](a.md) <a href="b.md"> -->')).toEqual([]);
   });
@@ -173,9 +190,9 @@ describe('headings', () => {
   it('collects ATX and setext headings outside code', () => {
     const text = '# One #\n\n```\n# not\n```\n\nTwo\n===\n\n> ## Quoted\n';
     expect(collectHeadings(text)).toEqual([
-      { level: 1, text: 'One' },
-      { level: 1, text: 'Two' },
-      { level: 2, text: 'Quoted' },
+      { level: 1, text: 'One', offset: 0 },
+      { level: 1, text: 'Two', offset: 24 },
+      { level: 2, text: 'Quoted', offset: 33 },
     ]);
   });
 
@@ -192,21 +209,12 @@ describe('headings', () => {
   });
 });
 
-const identity = createPackLinkRewriter({
-  recipe: {
-    title: 't',
-    description: null,
-    dependency: null,
-    version: '1',
-    sources: [],
-    site: null,
-    layout: { combined: false },
-    license: null,
-    limits: { maxFileBytes: 1 },
-  },
-  origins: [],
-  pages: [],
-  passthrough: [],
+const identity: LinkRewriter = (page) => ({
+  text: page.text,
+  rewritten: 0,
+  external: 0,
+  unresolved: [],
+  plainTextConversions: 0,
 });
 
 function convert(
@@ -381,7 +389,7 @@ describe('convertMarkdownPage', () => {
     );
   });
 
-  it('unwraps Mintlify CodeGroup and Card, keeping the Card title as a bold line', () => {
+  it('unwraps Mintlify CodeGroup and Card, keeping the Card title (linked to its href) as a bold line', () => {
     const source = [
       '<CodeGroup>',
       '```bash npm',
@@ -412,11 +420,45 @@ describe('convertMarkdownPage', () => {
         'yarn add mint',
         '```',
         '',
-        '**Quickstart**',
+        '**[Quickstart](/quickstart)**',
         '',
         'Get going.',
         '',
-        '**Multi line**',
+        '**[Multi line](/x)**',
+        '',
+      ].join('\n')
+    );
+  });
+
+  it('turns Step titles into bold lines and an untitled Card href into a linked line', () => {
+    const source = [
+      '<Steps>',
+      '  <Step title="Install the CLI">',
+      '    Run `npm i`.',
+      '  </Step>',
+      '  <Step title="Configure">',
+      '    Edit the config.',
+      '  </Step>',
+      '</Steps>',
+      '',
+      '<Card href="https://x.dev/a b">',
+      '  Read more.',
+      '</Card>',
+    ].join('\n');
+
+    expect(body(source, { syntax: 'mdx' })).toBe(
+      [
+        '**Install the CLI**',
+        '',
+        'Run `npm i`.',
+        '',
+        '**Configure**',
+        '',
+        'Edit the config.',
+        '',
+        '**[https://x.dev/a b](<https://x.dev/a b>)**',
+        '',
+        'Read more.',
         '',
       ].join('\n')
     );

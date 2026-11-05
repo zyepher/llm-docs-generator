@@ -52,6 +52,12 @@ export interface SourceAcquisition {
   origin: ManifestOrigin;
   files: AcquiredFile[];
   warnings: string[];
+  /**
+   * Every origin-relative file path present at the origin, selected or not,
+   * when the acquirer can list them. The link rewriter uses it to tell a link
+   * to an excluded page from a dead one.
+   */
+  inventory?: string[];
 }
 
 export interface AcquireContext {
@@ -507,6 +513,7 @@ async function acquireLocal(
   const rootStats = await stat(root);
   const classify = createSourceMatcher(source);
   const files: AcquiredFile[] = [];
+  const inventory: string[] = [];
   const warnings: string[] = [];
   const sourceLabel = (path: string): string =>
     rootStats.isDirectory() ? posix.join(source.path, path) : source.path;
@@ -529,6 +536,7 @@ async function acquireLocal(
   if (rootStats.isFile()) {
     const name = root.slice(root.lastIndexOf(sep) + 1);
     const fileClass = classify(name);
+    inventory.push(name);
 
     if (fileClass !== 'excluded' && fileClass !== 'ignored') {
       await addFile(name, root, rootStats.size);
@@ -561,6 +569,7 @@ async function acquireLocal(
         case 'file': {
           const path = event.relativePath.split(sep).join('/');
           const fileClass = classify(path);
+          inventory.push(path);
 
           if (fileClass !== 'excluded' && fileClass !== 'ignored') {
             await addFile(path, event.absolutePath, (await stat(event.absolutePath)).size);
@@ -621,5 +630,6 @@ async function acquireLocal(
     },
     files,
     warnings,
+    inventory: inventory.sort(compareStringsByCodeUnit),
   };
 }
