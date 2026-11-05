@@ -6,8 +6,7 @@
  * exactly one rule for each dialect.
  */
 
-import { load as yamlLoad } from 'js-yaml';
-
+import { loadYaml } from '../../utils/yaml.js';
 import { getOpeningFence, isClosingFence, type FenceState } from './fences.js';
 
 export type MdxDeclarationKind = 'import' | 'export';
@@ -259,7 +258,7 @@ export function readYamlFrontmatter(
  */
 function isYamlMappingBlock(block: string): boolean {
   try {
-    const parsed = yamlLoad(block);
+    const parsed = loadYaml(block);
     if (parsed === null || parsed === undefined) {
       return true;
     }

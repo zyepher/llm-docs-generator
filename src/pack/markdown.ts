@@ -12,7 +12,6 @@
  * then link rewriting through the LinkRewriter seam.
  */
 
-import { load as yamlLoad } from 'js-yaml';
 import { parse as parseToml } from 'smol-toml';
 
 import type { ResolvedPackRecipe, TransformName } from '../config/project.js';
@@ -26,6 +25,7 @@ import {
   unwrapDocCReferences,
 } from '../parsers/markdown/dialects.js';
 import { isRecord } from '../utils/guards.js';
+import { loadYaml } from '../utils/yaml.js';
 import type { ManifestOrigin } from './manifest.js';
 
 // ---------------------------------------------------------------------------
@@ -1188,7 +1188,7 @@ function splitFrontmatter(text: string): Frontmatter {
   if (yaml !== null) {
     let parsed: unknown;
     try {
-      parsed = yamlLoad(yaml.frontmatter);
+      parsed = loadYaml(yaml.frontmatter);
     } catch {
       parsed = null;
     }

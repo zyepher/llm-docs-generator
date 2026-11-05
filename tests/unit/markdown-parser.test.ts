@@ -342,6 +342,36 @@ describe('markdown single files', () => {
     expect(plain?.content).toBe('Plain paragraph.');
     expect(plain?.annotations).toBeUndefined();
   });
+
+  it('keeps block text exactly as the lexer has always produced it', async () => {
+    const doc = await parseLines([
+      '<div>raw html</div>',
+      '',
+      '| a | b |',
+      '| - | - |',
+      '| 1 | 2 |',
+      '',
+      '---',
+      '',
+      '> quoted',
+      '>',
+      'after',
+      '',
+      '    indented',
+      '\tindented with a tab',
+      'end',
+    ]);
+
+    expect(doc.content).toEqual([
+      { type: 'prose', content: '<div>raw html</div>\n\n' },
+      { type: 'prose', content: '| a | b |\n| - | - |\n| 1 | 2 |\n\n' },
+      { type: 'prose', content: '---\n\n' },
+      { type: 'blockquote', content: 'quoted' },
+      { type: 'prose', content: 'after' },
+      { type: 'code', content: 'indented\nindented with a tab', language: '' },
+      { type: 'prose', content: 'end' },
+    ]);
+  });
 });
 
 describe('markdown parser source line ranges', () => {

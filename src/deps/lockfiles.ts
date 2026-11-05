@@ -2,12 +2,13 @@ import type { Dirent } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join, posix, resolve, sep } from 'node:path';
 
-import { load as yamlLoad, FAILSAFE_SCHEMA } from 'js-yaml';
+import { FAILSAFE_SCHEMA } from 'js-yaml';
 import { parse as parseToml } from 'smol-toml';
 
 import { errorMessage, isFileNotFoundError, isNonEmptyString, isRecord } from '../utils/guards.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
+import { loadYaml } from '../utils/yaml.js';
 import {
   parseBunLock,
   parseNpmPackageLock,
@@ -399,7 +400,7 @@ async function readTomlIfExists(path: string): Promise<Record<string, unknown> |
  * string: `version: 1.10` must not become the number 1.1.
  */
 export function parseYamlStrings(text: string): unknown {
-  return yamlLoad(text, { schema: FAILSAFE_SCHEMA });
+  return loadYaml(text, FAILSAFE_SCHEMA);
 }
 
 /**

@@ -406,7 +406,7 @@ async function fetchWebsiteResource(options: {
       method: 'GET',
       headersTimeout: timeoutMs,
       bodyTimeout: timeoutMs,
-      maxRedirections: 0,
+      // No redirect interceptor is composed in, so undici never follows a 3xx here.
       signal: abortController.signal,
       headers: {
         Accept: 'text/html,text/plain,text/markdown,application/xml,text/xml,*/*;q=0.1',

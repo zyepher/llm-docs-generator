@@ -9,8 +9,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 
-import { load as yamlLoad } from 'js-yaml';
-
 import {
   ContentBlockType,
   DocNodeType,
@@ -22,6 +20,7 @@ import {
 import { BaseParser, FormatType, ParserError } from '../base.js';
 import { errorMessage, isRecord } from '../../utils/guards.js';
 import { slugifyText } from '../../utils/slug.js';
+import { loadYaml } from '../../utils/yaml.js';
 
 const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
 const PARAMETER_LOCATION_ORDER = ['path', 'query', 'header', 'cookie', 'formData', 'body'] as const;
@@ -143,7 +142,7 @@ export class OpenApiFormatParser extends BaseParser {
     let parsed: unknown;
 
     try {
-      parsed = fileFormat === 'json' ? JSON.parse(content) : yamlLoad(content);
+      parsed = fileFormat === 'json' ? JSON.parse(content) : loadYaml(content);
     } catch (error) {
       const message = errorMessage(error);
       throw new ParserError(`Failed to parse OpenAPI / Swagger document: ${message}`, this.name);

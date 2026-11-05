@@ -12,11 +12,11 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { load as yamlLoad } from 'js-yaml';
 import { marked } from 'marked';
 import type { Token } from 'marked';
 
 import { ParserError } from '../base.js';
+import { loadYaml } from '../../utils/yaml.js';
 import { getOpeningFence, isClosingFence, type FenceState } from './fences.js';
 import { applyMarkdownDirectives } from './directives/index.js';
 import {
@@ -49,6 +49,12 @@ const MDX_WRAPPER_COMPONENTS = new Set([
 ]);
 
 const MDX_ADMONITION_COMPONENTS = new Set(['Callout', 'Alert', 'Note', 'Warning', 'Tip']);
+
+/**
+ * Block types whose marked 11 token text kept the blank lines that follow the
+ * block. Later marked versions emit those lines as a separate space token.
+ */
+const TRAILING_BLANK_LINE_TOKEN_TYPES = new Set(['hr', 'html', 'table']);
 
 /**
  * Reference-link definition captured from a markdown document, keyed by the
@@ -168,13 +174,20 @@ export class MarkdownParser {
       // Clean unsupported Markdown/MDX syntax outside fenced code
       const cleaned = this.cleanMarkdownContent(content, sourceSyntax);
 
-      // Parse with marked
-      const tokens = marked.lexer(cleaned);
+      // marked up to v11 expanded leading tabs to four spaces per tab inside its
+      // lexer; later versions keep them. Expand here so code blocks and indented
+      // content come out exactly as they always have.
+      const tokens = marked.lexer(
+        cleaned.replace(
+          /^( *)(\t+)/gm,
+          (_match, spaces: string, tabs: string) => `${spaces}${'    '.repeat(tabs.length)}`
+        )
+      );
 
       // Capture reference-link definitions (`[label]: url`) so the formatter can
-      // inline them at each use site. marked collects these into tokens.links and
-      // removes them from the token stream; without capturing them here they are
-      // lost and every `[text][label]` use dangles.
+      // inline them at each use site. marked collects these into tokens.links
+      // (the `def` tokens it also emits are dropped in tokenToContent); without
+      // capturing them here they are lost and every `[text][label]` use dangles.
       const linkDefinitions = collectLinkDefinitions(tokens.links);
       if (linkDefinitions !== undefined) {
         metadata.set('linkDefinitions', linkDefinitions);
@@ -935,7 +948,7 @@ export class MarkdownParser {
       // escaped scalars (e.g. `title: "Foo: Bar"`) are not mangled by the naive
       // split above. Only string/number/boolean scalars are accepted.
       try {
-        const parsed = yamlLoad(frontmatter);
+        const parsed = loadYaml(frontmatter);
         if (
           parsed !== null &&
           typeof parsed === 'object' &&
@@ -991,7 +1004,22 @@ export class MarkdownParser {
       currentContent = [];
     };
 
+    // The prose block most recently produced from a token's raw text (the
+    // default branch of tokenToContent). marked 11 kept a block's trailing blank
+    // lines in its raw; later versions move them into the next space token, so
+    // they are folded back here to keep the content byte-identical.
+    let rawProse: MarkdownContent | undefined;
+
     for (const token of tokens) {
+      if (token.type === 'space') {
+        if (rawProse !== undefined) {
+          rawProse.content += token.raw;
+          rawProse = undefined;
+        }
+        continue;
+      }
+      rawProse = undefined;
+
       if (token.type === 'heading') {
         // Save accumulated content to the current section, or to the document
         // level when no section is open yet.
@@ -1025,6 +1053,9 @@ export class MarkdownParser {
         const content = this.tokenToContent(token);
         if (content) {
           currentContent.push(content);
+          if (TRAILING_BLANK_LINE_TOKEN_TYPES.has(token.type)) {
+            rawProse = content;
+          }
         }
       }
     }
@@ -1048,9 +1079,12 @@ export class MarkdownParser {
         // string for a bare ``` fence. Never inject a synthetic `text` tag: the
         // formatter renders an empty info string as a genuinely bare fence and a
         // non-empty one (for example `ts title="vite.config.ts"`) exactly.
+        // An indented block directly followed by a non-blank line keeps a
+        // trailing newline in marked 12+; marked 11 always stripped it.
         return {
           type: 'code',
-          content: token.text,
+          content:
+            token.codeBlockStyle === 'indented' ? token.text.replace(/\n+$/, '') : token.text,
           language: token.lang ?? '',
         };
 
@@ -1061,17 +1095,17 @@ export class MarkdownParser {
           content: token.text,
         };
 
-      case 'blockquote': {
-        // Extract text from blockquote
-        const text = token.text || '';
+      case 'blockquote':
+        // marked 12+ keeps the newline of a trailing empty `>` line; marked 11 did not.
         return {
           type: 'blockquote',
-          content: text,
+          content: token.text.replace(/\n+$/, ''),
         };
-      }
 
       case 'space':
-        // Skip whitespace tokens
+      case 'def':
+        // Whitespace carries nothing, and reference definitions were already
+        // captured from tokens.links above.
         return null;
 
       default: {
