@@ -24,8 +24,8 @@ import { canonicalJsonStringify } from '../utils/json.js';
 import { writeTextFileSafely } from '../utils/safe-write.js';
 
 export const CONFIG_FILE_NAME = 'llm-docs.json';
-export const DEFAULT_PACKS_DIR = 'agent-docs';
-export const CONFIG_SCHEMA_REF = './node_modules/llm-docs/schema/llm-docs.schema.json';
+const DEFAULT_PACKS_DIR = 'agent-docs';
+const CONFIG_SCHEMA_REF = './node_modules/llm-docs/schema/llm-docs.schema.json';
 
 export const PACK_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
@@ -33,7 +33,6 @@ export const SOURCE_TYPES = ['git', 'urls', 'llms-txt', 'local'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 export const CONVERTER_TOOLS = ['docling', 'markitdown', 'command', 'agent'] as const;
-export type ConverterTool = (typeof CONVERTER_TOOLS)[number];
 
 /** Named page transforms (spec 4.4); the implementations live in src/pack/markdown.ts. */
 export const TRANSFORM_NAMES = [
@@ -257,7 +256,7 @@ export const packConfigSchema = z
     }
   });
 
-export const projectConfigSchema = z.strictObject({
+const projectConfigSchema = z.strictObject({
   $schema: z.string().optional(),
   schemaVersion: z.literal(3),
   packsDir: projectPathSchema.optional(),
@@ -308,7 +307,7 @@ const resolvedCommonFields = {
   transforms: z.array(z.enum(TRANSFORM_NAMES)),
 };
 
-export const resolvedSourceSchema = z.discriminatedUnion('type', [
+const resolvedSourceSchema = z.discriminatedUnion('type', [
   z.strictObject({
     type: z.literal('git'),
     repo: z.string(),
@@ -503,7 +502,7 @@ export function parseProjectConfig(projectRoot: string, text: string): LoadedPro
 }
 
 /** Normalize a validated project-relative path to POSIX form without `./` or a trailing slash. */
-export function normalizeProjectPath(value: string): string {
+function normalizeProjectPath(value: string): string {
   const normalized = posix.normalize(value.replace(/\\/g, '/')).replace(/\/+$/, '');
   return normalized === '' ? '.' : normalized;
 }

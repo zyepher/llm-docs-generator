@@ -135,10 +135,10 @@ export async function acquireSource(
 // Matching and classification
 // ---------------------------------------------------------------------------
 
-export type FileClass = 'excluded' | 'passthrough' | 'convert' | 'include' | 'ignored';
+type FileClass = 'excluded' | 'passthrough' | 'convert' | 'include' | 'ignored';
 
 /** Compile a list of globs into one predicate over origin-relative POSIX paths. */
-export function compileGlobs(globs: readonly string[]): (path: string) => boolean {
+function compileGlobs(globs: readonly string[]): (path: string) => boolean {
   if (globs.length === 0) {
     return () => false;
   }
@@ -150,7 +150,7 @@ export function compileGlobs(globs: readonly string[]): (path: string) => boolea
  * Classify one origin-relative path for a source. Exclude wins over
  * everything; then passthrough, then a converter's include, then include.
  */
-export function createSourceMatcher(source: ResolvedSource): (path: string) => FileClass {
+function createSourceMatcher(source: ResolvedSource): (path: string) => FileClass {
   const excluded = compileGlobs(source.exclude);
   const passthrough = compileGlobs(source.passthrough);
   const converted = compileGlobs(source.convert?.include ?? []);
@@ -361,7 +361,7 @@ const WINDOWS_RESERVED_NAME = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 const WINDOWS_INVALID_CHARACTER = /[<>:"|?*\\\p{Cc}]/u;
 
 /** Why a path segment cannot exist on Windows, or undefined when it can. */
-export function windowsSegmentProblem(segment: string): string | undefined {
+function windowsSegmentProblem(segment: string): string | undefined {
   const base = segment.split('.')[0] ?? segment;
 
   if (WINDOWS_RESERVED_NAME.test(base)) {
