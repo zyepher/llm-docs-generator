@@ -6,11 +6,8 @@ import { compareStringsByCodeUnit } from './sort.js';
 
 /**
  * Directory names that bounded local traversals never descend into: version
- * control internals, dependency trees, and build outputs. Shared by discovery,
- * source-docs generation, source-truth, and source-verification so every
- * command that claims bounded local inspection skips the same vendored trees.
- * The lists had already drifted while copy-pasted per module ('.docusaurus'
- * was skipped only by source-verification); this is the reconciled union.
+ * control internals, dependency trees, and build outputs. One shared list so
+ * every bounded local inspection skips the same vendored trees.
  */
 export const SKIPPED_DIRECTORY_NAMES = [
   '.cache',
@@ -115,8 +112,8 @@ interface BoundedWalkState {
 }
 
 /**
- * Bounded, symlink-safe directory walk shared by discovery, source-docs,
- * source-truth, and source-verification. The generator owns the mechanics
+ * Bounded, symlink-safe directory walk shared by every local traversal. The
+ * generator owns the mechanics
  * (listing, deterministic ordering, global budgets, depth pruning, symlink
  * refusal); each caller owns the policy, deciding per event whether to warn,
  * throw, record, or stop.

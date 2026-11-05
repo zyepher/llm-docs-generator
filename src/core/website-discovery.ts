@@ -1,15 +1,10 @@
-import { mkdir } from 'node:fs/promises';
 import { isIP } from 'node:net';
-import { join, resolve } from 'node:path';
 
 import { request } from 'undici';
 
-import { DISCOVERY_REPORT_SCHEMA_VERSION } from './discovery.js';
 import { errorMessage } from '../utils/guards.js';
-import { writeJsonFileSafely } from '../utils/json.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 
-export const WEBSITE_BOUNDED_INSPECTION_MODE = 'website-bounded-inspection';
 export const DEFAULT_WEBSITE_FETCH_TIMEOUT_MS = 10_000;
 export const DEFAULT_WEBSITE_MAX_BYTES_PER_RESPONSE = 65_536;
 export const DEFAULT_WEBSITE_MAX_CANDIDATES = 200;
@@ -45,7 +40,6 @@ export type WebsiteCandidateEvidenceFlag =
 
 export interface DiscoverWebsiteOptions {
   url: string;
-  outputDir?: string;
   timeoutMs?: number;
   maxBytesPerResponse?: number;
   maxCandidates?: number;
@@ -118,20 +112,6 @@ export interface WebsiteDiscoveryInspection {
   warnings: string[];
 }
 
-export interface WebsiteDiscoveryReport extends WebsiteDiscoveryInspection {
-  schemaVersion: typeof DISCOVERY_REPORT_SCHEMA_VERSION;
-  mode: typeof WEBSITE_BOUNDED_INSPECTION_MODE;
-  generatedAt: string;
-  output: {
-    reportPath: string;
-  };
-}
-
-export interface DiscoverWebsiteResult {
-  report: WebsiteDiscoveryReport;
-  reportPath: string;
-}
-
 export interface PlannedWebsiteResource {
   url: string;
   sourceRole: WebsiteResourceRole;
@@ -180,37 +160,8 @@ export interface CandidateCollectionState {
 
 type CandidateFilter = (normalizedUrl: string) => boolean;
 
-export async function discoverWebsite(
-  options: DiscoverWebsiteOptions
-): Promise<DiscoverWebsiteResult> {
-  const inspection = await inspectWebsite(options);
-  const outputDir =
-    options.outputDir === undefined
-      ? defaultOutputDirForWebsite(inspection.website.normalizedUrl)
-      : resolve(options.outputDir);
-  const reportPath = join(outputDir, 'discovery-report.json');
-  const report: WebsiteDiscoveryReport = {
-    schemaVersion: DISCOVERY_REPORT_SCHEMA_VERSION,
-    mode: WEBSITE_BOUNDED_INSPECTION_MODE,
-    generatedAt: new Date().toISOString(),
-    website: inspection.website,
-    inspectedResources: inspection.inspectedResources,
-    crawlPolicy: inspection.crawlPolicy,
-    output: {
-      reportPath,
-    },
-    candidates: inspection.candidates,
-    warnings: inspection.warnings,
-  };
-
-  await mkdir(outputDir, { recursive: true });
-  await writeJsonFileSafely(reportPath, report);
-
-  return { report, reportPath };
-}
-
 export async function inspectWebsite(
-  options: Omit<DiscoverWebsiteOptions, 'outputDir'>
+  options: DiscoverWebsiteOptions
 ): Promise<WebsiteDiscoveryInspection> {
   const normalizedUrl = normalizeWebsiteUrl(options.url, options.allowPrivateHosts ?? false);
   const websiteUrl = new URL(normalizedUrl);
@@ -1265,19 +1216,6 @@ function compareSourceResources(
   }
 
   return WEBSITE_EVIDENCE_RELATION_ORDER[a.evidence] - WEBSITE_EVIDENCE_RELATION_ORDER[b.evidence];
-}
-
-function defaultOutputDirForWebsite(normalizedUrl: string): string {
-  const url = new URL(normalizedUrl);
-  const port = url.port === '' ? '' : `-${url.port}`;
-  const path = url.pathname === '/' ? 'root' : url.pathname.replace(/^\/+|\/+$/g, '');
-  const directoryName = `${sanitizeFileName(`${url.hostname}${port}-${path}`)}-website-discovery`;
-
-  return resolve(directoryName);
-}
-
-function sanitizeFileName(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'website';
 }
 
 function resolvePositiveSafeInteger(

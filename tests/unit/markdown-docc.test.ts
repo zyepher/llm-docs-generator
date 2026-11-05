@@ -1,24 +1,16 @@
 /**
- * Coverage for markdown structure fidelity (blockquotes, single-H1 hoisting,
- * Unicode slugs) and DocC block-directive handling, including the .docc
- * fixture bundle.
+ * Coverage for markdown structure fidelity (single-H1 hoisting, Unicode slugs)
+ * and DocC block-directive handling, including the .docc fixture bundle.
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import {
-  ContentBlockType,
-  DocNodeType,
-  chunkDocNode,
-  createContentBlock,
-  createDocNode,
-} from '../../src/index.js';
-import { formatDocNode } from '../../src/core/universal-formatter.js';
+import { ContentBlockType, DocNodeType, type DocNode } from '../../src/core/models.js';
 import { MarkdownFormatParser } from '../../src/parsers/markdown/index.js';
 import { slugifyText } from '../../src/utils/slug.js';
 
@@ -42,33 +34,14 @@ async function parseMarkdown(content: string, filename = 'guide.md') {
   return await new MarkdownFormatParser().parse(path);
 }
 
+function collectText(node: DocNode): string {
+  const ownContent = node.content.map((block) => block.content).join('\n');
+  const childContent = node.children.map((child) => collectText(child)).join('\n');
+  return [node.title, ownContent, childContent].filter(Boolean).join('\n');
+}
+
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-});
-
-describe('blockquote formatting', () => {
-  it('renders blockquote-annotated prose with a "> " prefix on every line', async () => {
-    const docNode = await parseMarkdown(
-      ['## Notes', '', '> [!NOTE]', '> First line.', '> Second line.', ''].join('\n')
-    );
-
-    const outputDir = join(await createTempDir(), 'out');
-    await formatDocNode(docNode, { outputDir, filenamePrefix: 'quote', title: docNode.title });
-    const full = await readFile(join(outputDir, 'quote-full-llms.txt'), 'utf-8');
-
-    expect(full).toContain('> [!NOTE]\n> First line.\n> Second line.');
-  });
-
-  it('leaves ordinary prose without a blockquote prefix', async () => {
-    const docNode = await parseMarkdown(['## Notes', '', 'Plain paragraph.', ''].join('\n'));
-
-    const outputDir = join(await createTempDir(), 'out');
-    await formatDocNode(docNode, { outputDir, filenamePrefix: 'plain', title: docNode.title });
-    const full = await readFile(join(outputDir, 'plain-full-llms.txt'), 'utf-8');
-
-    expect(full).toContain('\nPlain paragraph.\n');
-    expect(full).not.toContain('> Plain paragraph.');
-  });
 });
 
 describe('single-H1 hoisting', () => {
@@ -120,20 +93,6 @@ describe('Unicode slugs', () => {
     const docNode = await parseMarkdown(['## 快速入门', '', '内容。', ''].join('\n'));
     expect(docNode.children[0]?.id).toBe('快速入门');
   });
-
-  it('keeps semantic chunk segments for non-Latin node titles', () => {
-    const root = createDocNode(DocNodeType.ROOT, 'docs', '文档', {
-      metadata: new Map<string, unknown>([['format', 'markdown']]),
-      children: [
-        createDocNode(DocNodeType.CATEGORY, '快速入门', '快速入门', {
-          content: [createContentBlock(ContentBlockType.PROSE, '内容。')],
-        }),
-      ],
-    });
-
-    const result = chunkDocNode(root);
-    expect(result.chunks.map((chunk) => chunk.id)).toEqual(['docs/快速入门']);
-  });
 });
 
 describe('DocC block directives', () => {
@@ -148,9 +107,7 @@ describe('DocC block directives', () => {
     expect(guide?.children.map((child) => child.title)).toEqual(['Install', 'Layout', '快速入门']);
     expect(guide?.children[2]?.id).toBe('快速入门');
 
-    const outputDir = join(await createTempDir(), 'out');
-    await formatDocNode(docNode, { outputDir, filenamePrefix: 'sample', title: 'SamplePack' });
-    const full = await readFile(join(outputDir, 'sample-full-llms.txt'), 'utf-8');
+    const full = collectText(docNode);
 
     // Layout containers unwrap: content survives, directives do not.
     expect(full).toContain('The left column explains requests.');
@@ -159,11 +116,16 @@ describe('DocC block directives', () => {
     expect(full).toContain('Add the dependency to `Package.swift`.');
     expect(full).toContain('.package(url: "https://example.com/sample.git", from: "1.0.0")');
     expect(full).toContain("Add `pod 'Sample'` to your Podfile.");
+    expect(guide?.children[0]?.children[0]?.content[1]).toMatchObject({
+      type: ContentBlockType.CODE,
+      language: 'swift',
+    });
 
-    // Media and snippet placeholders are deterministic single lines.
-    expect(full).toContain('![Sample architecture diagram](hero.png)');
-    expect(full).toContain('[Video: Getting started tour](intro.mov)');
-    expect(full).toContain('`Sample/Snippets/hello#setup`');
+    // Media and snippet placeholders are deterministic single prose lines.
+    const layoutProse = guide?.children[1]?.content.map((block) => block.content) ?? [];
+    expect(layoutProse).toContain('![Sample architecture diagram](hero.png)');
+    expect(layoutProse).toContain('[Video: Getting started tour](intro.mov)');
+    expect(layoutProse).toContain('`Sample/Snippets/hello#setup`');
 
     // Comment and metadata blocks are gone, including nested braces.
     expect(full).not.toContain('Internal note');
@@ -172,9 +134,110 @@ describe('DocC block directives', () => {
     expect(full).not.toContain('@PageColor');
     expect(full).not.toMatch(/@(?:Comment|Row|Column|TabNavigator|Tab|Image|Video|Snippet)\b/);
 
-    // The DocC callout renders as a blockquote.
-    expect(full).toContain('> Important: Always pin an explicit version.');
-    expect(full).toContain('> The pack records provenance for every file.');
+    // The DocC callout is kept as a blockquote.
+    const callout = guide?.content.find(
+      (block) => block.annotations?.get('style') === 'blockquote'
+    );
+    expect(callout?.content).toBe(
+      'Important: Always pin an explicit version.\nThe pack records provenance for every file.'
+    );
+  });
+
+  it('parses DocC-flavored Markdown into a typed DocNode hierarchy', async () => {
+    const docNode = await parseMarkdown(
+      [
+        '@Metadata {',
+        '  @DocumentationExtension(mergeBehavior: append)',
+        '  @PageColor(purple)',
+        '}',
+        '',
+        '<!-- parser-only comment that should be removed -->',
+        '',
+        '## Authentication',
+        'Use <doc:SignInWithOTP> when you need passwordless access.',
+        '',
+        '@Options(scope: local) {',
+        '  @AutomaticSeeAlso(disabled)',
+        '}',
+        '',
+        '### Sign in with OTP',
+        'Call the auth client and keep the session returned by <doc:AuthSession>.',
+        '',
+        '```swift',
+        'try await supabase.auth.signInWithOTP(email: "person@example.com")',
+        '```',
+        '',
+        '#### Parameters',
+        'Pass an email address that can receive the magic link.',
+        '',
+        '```json',
+        '{ "email": "person@example.com" }',
+        '```',
+        '',
+        '## Storage',
+        'Use storage buckets for user files.',
+        '',
+      ].join('\n'),
+      'DocC Acceptance Guide.md'
+    );
+
+    expect(docNode.type).toBe(DocNodeType.SECTION);
+    expect(docNode.title).toBe('DocC Acceptance Guide');
+    expect(docNode.metadata.get('format')).toBe('markdown');
+
+    const [authentication, storage] = docNode.children;
+    expect(authentication).toMatchObject({
+      type: DocNodeType.CATEGORY,
+      id: 'authentication',
+      title: 'Authentication',
+    });
+    expect(storage).toMatchObject({ type: DocNodeType.CATEGORY, id: 'storage', title: 'Storage' });
+
+    const signInOperation = authentication?.children[0];
+    expect(signInOperation).toMatchObject({
+      type: DocNodeType.OPERATION,
+      id: 'sign-in-with-otp',
+      title: 'Sign in with OTP',
+    });
+    const parameters = signInOperation?.children[0];
+    expect(parameters).toMatchObject({
+      type: DocNodeType.ITEM,
+      id: 'parameters',
+      title: 'Parameters',
+    });
+
+    expect(authentication?.content[0]).toMatchObject({
+      type: ContentBlockType.PROSE,
+      content: 'Use SignInWithOTP when you need passwordless access.',
+    });
+    expect(signInOperation?.content[0]).toMatchObject({
+      type: ContentBlockType.PROSE,
+      content: 'Call the auth client and keep the session returned by AuthSession.',
+    });
+    expect(signInOperation?.content[1]).toMatchObject({
+      type: ContentBlockType.CODE,
+      language: 'swift',
+      content: 'try await supabase.auth.signInWithOTP(email: "person@example.com")',
+    });
+    expect(parameters?.content[1]).toMatchObject({
+      type: ContentBlockType.CODE,
+      language: 'json',
+      content: '{ "email": "person@example.com" }',
+    });
+
+    const parsedText = collectText(docNode);
+    for (const residue of [
+      '@Metadata',
+      '@Options',
+      '@DocumentationExtension',
+      '@AutomaticSeeAlso',
+      'PageColor',
+      '<!--',
+      'parser-only comment',
+      '<doc:',
+    ]) {
+      expect(parsedText).not.toContain(residue);
+    }
   });
 
   it('drops a single-line @Metadata block and keeps surrounding prose', async () => {

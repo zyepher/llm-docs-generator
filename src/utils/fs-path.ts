@@ -6,11 +6,10 @@ import { isFileNotFoundError } from './guards.js';
 /**
  * Shared filesystem path-containment helpers.
  *
- * These underpin the security-critical "output directory must be outside the
- * input" checks across source-docs, source-truth-docs, source-verification, and
- * refresh. They were copy-pasted into each module, so a drift here was a real
- * path-escape hazard; keeping one copy means every call-site shares the exact
- * same containment logic.
+ * These underpin security-critical containment checks (an output must stay
+ * inside, or outside, a given root). Keeping one copy means every call site
+ * shares the exact same containment logic, so a drift cannot become a
+ * path-escape hazard.
  */
 
 /**

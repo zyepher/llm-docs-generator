@@ -11,7 +11,6 @@ import {
   type Operation,
   type SpecInfo,
 } from '../../src/core/models.js';
-import { formatDocNode } from '../../src/core/universal-formatter.js';
 import { openRefToDocNode } from '../../src/parsers/openref/adapter.js';
 import { OpenRefParser } from '../../src/parsers/openref/parser.js';
 
@@ -95,34 +94,6 @@ describe('openRefToDocNode language handling', () => {
     );
 
     expect(dataBlocks?.map((block) => block.language)).toEqual(['sql', 'json']);
-  });
-
-  it('renders an undeclared-language example as a clean untagged fence', async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), 'llm-docs-openref-adapter-'));
-    tempDirs.push(outputDir);
-
-    const specData = createSpecData(INFO, [makeOperation()]);
-    const root = openRefToDocNode(specData);
-
-    await formatDocNode(root, { outputDir, filenamePrefix: 'docs', includeMetadata: false });
-    const output = await readFile(join(outputDir, 'docs-full-llms.txt'), 'utf-8');
-
-    expect(output).toContain('```\nlet rows = try await client.from("todos").select()\n```');
-    // The old inferLanguage fallback tag must not survive.
-    expect(output).not.toContain('```code');
-  });
-
-  it('renders the declared language as the fence info string', async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), 'llm-docs-openref-adapter-lang-'));
-    tempDirs.push(outputDir);
-
-    const specData = createSpecData(INFO, [makeOperation()], 'swift');
-    const root = openRefToDocNode(specData);
-
-    await formatDocNode(root, { outputDir, filenamePrefix: 'docs', includeMetadata: false });
-    const output = await readFile(join(outputDir, 'docs-full-llms.txt'), 'utf-8');
-
-    expect(output).toContain('```swift\nlet rows = try await client.from("todos").select()\n```');
   });
 });
 

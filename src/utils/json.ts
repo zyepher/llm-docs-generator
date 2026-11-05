@@ -18,10 +18,8 @@ export async function readJsonFile(path: string): Promise<unknown> {
 /**
  * Serialize `value` as pretty-printed JSON (trailing newline) and write it
  * atomically via the shared safe-write path (temp + rename, refuses to write
- * through a symlink or non-regular file). Replaces the byte-identical, non-atomic
- * `writeFile(path, JSON.stringify(value, null, 2) + '\n')` helper that the
- * source-docs / source-truth-docs / source-verification writers each kept, so a
- * crash mid-write can no longer leave a truncated manifest/report/failure file.
+ * through a symlink or non-regular file), so a crash mid-write can never leave a
+ * truncated JSON file behind.
  */
 export async function writeJsonFileSafely(path: string, value: unknown): Promise<void> {
   await writeTextFileSafely(path, `${JSON.stringify(value, null, 2)}\n`);

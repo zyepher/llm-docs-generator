@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,7 +11,6 @@ import {
   type ContentBlock,
   type DocNode,
 } from '../../src/core/models.js';
-import { generateSourceDocs } from '../../src/core/source-docs.js';
 import { FormatType } from '../../src/parsers/base.js';
 import { RstFormatParser, parseRstFile } from '../../src/parsers/rst/index.js';
 
@@ -575,10 +574,9 @@ describe('reStructuredText inline markup rendering', () => {
     expect(parsedText).toContain('expand 9.9.');
   });
 
-  it('produces a generated pack with no raw role or trailing-underscore residue', async () => {
+  it('renders a directory with no raw role or trailing-underscore residue', async () => {
     const dir = await createTempDir();
     const sourceDir = join(dir, 'docs');
-    const outputDir = join(dir, 'out');
     await mkdir(sourceDir, { recursive: true });
     await writeFile(
       join(sourceDir, 'index.rst'),
@@ -608,13 +606,7 @@ describe('reStructuredText inline markup rendering', () => {
       'utf-8'
     );
 
-    const result = await generateSourceDocs({
-      source: sourceDir,
-      outputDir,
-      format: 'rst',
-      generator: { name: 'llm-docs', version: '0.0.0-test', cliName: 'llm-docs' },
-    });
-    const full = await readFile(join(result.llmDocsDir, 'docs-full-llms.txt'), 'utf-8');
+    const full = collectText(await new RstFormatParser().parse(sourceDir));
 
     expect(full).toContain('MyPkg ships `mypkg.load` and `Frame`.');
     expect(full).toContain('[homepage](https://example.com/mypkg)');

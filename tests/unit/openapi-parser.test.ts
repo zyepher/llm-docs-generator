@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -6,10 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { FormatDetector } from '../../src/core/detector.js';
 import { DocNodeType, type DocNode } from '../../src/core/models.js';
-import { generateSourceDocs } from '../../src/core/source-docs.js';
 import { FormatType } from '../../src/parsers/base.js';
 import { OpenApiFormatParser, parseOpenApiFile } from '../../src/parsers/openapi/index.js';
-import { openRefParser } from '../../src/parsers/openref/index.js';
 
 const tempDirs: string[] = [];
 
@@ -190,11 +188,10 @@ describe('OpenAPI / Swagger parser', () => {
     expect(createPetContent).toContain('simple {"name":"Fido"}');
   });
 
-  it('parses OpenAPI YAML and keeps OpenRef YAML detection distinct', async () => {
+  it('parses OpenAPI YAML and does not claim other YAML documents', async () => {
     const dir = await createTempDir();
     const openApiPath = join(dir, 'openapi.yaml');
-    const openRefPath = join(dir, 'openref.yaml');
-    const nullableOpenRefPath = join(dir, 'openref-empty.yaml');
+    const otherYamlPath = join(dir, 'other.yaml');
 
     await writeFile(
       openApiPath,
@@ -226,7 +223,7 @@ describe('OpenAPI / Swagger parser', () => {
     );
 
     await writeFile(
-      openRefPath,
+      otherYamlPath,
       [
         'info:',
         '  id: supabase-js',
@@ -239,18 +236,11 @@ describe('OpenAPI / Swagger parser', () => {
       ].join('\n'),
       'utf-8'
     );
-    await writeFile(
-      nullableOpenRefPath,
-      ['info:', '  id: supabase-js', '  title: Supabase JS', 'functions:', ''].join('\n'),
-      'utf-8'
-    );
 
     const detector = new FormatDetector();
 
     expect(await detector.detect(openApiPath)).toBe(FormatType.OPENAPI);
-    expect(await detector.detect(openRefPath)).toBe(FormatType.OPENREF);
-    expect(await detector.detect(nullableOpenRefPath)).toBe(FormatType.OPENREF);
-    expect(await openRefParser.detect(openApiPath)).toBe(false);
+    expect(await new OpenApiFormatParser().detect(otherYamlPath)).toBe(false);
 
     const root = await parseOpenApiFile(openApiPath);
     const operation = findNode(root, 'get-users-id');
@@ -398,9 +388,11 @@ describe('OpenAPI / Swagger parser', () => {
     const dir = await createTempDir();
     const invalidRootPath = join(dir, 'invalid-root.json');
     const missingPathsPath = join(dir, 'missing-paths.json');
+    const arrayPathsPath = join(dir, 'array-paths.json');
     const unsupportedPath = join(dir, 'unsupported.json');
 
     await writeJson(invalidRootPath, ['not', 'an', 'object']);
+    await writeJson(arrayPathsPath, { openapi: '3.1.0', info: { title: 'Bad API' }, paths: [] });
     await writeJson(missingPathsPath, {
       openapi: '3.0.0',
       info: { title: 'No Paths', version: '1.0.0' },
@@ -413,6 +405,9 @@ describe('OpenAPI / Swagger parser', () => {
 
     await expect(parseOpenApiFile(invalidRootPath)).rejects.toThrow(/root must be an object/);
     await expect(parseOpenApiFile(missingPathsPath)).rejects.toThrow(/paths object/);
+    await expect(parseOpenApiFile(arrayPathsPath)).rejects.toThrow(
+      'OpenAPI / Swagger document must contain a paths object'
+    );
     await expect(parseOpenApiFile(unsupportedPath)).rejects.toThrow(/Unsupported OpenAPI version/);
 
     const parser = new OpenApiFormatParser();
@@ -1257,9 +1252,8 @@ describe('OpenAPI / Swagger parser', () => {
     ]);
   });
 
-  it('propagates omission warnings into the manifest via generateSourceDocs', async () => {
+  it('records omission warnings and marks each omitted value in place', async () => {
     const dir = await createTempDir();
-    const outputDir = await createTempDir();
     const sourcePath = join(dir, 'manifest-omission.openapi.json');
     const big = 'w'.repeat(400);
 
@@ -1282,19 +1276,12 @@ describe('OpenAPI / Swagger parser', () => {
       },
     });
 
-    const result = await generateSourceDocs({
-      source: sourcePath,
-      outputDir,
-      format: 'openapi',
-      generator: { name: 'llm-docs', version: '0.0.0-test', cliName: 'llm-docs' },
-      output: { filenamePrefix: 'pack' },
-    });
-
-    expect(result.manifest.warnings).toContain(
+    const root = await parseOpenApiFile(sourcePath);
+    expect(root.metadata.get('warnings')).toContain(
       'Omitted 1 example or enum value(s) exceeding the inline cap; each omission is marked "(value omitted: exceeds inline cap)" in place.'
     );
 
-    const full = await readFile(join(result.llmDocsDir, 'pack-full-llms.txt'), 'utf-8');
+    const full = collectContent(root);
     expect(full).toContain('example (value omitted: exceeds inline cap)');
     expect(full).toContain('example 10');
     expect(full).not.toContain(big);

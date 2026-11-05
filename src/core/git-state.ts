@@ -1,5 +1,5 @@
 /**
- * Deterministic VCS-provenance capture for `generate --source`. Given the
+ * Deterministic VCS-provenance capture for a local source. Given the
  * resolved source path, records the enclosing git repository's identity
  * (origin remote, HEAD commit, tags pointing at HEAD, dirty state, and the
  * source path relative to the repo root). A non-git source yields undefined
@@ -12,9 +12,19 @@ import { basename, dirname } from 'node:path';
 import { promisify } from 'node:util';
 
 import { compareStringsByCodeUnit } from '../utils/sort.js';
-import type { GenerateSourceGitContext } from './source-docs.js';
 
 const execFileAsync = promisify(execFile);
+
+export interface GitState {
+  /** The origin remote with any embedded credentials removed, or null when there is none. */
+  remoteUrl: string | null;
+  commit: string;
+  /** Tags pointing at HEAD, sorted by code unit. */
+  tags: string[];
+  dirty: boolean;
+  /** The source path relative to the repository root, POSIX separators. */
+  sourceRootFromRepo: string;
+}
 
 // Upper bound for any single git invocation. With GIT_TERMINAL_PROMPT=0 git
 // fails fast on auth prompts, so this is a secondary safety net.
@@ -25,9 +35,7 @@ interface GitCommandResult {
   stderr: string;
 }
 
-export async function captureGitState(
-  resolvedSourcePath: string
-): Promise<GenerateSourceGitContext | undefined> {
+export async function captureGitState(resolvedSourcePath: string): Promise<GitState | undefined> {
   const gitCwd = await gitCwdForSource(resolvedSourcePath);
 
   if (gitCwd === undefined) {
