@@ -13,7 +13,6 @@ import { errorMessage } from '../utils/guards.js';
  * Format types supported by the generator
  */
 export enum FormatType {
-  OPENREF = 'openref',
   OPENAPI = 'openapi',
   MARKDOWN = 'markdown',
   RST = 'rst',

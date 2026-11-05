@@ -1,9 +1,9 @@
 /**
  * Format Auto-Detection
  *
- * Automatically detects the format of input sources (OpenRef YAML, Markdown, etc.)
+ * Automatically detects the format of input sources (OpenAPI, Markdown, etc.)
  * Uses file extensions and parser detection methods. Structured formats such
- * as OpenRef, OpenAPI, and Swagger inspect parsed local file content so YAML
+ * as OpenAPI and Swagger inspect parsed local file content so YAML and JSON
  * files are classified by shape instead of extension alone.
  *
  * Performance: O(p * n) worst case where p = registered parsers and n = local
@@ -12,7 +12,6 @@
 
 import { FormatType } from '../parsers/base.js';
 import { openApiParser } from '../parsers/openapi/index.js';
-import { openRefParser } from '../parsers/openref/index.js';
 import { markdownParser } from '../parsers/markdown/index.js';
 import { rstParser } from '../parsers/rst/index.js';
 import { htmlParser } from '../parsers/html/index.js';
@@ -28,7 +27,6 @@ export class FormatDetector {
 
   constructor() {
     // Register available parsers
-    this.registerParser(openRefParser);
     this.registerParser(openApiParser);
     this.registerParser(markdownParser);
     this.registerParser(rstParser);
@@ -119,8 +117,6 @@ export class FormatDetector {
     switch (normalized) {
       case 'yml':
       case 'yaml':
-        return FormatType.OPENREF;
-
       case 'json':
         return FormatType.OPENAPI;
 
