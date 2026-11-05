@@ -168,6 +168,8 @@ export async function scanDependencies(
     // The file budget never stops the walk; the entry budget is the real bound.
     maxFiles: MAX_WALK_ENTRIES,
     skipDirectoryNames: true,
+    extraSkippedDirectoryNames: EXTRA_SKIPPED_DIRECTORY_NAMES,
+    skippedDirectoryPaths: new Set(skipPrefixes),
   })) {
     if (event.kind === 'entries-exhausted') {
       warnings.push(
@@ -188,11 +190,6 @@ export async function scanDependencies(
     }
 
     const relativePath = toPosixPath(event.relativePath);
-
-    if (isInSkippedDirectory(relativePath, skipPrefixes)) {
-      continue;
-    }
-
     const fileName = event.entry.name;
     const unsupported = UNSUPPORTED_LOCKFILES[fileName];
 
@@ -534,16 +531,6 @@ function normalizeSkipDirectories(directories: readonly string[]): string[] {
   }
 
   return prefixes;
-}
-
-function isInSkippedDirectory(relativePath: string, skipPrefixes: readonly string[]): boolean {
-  const segments = relativePath.split('/');
-
-  if (segments.slice(0, -1).some((segment) => EXTRA_SKIPPED_DIRECTORY_NAMES.has(segment))) {
-    return true;
-  }
-
-  return skipPrefixes.some((prefix) => relativePath.startsWith(`${prefix}/`));
 }
 
 function uniqueSorted(values: Iterable<string>): string[] {

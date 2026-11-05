@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -445,6 +445,30 @@ describe('scanDependencies walking', () => {
       'shallow-enough',
     ]);
   });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'never descends into skipped trees, so an unreadable virtualenv or packs directory is not even listed',
+    async () => {
+      const root = await makeProject({
+        'requirements.txt': 'flask==3.0.3\n',
+        '.venv/lib/requirements.txt': 'ghost==1.0.0\n',
+        'agent-docs/vite/requirements.txt': 'ghost==1.0.0\n',
+      });
+      // A walk that listed these directories would report them as unreadable.
+      await chmod(join(root, '.venv'), 0o000);
+      await chmod(join(root, 'agent-docs'), 0o000);
+
+      try {
+        const scan = await scanDependencies(root, { skipDirectories: ['agent-docs'] });
+
+        expect(scan.warnings).toEqual([]);
+        expect(scan.lockfiles).toEqual(['requirements.txt']);
+      } finally {
+        await chmod(join(root, '.venv'), 0o755);
+        await chmod(join(root, 'agent-docs'), 0o755);
+      }
+    }
+  );
 
   it('honors maxDepth', async () => {
     const root = await makeProject({

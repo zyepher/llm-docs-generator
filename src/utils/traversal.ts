@@ -92,6 +92,14 @@ export interface BoundedWalkOptions {
   maxEntries: number;
   maxFiles: number;
   skipDirectoryNames: boolean;
+  /**
+   * Further directory names never descended into, applied whether or not
+   * `skipDirectoryNames` is set. Pruned during the walk (a `skipped-directory`
+   * event), so nothing below them is ever listed.
+   */
+  extraSkippedDirectoryNames?: ReadonlySet<string>;
+  /** Root-relative POSIX directory paths never descended into, pruned the same way. */
+  skippedDirectoryPaths?: ReadonlySet<string>;
   counters?: BoundedWalkCounters;
 }
 
@@ -208,7 +216,7 @@ async function* walkBoundedDirectory(
     }
 
     if (entry.isDirectory()) {
-      if (options.skipDirectoryNames && isSkippedTraversalDirectory(entry.name)) {
+      if (isPrunedDirectory(entry.name, relativePath, options)) {
         yield { kind: 'skipped-directory', absolutePath, relativePath, depth: entryDepth };
         continue;
       }
@@ -248,6 +256,22 @@ async function* walkBoundedDirectory(
   if (entryBudgetExhausted) {
     state.stopped = true;
   }
+}
+
+function isPrunedDirectory(
+  name: string,
+  relativePath: string,
+  options: BoundedWalkOptions
+): boolean {
+  if (options.skipDirectoryNames && isSkippedTraversalDirectory(name)) {
+    return true;
+  }
+
+  if (options.extraSkippedDirectoryNames?.has(name) === true) {
+    return true;
+  }
+
+  return options.skippedDirectoryPaths?.has(relativePath.split(sep).join('/')) === true;
 }
 
 /**

@@ -121,6 +121,26 @@ describe('walkBoundedDirectoryTree', () => {
     expect(relativePaths(unskipped, 'file')).toEqual(['keep.md', 'node_modules/dep.md']);
   });
 
+  it('prunes extra directory names and root-relative paths during the walk', async () => {
+    const root = await makeTempDir('llm-docs-walk-extra-skip-');
+    await writeTree(root, {
+      '.venv/lib/site.md': 'venv',
+      'docs/agent-docs/vite/page.md': 'pack',
+      'docs/keep.md': 'keep',
+      'other/agent-docs/kept.md': 'same name, other path',
+    });
+
+    const events = await collectEvents({
+      root,
+      ...unbounded,
+      extraSkippedDirectoryNames: new Set(['.venv']),
+      skippedDirectoryPaths: new Set(['docs/agent-docs']),
+    });
+
+    expect(relativePaths(events, 'skipped-directory')).toEqual(['.venv', 'docs/agent-docs']);
+    expect(relativePaths(events, 'file')).toEqual(['docs/keep.md', 'other/agent-docs/kept.md']);
+  });
+
   it('prunes a directory entry once its depth exceeds maxDepth', async () => {
     const root = await makeTempDir('llm-docs-walk-depth-');
     await writeTree(root, { 'one/two/three/deep.md': 'deep', 'one/two/mid.md': 'mid' });
