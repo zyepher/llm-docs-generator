@@ -7,7 +7,7 @@
  * Phase 2c registers the `git`, `urls`, and `llms-txt` acquirers in
  * ACQUIRERS. Each writes into `context.workDir` (a fresh temp directory the
  * caller removes, also on failure) and reports files with origin-relative
- * POSIX paths. Phase 2d acts on the `convert` selections.
+ * POSIX paths. src/sources/convert.ts runs the `convert` selections.
  */
 
 import { readFile, realpath, stat } from 'node:fs/promises';
@@ -135,7 +135,7 @@ export async function acquireSource(
 // Matching and classification
 // ---------------------------------------------------------------------------
 
-type FileClass = 'excluded' | 'passthrough' | 'convert' | 'include' | 'ignored';
+type FileClass = 'excluded' | 'passthrough' | 'agent-output' | 'convert' | 'include' | 'ignored';
 
 /** Compile a list of globs into one predicate over origin-relative POSIX paths. */
 function compileGlobs(globs: readonly string[]): (path: string) => boolean {
@@ -148,7 +148,10 @@ function compileGlobs(globs: readonly string[]): (path: string) => boolean {
 
 /**
  * Classify one origin-relative path for a source. Exclude wins over
- * everything; then passthrough, then a converter's include, then include.
+ * everything; then passthrough (so a file matched by both passthrough and a
+ * converter's include is carried byte-identical, never converted); then, for
+ * the `agent` converter, the `X.md` written next to a converted original `X`;
+ * then a converter's include, then include.
  */
 function createSourceMatcher(source: ResolvedSource): (path: string) => FileClass {
   const excluded = compileGlobs(source.exclude);
@@ -162,6 +165,12 @@ function createSourceMatcher(source: ResolvedSource): (path: string) => FileClas
     }
     if (passthrough(path)) {
       return 'passthrough';
+    }
+    if (source.convert?.tool === 'agent' && path.endsWith('.md')) {
+      const original = path.slice(0, -'.md'.length);
+      if (converted(original) && !excluded(original) && !passthrough(original)) {
+        return 'agent-output';
+      }
     }
     if (source.convert !== null && converted(path)) {
       return 'convert';
@@ -215,9 +224,11 @@ export interface SelectedPassthrough extends SelectedBase {
   kind: 'passthrough';
 }
 
-/** A document a converter turns into a page (Phase 2d, spec 4.6). */
+/** A document a converter turns into a page (spec 4.6). */
 export interface SelectedConversion extends SelectedBase {
   kind: 'convert';
+  /** For the `agent` converter: the sibling `<path>.md` an agent wrote, when it exists. */
+  agentOutput?: AcquiredFile;
 }
 
 export type SelectedFile = SelectedPage | SelectedPassthrough | SelectedConversion;
@@ -258,12 +269,18 @@ export async function selectPackFiles(
     }
 
     const classify = createSourceMatcher(source);
+    const agentOutputs = new Map(
+      acquisition.files
+        .filter((file) => classify(file.path) === 'agent-output')
+        .map((file) => [file.path.slice(0, -'.md'.length), file])
+    );
 
     for (const file of acquisition.files) {
       assertSafeRelativePath(file.path, `source ${sourceIndex}`);
       const fileClass = classify(file.path);
 
-      if (fileClass === 'excluded' || fileClass === 'ignored') {
+      // Agent outputs are consumed by their original's conversion below.
+      if (fileClass === 'excluded' || fileClass === 'ignored' || fileClass === 'agent-output') {
         continue;
       }
 
@@ -278,11 +295,13 @@ export async function selectPackFiles(
       }
 
       if (fileClass === 'convert') {
+        const agentOutput = agentOutputs.get(file.path);
         files.push({
           kind: 'convert',
           sourceIndex,
           file,
           outputPath: mounted('pages', source.mount, replaceExtension(file.path, '.md')),
+          ...(agentOutput === undefined ? {} : { agentOutput }),
         });
         continue;
       }

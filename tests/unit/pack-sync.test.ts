@@ -641,7 +641,7 @@ describe('verifyPacks', () => {
     expect(problems(report)[0]).toBe(
       "demo manifest-schema fail: manifest.json manifest.json is missing; run 'llm-docs sync demo'"
     );
-    expect(report.results.filter((result) => result.status === 'skipped')).toHaveLength(5);
+    expect(report.results.filter((result) => result.status === 'skipped')).toHaveLength(6);
 
     await writeFile(join(root, 'llm-docs.json'), '{"schemaVersion":3,"packs":{},"oops":1}');
     expect(problems(await verifyPacks(root, undefined))).toEqual([

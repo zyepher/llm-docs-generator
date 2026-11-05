@@ -135,6 +135,7 @@ describe('llm-docs v3 CLI', () => {
       'links',
       'recipe',
       'lockfile',
+      'conversion',
     ]);
 
     await writeFile(join(root, 'agent-docs', 'demo', 'pages', 'index.md'), 'tampered\n');
