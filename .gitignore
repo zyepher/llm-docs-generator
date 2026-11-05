@@ -46,3 +46,10 @@ NEXT_GEN_PLAN.html
 
 # Local SDK spec caches
 /config/supabase_dart_v2.yml
+
+# Eval suite: installed templates, prepared packs, and run results stay local
+# (evals/results/.gitkeep is tracked; fixture lockfiles are part of each case)
+evals/.cache/
+evals/results/*
+!evals/results/.gitkeep
+!evals/cases/*/fixture/package-lock.json

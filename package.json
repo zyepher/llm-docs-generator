@@ -78,6 +78,7 @@
     "generate": "tsx src/cli.ts generate",
     "list": "tsx src/cli.ts list-sdks",
     "validate": "tsx src/cli.ts validate",
+    "eval": "tsx evals/run.ts",
     "prepublishOnly": "npm run lint && npm run type-check && npm run build && npm run test",
     "clean": "rm -rf dist output/*/"
   },
