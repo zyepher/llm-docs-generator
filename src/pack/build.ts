@@ -43,9 +43,15 @@ import {
   selectPackFiles,
   sourceUsesNetwork,
   type PackSelection,
+  type SelectedConversion,
   type SelectedFile,
   type SourceAcquisition,
 } from '../sources/acquire.js';
+import {
+  createDocumentConverter,
+  type DocumentConverter,
+  type ManifestConverter,
+} from '../sources/convert.js';
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
@@ -468,11 +474,6 @@ async function inspectExistingPack(packsDir: string, id: string): Promise<Existi
 function assertBuildable(recipe: ResolvedPackRecipe): void {
   for (const source of recipe.sources) {
     assertSourceSupported(source);
-    if (source.convert !== null) {
-      throw new ConfigError(
-        `Converters ("convert": "${source.convert.tool}") are not supported yet; remove "convert" or carry the documents with "passthrough".`
-      );
-    }
   }
 
   if (recipe.layout.combined) {
@@ -482,15 +483,22 @@ function assertBuildable(recipe: ResolvedPackRecipe): void {
   }
 }
 
+/** One entry per acquired file, including the `.md` an agent wrote for a converted original. */
 function manifestSourceEntries(selection: PackSelection): ManifestSourceEntry[] {
-  return selection.files.map((selected) => ({
-    source: selected.sourceIndex,
-    path: selected.file.path,
-    ...(selected.file.url === undefined ? {} : { url: selected.file.url }),
-    sha256: selected.file.sha256,
-    bytes: selected.file.bytes,
-    ...(selected.file.fetch === undefined ? {} : { fetch: selected.file.fetch }),
-  }));
+  return selection.files.flatMap((selected) => {
+    const files =
+      selected.kind === 'convert' && selected.agentOutput !== undefined
+        ? [selected.file, selected.agentOutput]
+        : [selected.file];
+    return files.map((file) => ({
+      source: selected.sourceIndex,
+      path: file.path,
+      ...(file.url === undefined ? {} : { url: file.url }),
+      sha256: file.sha256,
+      bytes: file.bytes,
+      ...(file.fetch === undefined ? {} : { fetch: file.fetch }),
+    }));
+  });
 }
 
 function sourceKey(entry: Pick<ManifestSourceEntry, 'source' | 'path' | 'sha256'>): string {
@@ -637,26 +645,33 @@ function summarizeVerification(failures: readonly { path?: string; message: stri
   return `${shown.join('; ')}${more}`;
 }
 
-/** Build `resolved` into a staging directory, verify it, and swap it in. Returns warnings. */
+/**
+ * Build `resolved` into a staging directory, verify it, and swap it in.
+ * Converters write under `workRoot`. Returns warnings.
+ */
 async function buildPack(
   context: SyncContext,
   resolved: ResolvedPack,
   existing: ExistingPack,
-  acquisitions: readonly SourceAcquisition[]
+  acquisitions: readonly SourceAcquisition[],
+  workRoot: string
 ): Promise<string[]> {
   const { recipe } = resolved;
   const packsDir = context.loaded.packsDir;
   const packDir = join(packsDir, resolved.id);
   const selection = await selectPackFiles(recipe, acquisitions);
-  const sources = manifestSourceEntries(selection);
+  const baseSources = manifestSourceEntries(selection);
   const previous = existing.kind === 'pack' ? existing.manifest : undefined;
   const acquiredAt =
-    previous !== undefined && sameSourceSet(previous.sources, sources)
+    previous !== undefined && sameSourceSet(previous.sources, baseSources)
       ? previous.acquiredAt
       : (context.options.now?.() ?? new Date()).toISOString();
   const origins = acquisitions.map((acquisition) => acquisition.origin);
   const pages = selection.files.filter((selected) => selected.kind === 'page');
   const passthrough = selection.files.filter((selected) => selected.kind === 'passthrough');
+  const conversions = selection.files.filter(
+    (selected): selected is SelectedConversion => selected.kind === 'convert'
+  );
   const fileRef = (selected: SelectedFile) => ({
     sourceIndex: selected.sourceIndex,
     sourcePath: selected.file.path,
@@ -665,7 +680,7 @@ async function buildPack(
   const rewriteLinks = createPackLinkRewriter({
     recipe,
     origins,
-    pages: pages.map(fileRef),
+    pages: [...pages, ...conversions].map(fileRef),
     passthrough: passthrough.map(fileRef),
   });
 
@@ -696,15 +711,21 @@ async function buildPack(
     const links: PackManifest['links'] = { rewritten: 0, external: 0, unresolved: [] };
     let plainTextConversions = 0;
 
-    for (const page of pages) {
+    // Markdown, MDX, and converted documents all go through the Markdown page path.
+    const writePage = async (
+      page: SelectedFile,
+      text: string,
+      syntax: 'markdown' | 'mdx',
+      extraSources: readonly string[]
+    ): Promise<void> => {
       const source = recipe.sources[page.sourceIndex];
       if (source === undefined) {
         throw new Error(`Page ${page.outputPath} has no source.`);
       }
 
       const result = convertMarkdownPage({
-        text: await readUtf8(page),
-        syntax: page.format === 'mdx' ? 'mdx' : 'markdown',
+        text,
+        syntax,
         sourceIndex: page.sourceIndex,
         sourcePath: page.file.path,
         outputPath: page.outputPath,
@@ -723,7 +744,7 @@ async function buildPack(
         bytes: Buffer.byteLength(result.text, 'utf-8'),
         tokens: estimateTokenCount(result.text),
         title: result.title,
-        sources: [`${page.sourceIndex}:${page.file.path}`],
+        sources: [`${page.sourceIndex}:${page.file.path}`, ...extraSources],
       });
 
       for (const name of result.changedBy) {
@@ -738,7 +759,57 @@ async function buildPack(
         ...result.links.unresolved.map((entry) => ({ page: page.outputPath, ...entry }))
       );
       plainTextConversions += result.links.plainTextConversions;
+    };
+
+    for (const page of pages) {
+      await writePage(page, await readUtf8(page), page.format === 'mdx' ? 'mdx' : 'markdown', []);
     }
+
+    // One converter per source, resolved (tool on PATH, version) on first use.
+    const converters = new Map<number, DocumentConverter>();
+    const converterBySource = new Map<string, ManifestConverter>();
+
+    for (const conversion of conversions) {
+      const spec = recipe.sources[conversion.sourceIndex]?.convert;
+      if (spec === undefined || spec === null) {
+        throw new Error(`Conversion ${conversion.outputPath} has no converter.`);
+      }
+
+      let converter = converters.get(conversion.sourceIndex);
+      if (converter === undefined) {
+        converter = await createDocumentConverter(spec, {
+          projectRoot: context.projectRoot,
+          workDir: join(workRoot, `convert-${conversion.sourceIndex}`),
+        });
+        converters.set(conversion.sourceIndex, converter);
+        warnings.push(...converter.warnings);
+      }
+
+      const converted = await converter.convert(
+        conversion,
+        previous?.sources.find(
+          (entry) => entry.source === conversion.sourceIndex && entry.path === conversion.file.path
+        )
+      );
+      warnings.push(...converted.warnings);
+      converterBySource.set(
+        `${conversion.sourceIndex}:${conversion.file.path}`,
+        converted.converter
+      );
+      await writePage(
+        conversion,
+        converted.markdown,
+        'markdown',
+        converted.agentOutputPath === undefined
+          ? []
+          : [`${conversion.sourceIndex}:${converted.agentOutputPath}`]
+      );
+    }
+
+    const sources = baseSources.map((entry) => {
+      const converter = converterBySource.get(`${entry.source}:${entry.path}`);
+      return converter === undefined ? entry : { ...entry, converter };
+    });
 
     for (const file of passthrough) {
       await writeStagedFile(stagingDir, file.outputPath, (target) =>
@@ -876,7 +947,7 @@ async function syncOnePack(context: SyncContext, id: string): Promise<PackSyncRe
       }
       return acquired;
     });
-    const warnings = await buildPack(context, resolved, existing, acquisitions);
+    const warnings = await buildPack(context, resolved, existing, acquisitions, workRoot);
     return { id, status: 'built', reason, warnings };
   } finally {
     await rm(workRoot, { recursive: true, force: true });

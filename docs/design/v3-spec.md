@@ -221,7 +221,8 @@ with a clear message instead of waiting.
       "url": "https://github.com/vitejs/vite/blob/<commit>/docs/guide/index.md",
       "sha256": "sha256:...", "bytes": 1234,
       "fetch": { "finalUrl": "...", "status": 200, "etag": "...", "lastModified": "..." },  // http only
-      "converter": { "tool": "markitdown", "version": "0.1.2" } }                         // converted only
+      "converter": { "tool": "markitdown", "version": "markitdown 0.1.9",                 // converted only
+                     "outputSha256": "sha256:..." } }                     // agent: also inputSha256
   ],
   "outputs": [
     { "path": "pages/guide/index.md", "kind": "page", "sha256": "sha256:...", "bytes": 2345,
@@ -372,22 +373,37 @@ contains a dead local link. The count of such conversions is a manifest warning.
 `convert` on a source: `{ "tool": "docling" | "markitdown" | "command" | "agent", "include":
 [globs], "command": [argv], "timeoutSeconds": 300 }`. `include` defaults to
 `**/*.{pdf,docx,pptx,xlsx,epub,html,htm}` for docling and markitdown (xlsx only if explicitly
-listed, because spreadsheets are passthrough by default) and is required for `command`.
+listed, because spreadsheets are passthrough by default) and is required for `command` and
+`agent`. A file matched by both `passthrough` and the converter's `include` is passthrough.
 
-- `docling`: runs `docling --to md --output <tmp> <input>` and reads `<tmp>/<stem>.md`.
+- `docling`: runs `docling --to md --image-export-mode placeholder --output <tmp> <input>` and
+  reads `<tmp>/<stem>.md` (placeholder images keep base64 data out of pages).
 - `markitdown`: runs `markitdown <input>` and reads stdout.
-- `command`: argv array with `{input}` and optional `{output}` placeholders; reads `{output}`
-  if present, else stdout. Never run through a shell.
+- `command`: argv array with `{input}` (required) and optional `{output}` placeholders; reads
+  `{output}` if present, else stdout. Never run through a shell.
 - `agent`: no process runs. For every included original `X`, a sibling `X.md` written by an
-  agent must exist; the pack uses it and records both hashes. `sync` and `verify` report a
-  stale conversion when the original's hash differs from the one recorded at the last sync.
+  agent must exist; the pack uses it and records both hashes (`X.md` is a source entry, not a
+  page of its own). The original's entry records `converter.inputSha256`, the hash of the
+  original `X.md` was written from, carried over while `X.md` is unchanged. A conversion is
+  stale when that differs from the original's hash: `sync` still builds and warns, and
+  `verify` fails `conversion` until an agent rewrites `X.md`. For local sources `verify` also
+  compares the original on disk with the recorded hash.
 
-Tool resolution: `command` overrides; else the tool name on `PATH`. The version is captured
-with `--version` (first line, trimmed) and recorded; failure to resolve the tool is an error
-naming the install command (`pipx install docling`, `pipx install 'markitdown[all]'`). Inputs
-are passed as paths inside the temp working directory; per-file timeout; non-zero exit or empty
-output is an error naming the file. Converter output is not assumed deterministic: `refresh`
-reports changed pages caused by a converter version change separately.
+Tool resolution: for docling and markitdown, `command` (when set) is the executable and any
+leading arguments, used instead of the tool name, with the tool's own arguments appended; else
+the tool name on `PATH` (on Windows also with `.exe`, `.cmd`, `.bat`, `.com`). The version is
+captured with `--version` (first line, trimmed; for `command`, `command[0] --version`) and
+recorded; when it cannot be read it is recorded as null with a warning. Failure to resolve the
+tool is an error naming the install command (`pipx install docling`, `pipx install
+'markitdown[all]'`). Inputs are copied under a sanitized name into the temp working directory
+and passed as paths there; per-file timeout (the child is killed); inputs over 200 MB are
+refused; non-zero exit or empty output is an error naming the file and the tool's stderr tail.
+A Windows `.cmd`/`.bat` shim can only run through `cmd.exe`: its arguments are quoted, and an
+argument containing `"`, `%`, or a line break is refused. Converter output is not assumed
+deterministic: successful conversions are cached in `<cache dir>/conversions/`, keyed by the
+input hash, tool, version, and argv template, so an unchanged document is not reconverted when
+its pack rebuilds for another reason; `refresh` reports changed pages caused by a converter
+version change separately.
 
 ### 4.7 Passthrough files
 

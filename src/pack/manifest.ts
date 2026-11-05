@@ -90,6 +90,12 @@ const sourceEntrySchema = z.strictObject({
       version: z.string().nullable(),
       /** Hash of the Markdown the converter (or agent) produced. */
       outputSha256: hashSchema.optional(),
+      /**
+       * Agent conversions only: the hash of the original the agent's `.md`
+       * was written from. It differs from `sha256` while the conversion is
+       * stale (the original changed and the `.md` did not).
+       */
+      inputSha256: hashSchema.optional(),
     })
     .optional(),
 });

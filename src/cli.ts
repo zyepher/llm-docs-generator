@@ -36,6 +36,7 @@ import {
   type VerifyReport,
 } from './pack/verify.js';
 import { supportedSourceTypes } from './sources/acquire.js';
+import { CONVERTER_INSTALL_HINTS } from './sources/convert.js';
 import { errorMessage, isRecord } from './utils/guards.js';
 
 const CLI_NAME = 'llm-docs';
@@ -166,14 +167,43 @@ interface AddOptions extends ProjectOptions {
   mount?: string;
   title?: string;
   recipe?: string;
+  convert?: string;
+  convertInclude?: string[];
   replace?: boolean;
   dryRun?: boolean;
+}
+
+/** Converters `add --convert` takes; a `command` converter needs its argv, so it goes in --recipe. */
+const ADD_CONVERT_TOOLS = CONVERTER_TOOLS.filter((tool) => tool !== 'command');
+
+/** The source's `convert` from `--convert` and `--convert-include`, or undefined. */
+function readConvertFlags(options: AddOptions): Record<string, unknown> | undefined {
+  if (options.convert === undefined) {
+    if (options.convertInclude !== undefined) {
+      throw new UsageError('--convert-include needs --convert <tool>.');
+    }
+    return undefined;
+  }
+
+  const tool = ADD_CONVERT_TOOLS.find((entry) => entry === options.convert);
+
+  if (tool === undefined) {
+    throw new UsageError(
+      options.convert === 'command'
+        ? '--convert command needs an argv: pass --recipe \'{"convert":{"tool":"command","command":[...],"include":[...]}}\' instead.'
+        : `--convert must be one of ${ADD_CONVERT_TOOLS.join(', ')}; got "${options.convert}".`
+    );
+  }
+
+  return options.convertInclude === undefined
+    ? { tool }
+    : { tool, include: options.convertInclude };
 }
 
 /**
  * Source flags of `add`, each building one source object. Phase 2c adds
  * `--git/--ref/--path`, `--url`, `--urls-file`, and `--llms-txt/--include`
- * here; Phase 2d adds `--convert` and `--site` handling next to them.
+ * here; `--site` goes next to them. `--convert` is read by readConvertFlags.
  */
 const ADD_SOURCE_FLAGS: ReadonlyArray<{
   flags: string;
@@ -229,6 +259,11 @@ function buildPackRecipe(options: AddOptions): PackConfig {
 
   const extra = options.recipe === undefined ? {} : parseRecipeJson(options.recipe);
   const source: Record<string, unknown> = { ...(fromFlags[0] ?? {}) };
+  const convert = readConvertFlags(options);
+
+  if (convert !== undefined) {
+    source.convert = convert;
+  }
 
   for (const [key, value] of Object.entries(extra)) {
     if (Object.hasOwn(source, key) && source[key] !== value) {
@@ -400,7 +435,11 @@ function capabilities(program: Command): unknown {
         [],
     })),
     sourceTypes: SOURCE_TYPES.map((type) => ({ type, supported: supported.has(type) })),
-    converters: CONVERTER_TOOLS.map((tool) => ({ tool, supported: false })),
+    converters: CONVERTER_TOOLS.map((tool) => ({
+      tool,
+      supported: true,
+      install: CONVERTER_INSTALL_HINTS[tool],
+    })),
     ecosystems: ECOSYSTEMS,
     transforms: TRANSFORM_NAMES,
     checks: { pack: PACK_CHECK_NAMES, project: PROJECT_CHECK_NAMES },
@@ -461,6 +500,14 @@ function buildProgram(): Command {
       .option('--mount <dir>', 'Subdirectory under pages/ and files/ for this source')
       .option('--title <title>', 'Pack title (default: the id)')
       .option('--recipe <json>', 'Extra source fields as JSON (include, exclude, passthrough, ...)')
+      .option(
+        '--convert <tool>',
+        `Convert documents (PDF, DOCX, ...) to pages with ${ADD_CONVERT_TOOLS.join(', ')} (a command converter goes in --recipe)`
+      )
+      .option(
+        '--convert-include <glob...>',
+        'Documents the converter takes (default for docling and markitdown: pdf, docx, pptx, epub, html)'
+      )
       .option('--replace', 'Overwrite an existing pack with this id')
       .option('--dry-run', 'Print the recipe and the files it would take, writing nothing')
   ).action(async (id: string, options: AddOptions) => {

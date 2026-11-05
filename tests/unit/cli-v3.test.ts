@@ -7,11 +7,13 @@
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { installFakeConverters } from '../helpers/fake-converters.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cliPath = join(repoRoot, 'dist', 'cli.js');
@@ -135,6 +137,7 @@ describe('llm-docs v3 CLI', () => {
       'links',
       'recipe',
       'lockfile',
+      'conversion',
     ]);
 
     await writeFile(join(root, 'agent-docs', 'demo', 'pages', 'index.md'), 'tampered\n');
@@ -250,5 +253,112 @@ describe('llm-docs v3 CLI', () => {
       { type: 'local', supported: true },
     ]);
     expect(capabilities.limits).toMatchObject({ maxFiles: 5000 });
+    expect(capabilities.converters).toEqual([
+      { tool: 'docling', supported: true, install: 'pipx install docling' },
+      { tool: 'markitdown', supported: true, install: "pipx install 'markitdown[all]'" },
+      { tool: 'command', supported: true, install: null },
+      { tool: 'agent', supported: true, install: null },
+    ]);
+  });
+
+  // Eleven CLI runs, several spawning freshly written fake tools: slow under a parallel suite.
+  it('adds a converted pack, verifies it, and reconverts or reports stale originals', async () => {
+    const root = await makeProject({
+      'docs/index.md': '# Manuals\n\nSee the [spec](spec.md).\n',
+      'docs/spec.pdf': 'Operating voltage: 12 V\n',
+      'docs/parts.xlsx': 'not converted: spreadsheets are passthrough or skipped by default\n',
+      'notes/wiring.pdf': 'Red to red.\n',
+    });
+    const binDir = join(root, '.tools');
+    await installFakeConverters(binDir);
+    // Windows spells it `Path`; a second, differently cased key in the child env would be ambiguous.
+    const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
+    const env = {
+      [pathKey]: `${binDir}${delimiter}${process.env[pathKey] ?? ''}`,
+      LLM_DOCS_CACHE_DIR: join(root, '.cache'),
+    };
+
+    const add = await runCli(
+      root,
+      ['add', 'manuals', '--local', 'docs', '--version', '1.0.0', '--convert', 'markitdown'],
+      env
+    );
+    expect(add.code, add.stderr).toBe(0);
+    expect(add.stderr).toContain('manuals: built (not built yet)');
+    expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs.manuals).toEqual({
+      version: '1.0.0',
+      sources: [{ type: 'local', path: 'docs', convert: { tool: 'markitdown' } }],
+    });
+    expect(await readdir(join(root, 'agent-docs', 'manuals', 'pages'))).toEqual([
+      'index.md',
+      'spec.md',
+    ]);
+    expect((await runCli(root, ['verify'], env)).code).toBe(0);
+    expect((await runCli(root, ['sync'], env)).stderr).toContain('manuals: up to date');
+
+    await writeFile(join(root, 'docs', 'spec.pdf'), 'Operating voltage: 24 V\n');
+    const resync = await runCli(root, ['sync'], env);
+    expect(resync.stderr).toContain('manuals: built (source files changed)');
+    expect(
+      await readFile(join(root, 'agent-docs', 'manuals', 'pages', 'spec.md'), 'utf-8')
+    ).toContain('Converted by markitdown: Operating voltage: 24 V');
+    expect((await runCli(root, ['verify'], env)).code).toBe(0);
+
+    // An agent conversion: the agent's .md is the page; a changed original is stale.
+    await writeFile(join(root, 'notes', 'wiring.pdf.md'), '# Wiring\n\nRed to red.\n');
+    const agent = await runCli(
+      root,
+      [
+        'add',
+        'notes',
+        '--local',
+        'notes',
+        '--version',
+        '1',
+        '--convert',
+        'agent',
+        '--convert-include',
+        '**/*.pdf',
+      ],
+      env
+    );
+    expect(agent.code, agent.stderr).toBe(0);
+    await writeFile(join(root, 'notes', 'wiring.pdf'), 'Red to black.\n');
+    const stale = await runCli(root, ['verify', 'notes'], env);
+    expect(stale.code).toBe(1);
+    expect(stale.stderr).toContain(
+      'notes conversion fail: pages/wiring.md: stale agent conversion: notes/wiring.pdf changed since the last sync'
+    );
+    const staleSync = await runCli(root, ['sync', 'notes'], env);
+    expect(staleSync.code).toBe(0);
+    expect(staleSync.stderr).toContain('warning: Agent conversion notes/wiring.pdf.md is stale');
+    expect((await runCli(root, ['verify', 'notes'], env)).code).toBe(1);
+  }, 180_000);
+
+  it('rejects converter flags it cannot honor with one usage line', async () => {
+    const root = await makeProject(DOCS);
+    const cases: [string[], string][] = [
+      [['--convert', 'command'], '--convert command needs an argv: pass --recipe'],
+      [['--convert', 'pandoc'], '--convert must be one of docling, markitdown, agent'],
+      [['--convert-include', '**/*.pdf'], '--convert-include needs --convert <tool>.'],
+      [['--convert', 'agent'], 'convert.include: is required for the "agent" converter'],
+    ];
+
+    for (const [flags, message] of cases) {
+      const result = await runCli(root, [
+        'add',
+        'demo',
+        '--local',
+        'docs',
+        '--version',
+        '1',
+        '--project',
+        root,
+        ...flags,
+      ]);
+      expect(result.code, flags.join(' ')).toBe(2);
+      expect(result.stderr.trim().split('\n')).toHaveLength(1);
+      expect(result.stderr).toContain(message);
+    }
   });
 });

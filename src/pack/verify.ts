@@ -3,12 +3,12 @@
  * results, per pack and per project. Read-only and offline.
  *
  * Implemented here: config-schema, manifest-schema, outputs, unlisted-files,
- * links, recipe, lockfile. The remaining checks register in PACK_CHECKS and
- * PROJECT_CHECKS: `license` (Phase 2c), `conversion` (Phase 2d), `citations`
+ * links, recipe, lockfile, conversion. The remaining checks register in
+ * PACK_CHECKS and PROJECT_CHECKS: `license` (Phase 2c), `citations`
  * (Phase 5), `agent-block` (Phase 4).
  */
 
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, stat } from 'node:fs/promises';
 import { join, posix, sep } from 'node:path';
 
 import {
@@ -19,6 +19,7 @@ import {
   type DependencyVersionResolver,
   type LoadedProjectConfig,
 } from '../config/project.js';
+import { isStaleAgentConversion } from '../sources/convert.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
@@ -401,9 +402,75 @@ async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
 }
 
 /**
+ * Agent conversions (spec 4.6): fail when the original changed after the
+ * agent's `.md` was written, either as recorded at the last sync or, for
+ * local sources, as the original now reads on disk.
+ */
+async function checkConversion(context: PackCheckContext): Promise<CheckOutcome> {
+  const findings: CheckFinding[] = [];
+  const projectRoot = context.loaded?.projectRoot;
+
+  for (const entry of context.manifest.sources) {
+    if (entry.converter?.tool !== 'agent') {
+      continue;
+    }
+
+    const key = `${entry.source}:${entry.path}`;
+    const page = context.manifest.outputs.find((output) => output.sources?.includes(key));
+    const origin = context.manifest.origins[entry.source];
+    const label = origin?.type === 'local' ? posix.join(origin.path, entry.path) : entry.path;
+    const fix = `have an agent convert it again into ${entry.path}.md, then run 'llm-docs sync ${context.packId}'`;
+    const finding = (status: 'fail' | 'warn', message: string): CheckFinding => ({
+      status,
+      message,
+      ...(page === undefined ? {} : { path: page.path }),
+    });
+
+    if (isStaleAgentConversion(entry)) {
+      findings.push(
+        finding(
+          'fail',
+          `stale agent conversion: ${label} changed after ${entry.path}.md was written; ${fix}`
+        )
+      );
+      continue;
+    }
+
+    if (origin?.type !== 'local' || projectRoot === undefined) {
+      continue;
+    }
+
+    // A local origin is either the original itself or a directory holding it.
+    const originPath = join(projectRoot, ...origin.path.split('/'));
+    let current: string;
+
+    try {
+      const originalPath = (await stat(originPath)).isDirectory()
+        ? join(originPath, ...entry.path.split('/'))
+        : originPath;
+      current = await sha256File(originalPath);
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        throw error;
+      }
+      findings.push(finding('warn', `${label}, converted by an agent, no longer exists`));
+      continue;
+    }
+
+    if (current !== entry.sha256) {
+      findings.push(
+        finding('fail', `stale agent conversion: ${label} changed since the last sync; ${fix}`)
+      );
+    }
+  }
+
+  return findings;
+}
+
+/**
  * Per-pack checks after `manifest-schema`, in report order. Later phases add
- * theirs here: `citations` (Phase 5), `conversion` (Phase 2d), `license`
- * (Phase 2c, warn for unknown and proprietary, fail under --strict).
+ * theirs here: `citations` (Phase 5), `license` (Phase 2c, warn for unknown
+ * and proprietary, fail under --strict).
  */
 const PACK_CHECKS: readonly PackCheck[] = [
   { name: 'outputs', run: checkOutputs },
@@ -411,6 +478,7 @@ const PACK_CHECKS: readonly PackCheck[] = [
   { name: 'links', run: checkLinks },
   { name: 'recipe', run: checkRecipe },
   { name: 'lockfile', run: checkLockfile },
+  { name: 'conversion', run: checkConversion },
 ];
 
 /** The pack-file checks a build runs on its staging directory and a sync runs to decide skipping. */
