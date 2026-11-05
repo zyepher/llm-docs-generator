@@ -1038,7 +1038,9 @@ function readParameterArray(value: unknown, context: string): unknown[] {
     throw new ParserError(`${context} must be an array`, 'OpenAPI / Swagger Parser');
   }
 
-  value.forEach((parameter, index) => validateParameter(parameter, context, index));
+  value.forEach((parameter, index) => {
+    validateParameter(parameter, context, index);
+  });
   return value;
 }
 
@@ -1262,9 +1264,9 @@ function validateSchemaRefs(schema: unknown, context: string, seen = new WeakSet
   for (const compositionKey of ['oneOf', 'anyOf', 'allOf'] as const) {
     const values = schema[compositionKey];
     if (Array.isArray(values)) {
-      values.forEach((value, index) =>
-        validateSchemaRefs(value, `${context}.${compositionKey}[${index}]`, seen)
-      );
+      values.forEach((value, index) => {
+        validateSchemaRefs(value, `${context}.${compositionKey}[${index}]`, seen);
+      });
     }
   }
 
@@ -1671,5 +1673,5 @@ function getOpenApiFileFormat(sourcePath: string, parserName: string): ApiFileFo
 }
 
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
+  return Object.hasOwn(value, key);
 }

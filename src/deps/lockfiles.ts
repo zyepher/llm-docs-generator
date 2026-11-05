@@ -1158,11 +1158,7 @@ async function parseCargoLock(context: LockfileContext): Promise<LockfileResult>
     }
 
     const direct = directKeys.has(`${name}@${version}`);
-    const dev =
-      direct &&
-      declarations !== undefined &&
-      declarations.dev.has(name) &&
-      !declarations.prod.has(name);
+    const dev = direct && declarations?.dev.has(name) === true && !declarations.prod.has(name);
     result.dependencies.push({
       ecosystem: 'cargo',
       name,

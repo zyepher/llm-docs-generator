@@ -49,35 +49,39 @@ function githubRepo(repo: string): string | undefined {
 }
 
 function describeOrigins(input: IndexPageInput): string {
-  const parts = input.origins.map((origin, index) => {
-    switch (origin.type) {
-      case 'git': {
-        const short = origin.commit.slice(0, 12);
-        const repo = githubRepo(origin.repo);
-        const commit =
-          repo === undefined
-            ? `commit ${short}`
-            : `commit [${short}](https://github.com/${repo}/commit/${origin.commit})`;
-        const name = repo === undefined ? origin.repo : `[${repo}](https://github.com/${repo})`;
-        return `the git repository ${name} at ${commit} (${origin.refKind} ${escapeIndexText(origin.ref)})`;
-      }
-      case 'llms-txt':
-        return `the index ${origin.url}`;
-      case 'urls': {
-        const count = input.sources.filter((entry) => entry.source === index).length;
-        return `${count} listed URL${count === 1 ? '' : 's'}`;
-      }
-      case 'local': {
-        const host =
-          origin.hostCommit === null
-            ? ''
-            : ` (host repository commit ${origin.hostCommit.slice(0, 12)}${origin.hostDirty === true ? ', with uncommitted changes' : ''})`;
-        return `the project folder \`${origin.path}\`${host}`;
-      }
-    }
-  });
+  return input.origins.map((origin, index) => describeOrigin(input, origin, index)).join('; ');
+}
 
-  return parts.join('; ');
+function describeOrigin(
+  input: IndexPageInput,
+  origin: IndexPageInput['origins'][number],
+  index: number
+): string {
+  switch (origin.type) {
+    case 'git': {
+      const short = origin.commit.slice(0, 12);
+      const repo = githubRepo(origin.repo);
+      const commit =
+        repo === undefined
+          ? `commit ${short}`
+          : `commit [${short}](https://github.com/${repo}/commit/${origin.commit})`;
+      const name = repo === undefined ? origin.repo : `[${repo}](https://github.com/${repo})`;
+      return `the git repository ${name} at ${commit} (${origin.refKind} ${escapeIndexText(origin.ref)})`;
+    }
+    case 'llms-txt':
+      return `the index ${origin.url}`;
+    case 'urls': {
+      const count = input.sources.filter((entry) => entry.source === index).length;
+      return `${count} listed URL${count === 1 ? '' : 's'}`;
+    }
+    case 'local': {
+      const host =
+        origin.hostCommit === null
+          ? ''
+          : ` (host repository commit ${origin.hostCommit.slice(0, 12)}${origin.hostDirty === true ? ', with uncommitted changes' : ''})`;
+      return `the project folder \`${origin.path}\`${host}`;
+    }
+  }
 }
 
 function describeLicense(license: IndexPageInput['license']): string {
