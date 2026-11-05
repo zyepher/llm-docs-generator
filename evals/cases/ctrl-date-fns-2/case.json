@@ -1,0 +1,9 @@
+{
+  "id": "ctrl-date-fns-2",
+  "title": "Stay dates with date-fns 2 (control)",
+  "kind": "control",
+  "library": { "name": "date-fns", "version": "2.30.0", "released": "2023-04-30" },
+  "notes": "Negative control. date-fns 2.x predates the model's training data by years; format, addDays, and differenceInCalendarDays are the obvious tools. The pack arm must not do worse than baseline here.",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

@@ -1,0 +1,9 @@
+{
+  "id": "ctrl-stripe-14",
+  "title": "Checkout restricted to card and Link, and cancelling at period end, with stripe-node 14 (control)",
+  "kind": "control",
+  "library": { "name": "stripe", "version": "14.0.0", "released": "2023-10-16" },
+  "notes": "Negative control for stripe-23. Same task shape on stripe-node 14.0.0, where payment_method_types on the Checkout Session is the correct parameter and cancelling at period end is a subscription update. The model knows this version well; the pack arm must not do worse than baseline, and must not tempt the agent toward the v23 API.",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}

@@ -1,0 +1,17 @@
+{
+  "id": "zod",
+  "pack": {
+    "title": "Zod",
+    "description": "TypeScript-first schema validation",
+    "dependency": { "ecosystem": "npm", "name": "zod" },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/colinhacks/zod",
+        "ref": "v{version}",
+        "paths": ["README.md", "ERROR_HANDLING.md"],
+        "include": ["**/*.md"]
+      }
+    ]
+  }
+}
