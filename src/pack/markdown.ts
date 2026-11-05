@@ -26,7 +26,6 @@ import {
   unwrapDocCReferences,
 } from '../parsers/markdown/dialects.js';
 import { isRecord } from '../utils/guards.js';
-import { slugifyText } from '../utils/slug.js';
 import type { ManifestOrigin } from './manifest.js';
 
 // ---------------------------------------------------------------------------
@@ -1123,9 +1122,23 @@ export function collectHeadings(
 }
 
 /**
- * Fragment anchors a page defines: heading slugs (the shared Unicode-aware
- * slugger, `-1`, `-2` suffixes for duplicates) plus HTML `id`/`name`
- * attributes. Used by `verify --strict`; Phase 5 resolves citations with it.
+ * GitHub's heading slug: lowercase, punctuation dropped (not hyphenated),
+ * each space a hyphen, Unicode letters, digits, and marks kept. Upstream
+ * docs write their fragment links against this rule, so `### \`Client.close([callback])\``
+ * is `#clientclosecallback`.
+ */
+function githubHeadingSlug(heading: string): string {
+  return heading
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, '')
+    .replace(/\s/g, '-');
+}
+
+/**
+ * Fragment anchors a page defines: GitHub heading slugs with `-1`, `-2`
+ * suffixes for duplicates, plus HTML `id`/`name` attributes. Used by
+ * `verify --strict`; Phase 5 resolves citations with it.
  */
 export function headingAnchors(text: string, options: MarkdownSyntaxOptions = {}): Set<string> {
   const anchors = new Set<string>();
@@ -1133,7 +1146,7 @@ export function headingAnchors(text: string, options: MarkdownSyntaxOptions = {}
 
   for (const heading of collectHeadings(text, options)) {
     const plain = heading.text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1');
-    const base = slugifyText(plain);
+    const base = githubHeadingSlug(plain);
     const seen = counts.get(base) ?? 0;
     counts.set(base, seen + 1);
     anchors.add(seen === 0 ? base : `${base}-${seen}`);

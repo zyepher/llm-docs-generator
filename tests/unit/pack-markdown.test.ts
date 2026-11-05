@@ -179,6 +179,13 @@ describe('headings', () => {
     ]);
   });
 
+  it('slugs headings by GitHub rules: punctuation dropped, spaces hyphenated', () => {
+    const anchors = headingAnchors(
+      '### `Client.close([callback])`\n## Über uns -- a_b\n## [Linked](x.md) title\n'
+    );
+    expect([...anchors]).toEqual(['clientclosecallback', 'über-uns----a_b', 'linked-title']);
+  });
+
   it('builds anchors with duplicate suffixes and HTML ids', () => {
     const anchors = headingAnchors('# Intro\n## Setup `npm`\n## Setup npm\n<a id="custom"></a>\n');
     expect([...anchors]).toEqual(['intro', 'setup-npm', 'setup-npm-1', 'custom']);
