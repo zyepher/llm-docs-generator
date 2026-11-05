@@ -1,0 +1,18 @@
+{
+  "id": "hono",
+  "pack": {
+    "title": "Hono",
+    "description": "Web framework built on Web Standards",
+    "version": "4.13.16",
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/honojs/website",
+        "ref": "6d4ba9115255b16a3a7388670787731ec49461ea",
+        "paths": ["docs/api", "docs/middleware/builtin"],
+        "include": ["**/*.md"]
+      }
+    ],
+    "site": { "baseUrl": "https://hono.dev" }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "mcp-typescript-sdk",
+  "pack": {
+    "title": "MCP TypeScript SDK",
+    "description": "Official Model Context Protocol SDK for TypeScript (server and client packages)",
+    "dependency": { "ecosystem": "npm", "name": "@modelcontextprotocol/server" },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/modelcontextprotocol/typescript-sdk",
+        "ref": "v{version}",
+        "paths": ["docs"],
+        "include": ["**/*.md"]
+      },
+      {
+        "type": "git",
+        "repo": "https://github.com/modelcontextprotocol/typescript-sdk",
+        "ref": "v{version}",
+        "paths": ["skills/mcp-typescript-sdk-upgrade-to-v2/references"],
+        "include": ["**/*.md"],
+        "mount": "upgrade-to-v2-references"
+      }
+    ]
+  }
+}

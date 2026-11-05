@@ -1,0 +1,9 @@
+{
+  "id": "zod-4-6",
+  "title": "Transfer validation with zod 4.6",
+  "kind": "post-cutoff",
+  "library": { "name": "zod", "version": "4.6.7", "released": "2026-10-12" },
+  "notes": "zod 4.6.0 (2026-09-09) added the built-in IBAN string format, z.iban(), returning a z.ZodIBAN that checks shape and the ISO 7064 mod-97 checksum in electronic format only (uppercase, no spaces). zod 4.5.0 (2026-08-28) added schema.validate() / z.validate(), a boolean type guard on the input type. Both postdate the model's training data (zod 4.4.3, May 2026, has neither). The type test pins the schema type to z.ZodIBAN, so a hand-rolled regex plus checksum fails even when its runtime behaviour is right.",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

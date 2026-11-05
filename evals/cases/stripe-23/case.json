@@ -1,0 +1,9 @@
+{
+  "id": "stripe-23",
+  "title": "Checkout restricted to card and PayPay, and pausing a subscription, with stripe-node 23",
+  "kind": "post-cutoff",
+  "library": { "name": "stripe", "version": "23.1.0", "released": "2026-10-29" },
+  "notes": "stripe-node 23.0.0 (2026-09-30) removed payment_method_types from Checkout.SessionCreateParams in favour of allowed_payment_method_types, and added subscriptions.pause (POST /v1/subscriptions/:id/pause with invoicing_behavior). A model coding from memory reaches for payment_method_types (a type error now) and pauses with subscriptions.update plus pause_collection (compiles, but hits the wrong endpoint).",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}
