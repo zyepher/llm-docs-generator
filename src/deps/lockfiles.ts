@@ -19,6 +19,42 @@ import {
 export const ECOSYSTEMS = ['npm', 'pypi', 'cargo', 'go', 'pub', 'swiftpm'] as const;
 export type Ecosystem = (typeof ECOSYSTEMS)[number];
 
+export const VERSION_TEXT_MAX = 128;
+
+/**
+ * A version as every boundary accepts it (lockfiles, manifests, config): one
+ * line of printable characters, no whitespace, at most VERSION_TEXT_MAX. `<`,
+ * `>`, and backticks never occur in a real version and are markup wherever a
+ * version is printed, so they are refused too.
+ */
+export function isVersionText(value: string): boolean {
+  return value.length <= VERSION_TEXT_MAX && /^[^\s\p{C}<>`]+$/u.test(value);
+}
+
+/**
+ * Each registry's own package name rule. npm allows the uppercase letters of
+ * legacy names; SwiftPM names are package identities (a repository name, or a
+ * registry `scope.name`).
+ */
+const DEPENDENCY_NAME_PATTERNS: Readonly<Record<Ecosystem, RegExp>> = {
+  npm: /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/i,
+  pypi: /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/i,
+  cargo: /^[a-z0-9_-]+$/i,
+  go: /^[a-z0-9._~+-]+(?:\/[a-z0-9._~+-]+)*$/i,
+  pub: /^[a-z_][a-z0-9_]*$/,
+  swiftpm: /^[a-z0-9_-][a-z0-9._-]*$/i,
+};
+
+const DEPENDENCY_NAME_MAX = 214;
+
+export function isDependencyName(ecosystem: Ecosystem, name: string): boolean {
+  return (
+    name.length <= DEPENDENCY_NAME_MAX &&
+    DEPENDENCY_NAME_PATTERNS[ecosystem].test(name) &&
+    !name.split('/').some((segment) => segment === '.' || segment === '..')
+  );
+}
+
 export interface ResolvedDependency {
   ecosystem: Ecosystem;
   /** Registry name; npm scoped names keep `@scope/name`, PyPI names are PEP 503 normalized. */

@@ -27,7 +27,8 @@
       "type": "object",
       "properties": {
         "id": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
         },
         "title": {
           "type": "string"
@@ -485,7 +486,8 @@
                     "const": "local"
                   },
                   "path": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "mount": {
                     "type": "string"
@@ -795,7 +797,8 @@
                 "const": "local"
               },
               "path": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "hostCommit": {
                 "type": [
@@ -882,8 +885,7 @@
             "maximum": 9007199254740991
           },
           "path": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           },
           "url": {
             "type": "string"
@@ -970,8 +972,7 @@
         "type": "object",
         "properties": {
           "path": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           },
           "kind": {
             "type": "string",

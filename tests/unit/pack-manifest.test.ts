@@ -1,11 +1,13 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { projectConfigJsonSchemaText } from '../../src/config/project.js';
+import { canCreateSymlinks } from '../helpers/symlinks.js';
+
+import { projectConfigJsonSchemaText, recipeHash } from '../../src/config/project.js';
 import {
   licenseStatusFor,
   ManifestError,
@@ -31,46 +33,47 @@ async function makeTempDir(): Promise<string> {
 }
 
 function sampleManifest(): PackManifest {
+  const recipe: PackManifest['recipe'] = {
+    title: 'Vite',
+    description: null,
+    dependency: { ecosystem: 'npm', name: 'vite' },
+    version: '8.2.0',
+    sources: [
+      {
+        type: 'git',
+        repo: 'https://github.com/vitejs/vite',
+        ref: 'v8.2.0',
+        paths: ['docs'],
+        mount: '',
+        include: ['**/*.md'],
+        exclude: [],
+        passthrough: ['b/**', 'a/**'],
+        convert: null,
+        transforms: ['strip-html-comments'],
+      },
+      {
+        type: 'local',
+        path: 'manuals',
+        mount: 'manuals',
+        include: ['**/*.md'],
+        exclude: [],
+        passthrough: [],
+        convert: null,
+        transforms: [],
+      },
+    ],
+    site: null,
+    layout: { combined: false },
+    license: null,
+    limits: { maxFileBytes: 1024 },
+  };
   return {
     schemaVersion: 3,
     tool: { name: 'llm-docs', version: '3.0.0' },
     pack: { id: 'vite', title: 'Vite', version: '8.2.0' },
     dependency: { ecosystem: 'npm', name: 'vite' },
-    recipe: {
-      title: 'Vite',
-      description: null,
-      dependency: { ecosystem: 'npm', name: 'vite' },
-      version: '8.2.0',
-      sources: [
-        {
-          type: 'git',
-          repo: 'https://github.com/vitejs/vite',
-          ref: 'v8.2.0',
-          paths: ['docs'],
-          mount: '',
-          include: ['**/*.md'],
-          exclude: [],
-          passthrough: ['b/**', 'a/**'],
-          convert: null,
-          transforms: ['strip-html-comments'],
-        },
-        {
-          type: 'local',
-          path: 'manuals',
-          mount: 'manuals',
-          include: ['**/*.md'],
-          exclude: [],
-          passthrough: [],
-          convert: null,
-          transforms: [],
-        },
-      ],
-      site: null,
-      layout: { combined: false },
-      license: null,
-      limits: { maxFileBytes: 1024 },
-    },
-    recipeHash: hash('a'),
+    recipe,
+    recipeHash: recipeHash(recipe),
     acquiredAt: '2026-11-05T10:00:00.000Z',
     origins: [
       {
@@ -214,6 +217,99 @@ describe('manifest v3', () => {
     await rm(join(dir, 'manifest.json'));
     await expect(readPackManifest(dir)).rejects.toMatchObject({ reason: 'missing' });
     await expect(readPackManifest(dir)).rejects.toBeInstanceOf(ManifestError);
+  });
+
+  it('refuses a manifest that disagrees with its own recipe', async () => {
+    const dir = await makeTempDir();
+    const sample = sampleManifest();
+    const cases: [Record<string, unknown>, RegExp][] = [
+      [
+        { pack: { ...sample.pack, version: '9.9.9' } },
+        /at pack\.version: differs from recipe\.version/,
+      ],
+      [{ pack: { ...sample.pack, title: 'Forged' } }, /at pack\.title: differs from recipe\.title/],
+      [{ dependency: { ecosystem: 'npm', name: 'other' } }, /at dependency: differs/],
+      [
+        {
+          recipe: { ...sample.recipe, version: '9.9.9' },
+          pack: { ...sample.pack, version: '9.9.9' },
+        },
+        /at recipeHash: is not the hash of "recipe"/,
+      ],
+      [{ origins: [sample.origins[1], sample.origins[0]] }, /at origins\.0\.type: differs/],
+    ];
+
+    for (const [change, message] of cases) {
+      await writeFile(join(dir, 'manifest.json'), JSON.stringify({ ...sample, ...change }));
+      await expect(readPackManifest(dir)).rejects.toThrow(message);
+    }
+  });
+
+  it('refuses any recorded path that could leave the pack, the origin, or the project', async () => {
+    const dir = await makeTempDir();
+    const sample = sampleManifest();
+    const output = (path: string, kind = 'page'): Record<string, unknown> => ({
+      outputs: [{ path, kind, sha256: hash('f'), bytes: 1 }],
+    });
+    const cases: Record<string, unknown>[] = [
+      output('../../../secret.txt', 'passthrough'),
+      output('/etc/passwd', 'passthrough'),
+      output('pages/../../x.md'),
+      output('pages//x.md'),
+      output('pages/./x.md'),
+      output('pages\\x.md'),
+      output('pages/x\u0000.md'),
+      output('files/x.md'),
+      output('pages/x.md', 'passthrough'),
+      output('pages/index.md', 'index'),
+      output('other.full.md', 'combined'),
+      { sources: [{ source: 0, path: '../outside.md', sha256: hash('b'), bytes: 1 }] },
+      { sources: [{ source: 5, path: 'x.md', sha256: hash('b'), bytes: 1 }] },
+      {
+        outputs: [
+          { path: 'pages/z.md', kind: 'page', sha256: hash('f'), bytes: 1, sources: ['0:../x.md'] },
+        ],
+      },
+      { links: { ...sample.links, unresolved: [{ page: '../x.md', target: 'a', reason: 'r' }] } },
+      { origins: [sample.origins[0], { ...sample.origins[1], path: '../elsewhere' }] },
+      { pack: { ...sample.pack, id: '../vite' } },
+    ];
+
+    for (const change of cases) {
+      await writeFile(join(dir, 'manifest.json'), JSON.stringify({ ...sample, ...change }));
+      await expect(readPackManifest(dir), JSON.stringify(change)).rejects.toMatchObject({
+        reason: 'invalid',
+      });
+    }
+
+    const recipeCases: Record<string, unknown>[] = [
+      { readFirst: ['pages/../../secret.md'] },
+      { version: '1.0.0\n<!-- END -->' },
+      { dependency: { ecosystem: 'npm', name: 'vite\n# SYSTEM' } },
+      { sources: [sample.recipe.sources[0], { ...sample.recipe.sources[1], path: '../../etc' }] },
+    ];
+    for (const change of recipeCases) {
+      const recipe = { ...sample.recipe, ...change } as PackManifest['recipe'];
+      await writeFile(
+        join(dir, 'manifest.json'),
+        JSON.stringify({ ...sample, recipe, recipeHash: recipeHash(recipe) })
+      );
+      await expect(readPackManifest(dir), JSON.stringify(change)).rejects.toMatchObject({
+        reason: 'invalid',
+      });
+    }
+  });
+
+  it.skipIf(!canCreateSymlinks)('never reads a manifest through a symbolic link', async () => {
+    const dir = await makeTempDir();
+    await writePackManifest(join(dir), sampleManifest());
+    const linkedDir = join(await makeTempDir(), 'vite');
+    await symlink(dir, linkedDir);
+    await expect(readPackManifest(linkedDir)).rejects.toMatchObject({ reason: 'link' });
+
+    const other = await makeTempDir();
+    await symlink(join(dir, 'manifest.json'), join(other, 'manifest.json'));
+    await expect(readPackManifest(other)).rejects.toMatchObject({ reason: 'link' });
   });
 
   it('refuses to write a manifest that does not match the schema', async () => {
