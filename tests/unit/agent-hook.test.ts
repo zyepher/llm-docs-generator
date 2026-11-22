@@ -1,0 +1,589 @@
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { HOOK_LIMITS, runSessionStartHook, type HookIo } from '../../src/agent/hook.js';
+import { syncPacks } from '../../src/pack/build.js';
+import { ALLOW_TEMP_SOURCES_ENV } from '../../src/sources/acquire.js';
+import { ALLOW_PRIVATE_NETWORK_ENV } from '../../src/sources/http.js';
+import { isRecord } from '../../src/utils/guards.js';
+
+const NOW = new Date('2026-11-22T09:00:00.000Z');
+const HOUR = 60 * 60 * 1000;
+
+const cleanups: (() => Promise<void>)[] = [];
+
+beforeEach(() => {
+  vi.stubEnv(ALLOW_PRIVATE_NETWORK_ENV, '1');
+  vi.stubEnv(ALLOW_TEMP_SOURCES_ENV, '1');
+});
+
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    await cleanup();
+  }
+});
+
+async function tempDir(): Promise<string> {
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'llm-docs-hook-'));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+async function writeFiles(root: string, files: Record<string, string>): Promise<void> {
+  for (const [path, content] of Object.entries(files)) {
+    const target = join(root, ...path.split('/'));
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, content);
+  }
+}
+
+function npmLock(versions: Record<string, string>): Record<string, string> {
+  const dependencies = Object.fromEntries(
+    Object.entries(versions).map(([name, version]) => [name, `^${version}`])
+  );
+  const installed = Object.fromEntries(
+    Object.entries(versions).map(([name, version]) => [
+      `node_modules/${name}`,
+      { version, resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz` },
+    ])
+  );
+  return {
+    'package.json': JSON.stringify({ name: 'app', version: '1.0.0', dependencies }),
+    'package-lock.json': JSON.stringify({
+      name: 'app',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      requires: true,
+      packages: { '': { name: 'app', version: '1.0.0', dependencies }, ...installed },
+    }),
+  };
+}
+
+const LOCK = npmLock({ hono: '4.13.16', 'date-fns': '2.30.0', zod: '4.1.0', next: '16.1.0' });
+const RELEASES: Record<string, string> = {
+  'npm:hono@4.13.16': '2026-09-02T10:00:00.000Z',
+  'npm:date-fns@2.30.0': '2023-04-28T00:00:00.000Z',
+  'npm:zod@4.1.0': '2026-06-25T00:00:00.000Z',
+  'npm:zod@4.0.0': '2026-05-01T00:00:00.000Z',
+  'npm:next@16.1.0': '2026-10-21T18:00:00.000Z',
+};
+const LOCAL_DOCS = [{ type: 'local', path: 'docs' }];
+
+/** A cache directory whose release-dates.json already knows `entries`. */
+async function seededCache(entries: Record<string, string> = RELEASES): Promise<string> {
+  const cache = await tempDir();
+  await writeFiles(cache, {
+    'release-dates.json': JSON.stringify({
+      schemaVersion: 1,
+      entries: Object.fromEntries(
+        Object.entries(entries).map(([key, publishedAt]) => [
+          key,
+          { publishedAt, source: 'deps.dev', fetchedAt: '2026-11-01T00:00:00.000Z' },
+        ])
+      ),
+    }),
+  });
+  return cache;
+}
+
+/** Registry stand-in: every request fails with a 500, so nothing ever leaves the machine. */
+async function failingRegistry(): Promise<{ base: string; requests: string[] }> {
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? '');
+    response.writeHead(500);
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  cleanups.push(
+    () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      })
+  );
+  const { port } = server.address() as AddressInfo;
+  return { base: `http://127.0.0.1:${port}`, requests };
+}
+
+async function* chunks(...values: (string | Uint8Array)[]): AsyncGenerator<string | Uint8Array> {
+  yield* values;
+}
+
+const neverEnding: AsyncIterable<string> = {
+  [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }),
+};
+
+interface HookRun {
+  out: string[];
+  spawned: string[];
+  cache: string;
+}
+
+interface RunOptions {
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+  payload?: Record<string, unknown> | string;
+  stdin?: AsyncIterable<string | Uint8Array>;
+  cache?: string;
+  homeDir?: string;
+  now?: Date;
+  elapsedMs?: () => number;
+  harness?: 'claude-code' | 'cursor' | 'unknown';
+}
+
+async function runHook(options: RunOptions = {}): Promise<HookRun> {
+  const out: string[] = [];
+  const spawned: string[] = [];
+  const cache = options.cache ?? (await seededCache());
+  const { base } = await failingRegistry();
+  const harnessEnv =
+    options.harness === 'cursor'
+      ? { CURSOR_VERSION: '2.1.0' }
+      : options.harness === 'unknown'
+        ? {}
+        : { CLAUDECODE: '1' };
+  const payload =
+    typeof options.payload === 'string' ? options.payload : JSON.stringify(options.payload ?? {});
+  const io: HookIo = {
+    env: { ...harnessEnv, LLM_DOCS_CACHE_DIR: cache, ...options.env },
+    cwd: options.cwd ?? (await tempDir()),
+    homeDir: options.homeDir ?? (await tempDir()),
+    platform: process.platform,
+    stdin: options.stdin ?? chunks(payload),
+    registryEndpoints: { depsDev: base, npmRegistry: base },
+    elapsedMs: options.elapsedMs ?? (() => 0),
+    now: () => options.now ?? NOW,
+    writeStdout: (text) => out.push(text),
+    spawnWarmStatus: (root) => spawned.push(root),
+  };
+
+  await runSessionStartHook(io);
+  return { out, spawned, cache };
+}
+
+/** The injected text, after checking the run printed exactly one Claude Code envelope. */
+function injected(run: HookRun): string {
+  expect(run.out).toHaveLength(1);
+  const [line = ''] = run.out;
+  const parsed: unknown = JSON.parse(line);
+  expect(line.endsWith('\n')).toBe(true);
+  expect(parsed).toEqual({
+    hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: expect.any(String) },
+  });
+  const output = isRecord(parsed) ? parsed.hookSpecificOutput : undefined;
+  const text = isRecord(output) ? output.additionalContext : undefined;
+  return typeof text === 'string' ? text : '';
+}
+
+async function hookLog(cache: string): Promise<string> {
+  return readFile(join(cache, 'hook.log'), 'utf-8').catch(() => '');
+}
+
+/** A project with the standard lockfile, plus config and built packs when given. */
+async function project(
+  options: {
+    packs?: Record<string, Record<string, unknown>>;
+    build?: string[];
+    files?: Record<string, string>;
+    config?: Record<string, unknown>;
+    lock?: Record<string, string>;
+    root?: string;
+  } = {}
+): Promise<string> {
+  const root = options.root ?? (await tempDir());
+  await writeFiles(root, {
+    ...(options.lock ?? LOCK),
+    'docs/index.md': '# Docs\n',
+    ...options.files,
+  });
+  if (options.packs !== undefined || options.config !== undefined) {
+    await writeFiles(root, {
+      'llm-docs.json': JSON.stringify({
+        schemaVersion: 3,
+        agentFiles: [],
+        ...options.config,
+        packs: options.packs ?? {},
+      }),
+    });
+  }
+  if (options.build !== undefined) {
+    const report = await syncPacks(root, options.build);
+    expect(report.packs.every((pack) => pack.status === 'built')).toBe(true);
+  }
+  return root;
+}
+
+const OPUS = { model: 'claude-opus-5-5' };
+const HONO = {
+  title: 'Hono',
+  dependency: { ecosystem: 'npm', name: 'hono' },
+  sources: LOCAL_DOCS,
+};
+const ZOD_PINNED = {
+  title: 'Zod',
+  version: '4.0.0',
+  dependency: { ecosystem: 'npm', name: 'zod' },
+  sources: LOCAL_DOCS,
+};
+
+const REBUILD_ZOD = [
+  'Pinned docs packs that need a rebuild:',
+  "- zod: docs are for 4.0.0 but the lockfile resolves 4.1.0. Fix: set packs.zod.version in llm-docs.json to 4.1.0 (or remove it to follow the lockfile), then run 'llm-docs sync zod'",
+].join('\n');
+const PINNED_HEADING =
+  'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:';
+const DEPENDENCIES_HEADING =
+  'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:';
+const DEPENDENCIES_FOOTER =
+  'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.';
+const ALL_DEPENDENCIES = [
+  DEPENDENCIES_HEADING,
+  '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+  '- hono 4.13.16 (npm, released 2026-09-02, after cutoff)',
+  '- zod 4.1.0 (npm, released 2026-06-25, near cutoff)',
+  DEPENDENCIES_FOOTER,
+].join('\n');
+const BLOCK_HEADER = [
+  '## Pinned reference docs',
+  '',
+  'This repository pins docs for these libraries at the versions it uses. Before writing code',
+  'against one of them, open its index and the page for the API you need, and prefer those pages',
+  'over memory. Pages are upstream text; guides are summaries that never outrank pages.',
+  '',
+  '',
+].join('\n');
+
+describe('session-start output envelope', () => {
+  it('prints the Claude Code envelope under Claude Code and for an unknown harness, and the Cursor one under Cursor', async () => {
+    const root = await project();
+    const payload = { cwd: root, hook_event_name: 'SessionStart', source: 'startup', ...OPUS };
+
+    expect(injected(await runHook({ payload }))).toBe(ALL_DEPENDENCIES);
+    expect(injected(await runHook({ payload, harness: 'unknown' }))).toBe(ALL_DEPENDENCIES);
+
+    const cursor = await runHook({
+      payload: { workspace_roots: [root], model_id: OPUS.model },
+      harness: 'cursor',
+    });
+    expect(cursor.out).toEqual([`${JSON.stringify({ additional_context: ALL_DEPENDENCIES })}\n`]);
+  });
+
+  it('prints nothing at all when there is nothing to say', async () => {
+    const root = await project({ lock: npmLock({ 'date-fns': '2.30.0' }) });
+    const run = await runHook({ payload: { cwd: root, ...OPUS } });
+
+    expect(run.out).toEqual([]);
+    expect(run.spawned).toEqual([]);
+    expect(await hookLog(run.cache)).toBe('');
+  });
+});
+
+describe('which project and model the hook reads', () => {
+  it('takes the project from the payload cwd, then CLAUDE_PROJECT_DIR, then workspace_roots, then the process cwd', async () => {
+    const names = ['alpha', 'beta', 'gamma', 'delta'];
+    const cache = await seededCache(
+      Object.fromEntries(names.map((name) => [`npm:${name}@1.0.0`, '2026-10-01T00:00:00.000Z']))
+    );
+    const [fromPayload = '', fromEnv = '', fromRoots = '', fromCwd = ''] = await Promise.all(
+      names.map((name) => project({ lock: npmLock({ [name]: '1.0.0' }) }))
+    );
+    const named = async (options: RunOptions): Promise<string> =>
+      (injected(await runHook({ cache, ...options })).split('\n')[1] ?? '').split(' ')[1] ?? '';
+    const roots = { workspace_roots: [fromRoots], ...OPUS };
+
+    expect(
+      await named({
+        payload: { cwd: fromPayload, ...roots },
+        env: { CLAUDE_PROJECT_DIR: fromEnv },
+        cwd: fromCwd,
+      })
+    ).toBe('alpha');
+    expect(
+      await named({ payload: roots, env: { CLAUDE_PROJECT_DIR: fromEnv }, cwd: fromCwd })
+    ).toBe('beta');
+    expect(await named({ payload: roots, cwd: fromCwd })).toBe('gamma');
+    expect(await named({ payload: OPUS, cwd: fromCwd })).toBe('delta');
+  });
+
+  it('walks up from a subdirectory to the nearest llm-docs.json', async () => {
+    const root = await project({ packs: {} });
+    const deep = join(root, 'src', 'deep');
+    await mkdir(deep, { recursive: true });
+
+    expect(injected(await runHook({ payload: { cwd: deep, ...OPUS } }))).toBe(ALL_DEPENDENCIES);
+  });
+
+  it('takes the model from the payload, then ANTHROPIC_MODEL, then the project and user settings files', async () => {
+    const root = await project();
+    const home = await tempDir();
+    const heading = async (options: RunOptions): Promise<string> =>
+      injected(await runHook({ homeDir: home, ...options })).split('\n')[0] ?? '';
+    const cutoffOf = (label: string, month: string): string =>
+      `Direct dependencies released after or close to your training data cutoff (${label}, through ${month}) with no pinned docs, newest first:`;
+    const env = { ANTHROPIC_MODEL: 'claude-opus-5' };
+
+    expect(await heading({ payload: { cwd: root, model: 'claude-fable-5-1' }, env })).toBe(
+      cutoffOf('Claude Fable 5.1', '2026-06')
+    );
+    expect(await heading({ payload: { cwd: root, model_id: 'claude-fable-5-1' }, env })).toBe(
+      cutoffOf('Claude Fable 5.1', '2026-06')
+    );
+    expect(await heading({ payload: { cwd: root }, env })).toBe(
+      cutoffOf('Claude Opus 5', '2026-05')
+    );
+
+    await writeFiles(home, {
+      '.claude/settings.json': JSON.stringify({ model: 'claude-sonnet-5' }),
+    });
+    expect(await heading({ payload: { cwd: root } })).toBe(cutoffOf('Claude Sonnet 5', '2026-01'));
+
+    await writeFiles(root, { '.claude/settings.json': JSON.stringify({ model: 'opus' }) });
+    expect(await heading({ payload: { cwd: root } })).toBe(
+      cutoffOf('Claude Opus 5.5 (alias opus)', '2026-06')
+    );
+  });
+
+  it('uses the neutral heading and the 180-day window when no cutoff resolves', async () => {
+    const root = await project();
+
+    expect(injected(await runHook({ payload: { cwd: root, model: 'some-unknown-model' } }))).toBe(
+      [
+        'Recently released dependencies (your training data may predate them), released in the last 180 days with no pinned docs, newest first:',
+        '- next 16.1.0 (npm, released 2026-10-21)',
+        '- hono 4.13.16 (npm, released 2026-09-02)',
+        '- zod 4.1.0 (npm, released 2026-06-25)',
+        DEPENDENCIES_FOOTER,
+      ].join('\n')
+    );
+  });
+});
+
+describe('what the hook says', () => {
+  it('names a pack that needs a rebuild, alone', async () => {
+    const root = await project({
+      lock: npmLock({ 'date-fns': '2.30.0' }),
+      packs: { later: { version: '1.0.0', sources: LOCAL_DOCS } },
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
+      [
+        'Pinned docs packs that need a rebuild:',
+        '- later: configured but never built. Fix: `llm-docs sync later`',
+      ].join('\n')
+    );
+  });
+
+  it('names a pinned pack newer than the cutoff and where its pages are, alone', async () => {
+    const root = await project({
+      lock: npmLock({ hono: '4.13.16' }),
+      packs: { hono: HONO },
+      config: { agentFiles: 'auto' },
+      build: ['hono'],
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
+      [
+        PINNED_HEADING,
+        '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+      ].join('\n')
+    );
+  });
+
+  it('lists the packs when the harness does not see the managed block, alone', async () => {
+    const root = await project({
+      lock: npmLock({ 'date-fns': '2.30.0' }),
+      packs: { notes: { title: 'Notes', version: '1.0.0', sources: LOCAL_DOCS } },
+      build: ['notes'],
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
+      `${BLOCK_HEADER}- Notes 1.0.0: \`agent-docs/notes/index.md\``
+    );
+  });
+
+  it('says all four things in order', async () => {
+    const root = await project({ packs: { hono: HONO, zod: ZOD_PINNED }, build: ['hono', 'zod'] });
+
+    expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
+      [
+        REBUILD_ZOD,
+        '',
+        PINNED_HEADING,
+        '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+        '- Zod 4.0.0 (released 2026-05-01, near cutoff): `agent-docs/zod/index.md`',
+        '',
+        DEPENDENCIES_HEADING,
+        '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+        DEPENDENCIES_FOOTER,
+        '',
+        `${BLOCK_HEADER}- Hono 4.13.16: \`agent-docs/hono/index.md\``,
+        '- Zod 4.0.0: `agent-docs/zod/index.md`',
+      ].join('\n')
+    );
+  });
+
+  it(`stays within ${HOOK_LIMITS.maxChars} characters, dropping the pack list first, then rows from the bottom`, async () => {
+    const missing = (count: number) =>
+      Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [
+          `p${String(index).padStart(2, '0')}`,
+          { version: '1.0.0', sources: LOCAL_DOCS },
+        ])
+      );
+
+    const crowded = await project({ packs: { hono: HONO, ...missing(18) }, build: ['hono'] });
+    const fits = injected(await runHook({ payload: { cwd: crowded, ...OPUS } }));
+    expect(fits.length).toBeLessThanOrEqual(HOOK_LIMITS.maxChars);
+    expect(fits).toContain(PINNED_HEADING);
+    expect(fits.endsWith(DEPENDENCIES_FOOTER)).toBe(true);
+    expect(fits).not.toContain('## Pinned reference docs');
+
+    const overflowing = await project({ packs: { hono: HONO, ...missing(40) }, build: ['hono'] });
+    const cut = injected(await runHook({ payload: { cwd: overflowing, ...OPUS } }));
+    const lines = cut.split('\n');
+    expect(cut.length).toBeLessThanOrEqual(HOOK_LIMITS.maxChars);
+    expect(lines[0]).toBe('Pinned docs packs that need a rebuild:');
+    expect(lines.at(-1)).toMatch(/^- and \d+ more \(run `llm-docs status`\)$/);
+    expect(cut).not.toContain(PINNED_HEADING);
+    expect(cut).not.toContain(DEPENDENCIES_HEADING);
+  });
+});
+
+describe('when the hook stays silent', () => {
+  it('prints nothing with LLM_DOCS_HOOK=off or hook.enabled false', async () => {
+    const root = await project();
+    const off = await runHook({ payload: { cwd: root, ...OPUS }, env: { LLM_DOCS_HOOK: 'off' } });
+    expect(off.out).toEqual([]);
+
+    const disabled = await project({ config: { hook: { enabled: false } } });
+    const quiet = await runHook({ payload: { cwd: disabled, ...OPUS } });
+    expect(quiet.out).toEqual([]);
+    expect(quiet.spawned).toEqual([]);
+  });
+
+  it('falls back to the environment for a malformed, empty, or oversized payload, logging what was wrong', async () => {
+    const root = await project();
+    const env = { CLAUDE_PROJECT_DIR: root, ANTHROPIC_MODEL: OPUS.model };
+
+    const garbage = await runHook({ payload: 'not json {', env });
+    expect(injected(garbage)).toBe(ALL_DEPENDENCIES);
+    expect(await hookLog(garbage.cache)).toMatch(
+      /^\S+ the payload on stdin is not JSON; ignored it\n$/
+    );
+
+    const empty = await runHook({ stdin: chunks(), env });
+    expect(injected(empty)).toBe(ALL_DEPENDENCIES);
+    expect(await hookLog(empty.cache)).toBe('');
+
+    const huge = new Uint8Array(HOOK_LIMITS.stdinMaxBytes + 1).fill(0x20);
+    const oversized = await runHook({ stdin: chunks(huge), env });
+    expect(injected(oversized)).toBe(ALL_DEPENDENCIES);
+    expect(await hookLog(oversized.cache)).toContain(
+      `the payload on stdin is over ${HOOK_LIMITS.stdinMaxBytes} bytes; ignored it`
+    );
+  });
+
+  it('stops waiting for stdin that never ends', async () => {
+    const root = await project();
+    const run = await runHook({
+      stdin: neverEnding,
+      env: { CLAUDE_PROJECT_DIR: root, ANTHROPIC_MODEL: OPUS.model },
+    });
+
+    expect(injected(run)).toBe(ALL_DEPENDENCIES);
+    expect(await hookLog(run.cache)).toContain(
+      `stdin did not end within ${HOOK_LIMITS.stdinMs} ms; ignored it`
+    );
+  });
+
+  it('prints nothing and logs when it misses the deadline', async () => {
+    const root = await project();
+    let calls = 0;
+    const run = await runHook({
+      payload: { cwd: root, ...OPUS },
+      elapsedMs: () => (calls++ < 2 ? 0 : HOOK_LIMITS.deadlineMs + 100),
+    });
+
+    expect(run.out).toEqual([]);
+    expect(await hookLog(run.cache)).toContain(
+      `session-start missed its ${HOOK_LIMITS.deadlineMs} ms deadline; printed nothing`
+    );
+  });
+
+  it('prints nothing, logs, and resolves when the analysis throws', async () => {
+    const root = await project();
+    const run = await runHook({
+      payload: { cwd: root, ...OPUS },
+      env: { LLM_DOCS_MODEL_CUTOFF: 'June' },
+    });
+
+    expect(run.out).toEqual([]);
+    expect(await hookLog(run.cache)).toContain(
+      'session-start failed: LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month (for example 2026-06), got "June".'
+    );
+  });
+
+  it(`rotates hook.log past ${HOOK_LIMITS.logMaxBytes} bytes, keeping one previous file`, async () => {
+    const cache = await seededCache();
+    const old = `${'x'.repeat(HOOK_LIMITS.logMaxBytes - 10)}\n`;
+    await writeFile(join(cache, 'hook.log'), old);
+    const root = await project();
+
+    await runHook({ cache, payload: 'not json', env: { CLAUDE_PROJECT_DIR: root } });
+
+    expect(await readFile(join(cache, 'hook.log.1'), 'utf-8')).toBe(old);
+    expect(await hookLog(cache)).toMatch(/^\S+ the payload on stdin is not JSON; ignored it\n$/);
+    expect((await readdir(cache)).sort()).toEqual(['hook.log', 'hook.log.1', 'release-dates.json']);
+  });
+});
+
+describe('background warm-up', () => {
+  it('starts one status run per project per six hours when release dates are missing', async () => {
+    const root = await project();
+    const cache = await seededCache({
+      'npm:date-fns@2.30.0': RELEASES['npm:date-fns@2.30.0'] ?? '',
+    });
+    const at = (hours: number): RunOptions => ({
+      cache,
+      payload: { cwd: root, ...OPUS },
+      now: new Date(NOW.getTime() + hours * HOUR),
+    });
+
+    const first = await runHook(at(0));
+    expect(first.out).toEqual([]);
+    expect(first.spawned).toEqual([root]);
+    expect((await runHook(at(5))).spawned).toEqual([]);
+    expect((await runHook(at(7))).spawned).toEqual([root]);
+    expect((await readdir(join(cache, 'hook-warm'))).length).toBe(1);
+  });
+});
+
+describe('managed block visibility', () => {
+  it('injects the pack list only for a harness that does not read a file holding the block', async () => {
+    const parent = await tempDir();
+    const root = await project({
+      root: join(parent, 'project'),
+      lock: npmLock({ 'date-fns': '2.30.0' }),
+      packs: { notes: { title: 'Notes', version: '1.0.0', sources: LOCAL_DOCS } },
+      config: { agentFiles: 'auto' },
+      build: ['notes'],
+    });
+    const payload = { cwd: root, ...OPUS };
+    const list = `${BLOCK_HEADER}- Notes 1.0.0: \`agent-docs/notes/index.md\``;
+
+    expect((await runHook({ payload })).out).toEqual([]);
+    expect((await runHook({ payload, harness: 'cursor' })).out).toEqual([]);
+    expect(injected(await runHook({ payload, harness: 'unknown' }))).toBe(list);
+
+    await writeFile(join(parent, 'CLAUDE.md'), '# Workspace notes\n');
+    expect(injected(await runHook({ payload }))).toBe(list);
+    expect((await runHook({ payload, harness: 'cursor' })).out).toEqual([]);
+  });
+});

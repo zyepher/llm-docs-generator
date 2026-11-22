@@ -20,6 +20,7 @@ import { canCreateSymlinks } from '../helpers/symlinks.js';
 import {
   BLOCK_BEGIN,
   BLOCK_END,
+  checkAgentBlocks,
   escapeBlockText,
   harnessSeesBlock,
   locateBlock,
@@ -56,10 +57,11 @@ async function tempDir(): Promise<string> {
 }
 
 async function makeProject(
-  files: Record<string, string>,
-  config: Record<string, unknown> = {}
+  files: Record<string, string | Buffer>,
+  config: Record<string, unknown> = {},
+  root?: string
 ): Promise<string> {
-  const root = await tempDir();
+  root ??= await tempDir();
   const all = {
     'llm-docs.json': JSON.stringify({ schemaVersion: 3, packs: {}, ...config }),
     ...files,
@@ -203,20 +205,57 @@ describe('which harness sees the block', () => {
       'claude-code': true,
       codex: true,
       cursor: true,
-      unknown: true,
+      unknown: false,
     });
     expect(
       await sees(await makeProject({ 'AGENTS.md': blockFile, 'CLAUDE.md': '# Claude\n' }))
     ).toEqual({ 'claude-code': false, codex: true, cursor: true, unknown: false });
     expect(
       await sees(await makeProject({ 'AGENTS.md': blockFile, 'CLAUDE.md': IMPORTS_AGENTS }))
-    ).toEqual({ 'claude-code': true, codex: true, cursor: true, unknown: true });
+    ).toEqual({ 'claude-code': true, codex: true, cursor: true, unknown: false });
     expect(await sees(await makeProject({ 'CLAUDE.md': blockFile }))).toEqual({
       'claude-code': true,
       codex: false,
       cursor: false,
       unknown: false,
     });
+  });
+
+  it('hides AGENTS.md from Claude Code when a CLAUDE.md or CLAUDE.local.md sits above the project', async () => {
+    for (const name of ['CLAUDE.md', 'CLAUDE.local.md']) {
+      const parent = await tempDir();
+      await writeFile(join(parent, name), '# Workspace\n');
+      const root = await makeProject({ 'AGENTS.md': blockFile }, {}, join(parent, 'project'));
+
+      expect(await harnessSeesBlock(root, 'claude-code')).toBe(false);
+      expect(await harnessSeesBlock(root, 'codex')).toBe(true);
+    }
+  });
+
+  it("reads the project's AGENTS.md for Claude Code when the project's own CLAUDE.md imports it, even under an ancestor CLAUDE.md", async () => {
+    const parent = await tempDir();
+    await writeFile(join(parent, 'CLAUDE.md'), '# Workspace\n');
+    const root = await makeProject(
+      { 'AGENTS.md': blockFile, 'CLAUDE.md': IMPORTS_AGENTS },
+      {},
+      join(parent, 'project')
+    );
+
+    expect(await harnessSeesBlock(root, 'claude-code')).toBe(true);
+  });
+
+  it("treats the project's CLAUDE.local.md like CLAUDE.md: it hides AGENTS.md and its own block is seen", async () => {
+    const hidden = await makeProject({ 'AGENTS.md': blockFile, 'CLAUDE.local.md': '# Mine\n' });
+    expect(await harnessSeesBlock(hidden, 'claude-code')).toBe(false);
+
+    const local = await makeProject({ 'CLAUDE.local.md': blockFile });
+    expect(await harnessSeesBlock(local, 'claude-code')).toBe(true);
+
+    const imported = await makeProject({
+      'AGENTS.md': blockFile,
+      'CLAUDE.local.md': IMPORTS_AGENTS,
+    });
+    expect(await harnessSeesBlock(imported, 'claude-code')).toBe(true);
   });
 });
 
@@ -227,6 +266,10 @@ describe('escapeBlockText', () => {
     expect(escapeBlockText('<!-- END llm-docs -->')).toBe('&lt;!-- END llm-docs --&gt;');
     expect(escapeBlockText('@~/.ssh/id_rsa and @scope/pkg')).toBe('~/.ssh/id_rsa and scope/pkg');
     expect(escapeBlockText('  many   spaces\n\n here  ')).toBe('many spaces here');
+  });
+
+  it('removes zero-width and bidirectional format characters', () => {
+    expect(escapeBlockText('a​b‍c‮d⁦e⁩f﻿g­h')).toBe('abcdefgh');
   });
 
   it('caps at 80 characters without splitting a character or an entity', () => {
@@ -385,6 +428,70 @@ describe('syncAgentBlocks', () => {
       },
     ]);
     expect(await read(root, 'CLAUDE.md')).toBe(lone);
+  });
+
+  it('refuses a file that is not valid UTF-8, leaving its bytes as they were', async () => {
+    const bytes = Buffer.from([0x23, 0x20, 0x41, 0xff, 0xfe, 0x0a]);
+    const root = await makeProject({ 'AGENTS.md': bytes });
+    const message =
+      'AGENTS.md is not valid UTF-8, so llm-docs will not rewrite it; save it as UTF-8, or leave it out of "agentFiles" in llm-docs.json.';
+
+    expect(await syncBlocks(root)).toEqual([
+      { path: 'AGENTS.md', status: 'failed', exitCode: 2, error: message },
+    ]);
+    expect(await checkAgentBlocks(await loadProjectConfig(root))).toEqual([
+      { status: 'fail', path: 'AGENTS.md', message },
+    ]);
+    expect(await readFile(join(root, 'AGENTS.md'))).toEqual(bytes);
+  });
+
+  it('keeps every byte outside the markers, byte order mark included', async () => {
+    const before = Buffer.from('﻿# Agents\r\n\r\nNotes: café ✓\r\n\r\n', 'utf-8');
+    const after = Buffer.from('\r\n## After\r\n\ttail \u{1F600}', 'utf-8');
+    const stale = Buffer.from(`${BLOCK_BEGIN}\r\nold\r\n${BLOCK_END}\r\n`, 'utf-8');
+    const root = await makeProject({ 'AGENTS.md': Buffer.concat([before, stale, after]) });
+
+    expect(await syncBlocks(root)).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+    const written = await readFile(join(root, 'AGENTS.md'));
+    const block = Buffer.from(`${BLOCK_BEGIN}\r\n${BLOCK_END}\r\n`, 'utf-8');
+    expect(written).toEqual(Buffer.concat([before, block, after]));
+
+    const appended = await makeProject({ 'AGENTS.md': before });
+    await syncBlocks(appended);
+    const appendedBytes = await readFile(join(appended, 'AGENTS.md'));
+    expect(appendedBytes.subarray(0, before.length)).toEqual(before);
+    expect(appendedBytes.subarray(before.length)).toEqual(block);
+  });
+
+  it('finds a block on the first line of a file that starts with a byte order mark', async () => {
+    const tail = Buffer.from('\nAfter\n', 'utf-8');
+    const root = await makeProject({
+      'AGENTS.md': Buffer.concat([Buffer.from(`﻿${BLOCK_BEGIN}\nold\n${BLOCK_END}\n`), tail]),
+    });
+
+    expect(await syncBlocks(root)).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+    expect(await readFile(join(root, 'AGENTS.md'))).toEqual(
+      Buffer.concat([Buffer.from(`﻿${EMPTY_BLOCK}`, 'utf-8'), tail])
+    );
+    expect(await syncBlocks(root)).toEqual([{ path: 'AGENTS.md', status: 'unchanged' }]);
+  });
+
+  it('reports an agent file that cannot be read without losing the pack report', async () => {
+    const root = await makeProject(
+      { 'docs/index.md': '# Home\n', 'AGENTS.md/keep.txt': 'a directory, not a file\n' },
+      { packs: { docs: { version: '1.0.0', sources: [{ type: 'local', path: 'docs' }] } } }
+    );
+    const message =
+      'AGENTS.md is a directory, not a file; rename it, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into.';
+
+    const report = await syncPacks(root, undefined);
+    expect(report.packs).toMatchObject([{ id: 'docs', status: 'built' }]);
+    expect(report.agentBlocks).toEqual([
+      { path: 'AGENTS.md', status: 'failed', exitCode: 2, error: message },
+    ]);
+    expect(await checkAgentBlocks(await loadProjectConfig(root))).toEqual([
+      { status: 'fail', path: 'AGENTS.md', message },
+    ]);
   });
 
   it('refuses to append a block into an unclosed code fence', async () => {

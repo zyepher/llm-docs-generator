@@ -1,36 +1,78 @@
+/**
+ * `llm-docs status` (spec 6.4) and the facts the session-start hook injects
+ * (spec 7.2). `gatherProjectStatus` is the one I/O entry point; it feeds the
+ * pure `computeStatus`, and the formatters render its report for a person
+ * (`formatStatusHuman`) or an agent (`formatStatusBrief`).
+ */
+
+import { escapeBlockText } from '../agent/block.js';
+import {
+  CONFIG_FILE_NAME,
+  ConfigError,
+  resolvePackRecipe,
+  type DependencyVersionResolver,
+  type LoadedProjectConfig,
+} from '../config/project.js';
+import { readProjectPacks, type ProjectPack } from '../pack/manifest.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
+import { resolveModelCutoff, resolveModelIdFromEnvironment, type ModelCutoff } from './cutoffs.js';
 import {
   findDependencyVersion,
   normalizeDependencyName,
+  projectDependencies,
   type DependencyRef,
   type DependencyVersionLookup,
   type Ecosystem,
   type ResolvedDependency,
 } from './lockfiles.js';
-import { releaseKey, type ReleaseInfo } from './registries.js';
+import {
+  lookupReleaseDates,
+  releaseKey,
+  type RegistryEndpoints,
+  type ReleaseInfo,
+  type ReleaseQuery,
+} from './registries.js';
 
 export type PackState = 'ok' | 'stale-pack' | 'recipe-changed' | 'missing' | 'orphan';
 
+/**
+ * Where a release date falls for the model in use: after its cutoff month,
+ * within `nearCutoffDays` before the end of it, or, when no cutoff is known,
+ * within `recentDays` of now.
+ */
+export type ReleaseWindow = 'after-cutoff' | 'near-cutoff' | 'recent';
+
 export interface PackStatusInput {
   id: string;
+  title: string;
   /** The pack's version (manifest, else config); null when neither knows it yet. */
   version: string | null;
   dependency: DependencyRef | null;
+  /** llm-docs.json sets `version` explicitly, so a lockfile bump alone does not move the pack. */
+  versionPinned: boolean;
   /** The config recipe resolves to a different recipeHash than the manifest records. */
   recipeChanged: boolean;
-  /** A manifest exists on disk. */
-  synced: boolean;
+  /** Project-relative POSIX path of the built pack's index.md; null when it was never built. */
+  indexPath: string | null;
   /** llm-docs.json lists the pack. */
   inConfig: boolean;
 }
 
 export interface PackStatus {
   id: string;
+  title: string;
   version: string | null;
   dependency: DependencyRef | null;
   state: PackState;
   /** What the lockfiles resolve for the bound dependency (packs with a dependency only). */
   lockfile?: DependencyVersionLookup;
+  indexPath: string | null;
+  /** When the pack's version of its bound dependency was released, when known. */
+  publishedAt: string | null;
+  /** Set when that release is newer than the model's training data, or close to it. */
+  releaseWindow: ReleaseWindow | null;
+  /** What brings the pack back to `ok`; null when it is `ok`. */
+  nextStep: string | null;
 }
 
 export interface DependencyRelease {
@@ -40,9 +82,12 @@ export interface DependencyRelease {
   publishedAt: string;
   dev: boolean;
   lockfiles: string[];
+  /** The read-only evidence command for pinning its docs (the engine never picks a source). */
+  nextStep: string;
 }
 
 export interface StatusReport {
+  /** Sorted by id. */
   packs: PackStatus[];
   cutoff: { cutoff: string; label: string } | null;
   /** Direct dependencies without a pack, released after the cutoff month, newest first. */
@@ -74,6 +119,7 @@ export interface ComputeStatusInput {
 }
 
 const DEFAULT_RECENT_DAYS = 180;
+const DEFAULT_NEAR_CUTOFF_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const BRIEF_MAX_DEPENDENCIES = 8;
 
@@ -98,7 +144,7 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
     return 'orphan';
   }
 
-  if (!pack.synced) {
+  if (pack.indexPath === null) {
     return 'missing';
   }
 
@@ -116,8 +162,61 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
   return pack.recipeChanged ? 'recipe-changed' : 'ok';
 }
 
+/**
+ * The step that brings a pack back to `ok`: a command when one command does
+ * it, otherwise an instruction. An explicit `version` wins over the lockfile
+ * at sync (spec 2.4), so a pinned stale pack needs its config edited first.
+ */
+function packNextStep(
+  pack: PackStatusInput,
+  state: PackState,
+  lookup: DependencyVersionLookup | undefined
+): string | null {
+  const sync = `llm-docs sync ${pack.id}`;
+
+  switch (state) {
+    case 'ok':
+      return null;
+    case 'orphan':
+      return `run 'llm-docs sync --prune' to delete it, or add packs.${pack.id} back to ${CONFIG_FILE_NAME}`;
+    case 'stale-pack':
+      if (pack.versionPinned) {
+        const to = lookup?.kind === 'found' ? ` to ${lookup.version}` : '';
+        return `set packs.${pack.id}.version in ${CONFIG_FILE_NAME}${to} (or remove it to follow the lockfile), then run '${sync}'`;
+      }
+      return sync;
+    case 'recipe-changed':
+    case 'missing':
+      return sync;
+  }
+}
+
+/** The `discover --package` spec; a SwiftPM package is named by its repository URL. */
+function discoverCommand(dependency: ResolvedDependency): string {
+  const repository = dependency.repositoryUrl;
+  const name =
+    dependency.ecosystem === 'swiftpm' &&
+    repository !== undefined &&
+    URL.canParse(repository) &&
+    new URL(repository).username === ''
+      ? repository
+      : dependency.name;
+  return `llm-docs discover --package ${dependency.ecosystem}:${name}@${dependency.version}`;
+}
+
 function dependencyKey(ecosystem: Ecosystem, name: string): string {
   return `${ecosystem}:${normalizeDependencyName(ecosystem, name)}`;
+}
+
+/** The release a pack's docs describe: its version of its bound dependency. */
+function packReleaseQuery(pack: PackStatusInput): ReleaseQuery | undefined {
+  return pack.dependency === null || pack.version === null
+    ? undefined
+    : {
+        ecosystem: pack.dependency.ecosystem,
+        name: normalizeDependencyName(pack.dependency.ecosystem, pack.dependency.name),
+        version: pack.version,
+      };
 }
 
 /**
@@ -128,16 +227,42 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
   const lockfiles = [...new Set(input.dependencies.map((dependency) => dependency.lockfile))];
   const scan = { dependencies: input.dependencies, lockfiles };
   const recentDays = input.recentDays ?? DEFAULT_RECENT_DAYS;
+  const end = input.cutoff === undefined ? undefined : cutoffEnd(input.cutoff.cutoff);
+
+  const windowOf = (publishedAt: string): ReleaseWindow | null => {
+    const time = Date.parse(publishedAt);
+
+    if (end === undefined) {
+      return time >= input.now.getTime() - recentDays * DAY_MS ? 'recent' : null;
+    }
+    if (time >= end) {
+      return 'after-cutoff';
+    }
+    return time >= end - input.nearCutoffDays * DAY_MS ? 'near-cutoff' : null;
+  };
+  const datedRelease = (query: ReleaseQuery | undefined): string | null => {
+    const publishedAt =
+      query === undefined ? null : (input.releases.get(releaseKey(query))?.publishedAt ?? null);
+    return publishedAt !== null && Number.isFinite(Date.parse(publishedAt)) ? publishedAt : null;
+  };
 
   const packs = input.packs
     .map((pack): PackStatus => {
       const lookup = pack.dependency ? findDependencyVersion(scan, pack.dependency) : undefined;
+      const state = packState(pack, lookup);
+      const publishedAt = datedRelease(packReleaseQuery(pack));
+
       return {
         id: pack.id,
+        title: pack.title,
         version: pack.version,
         dependency: pack.dependency,
-        state: packState(pack, lookup),
+        state,
         ...(lookup === undefined ? {} : { lockfile: lookup }),
+        indexPath: pack.indexPath,
+        publishedAt,
+        releaseWindow: publishedAt === null ? null : windowOf(publishedAt),
+        nextStep: packNextStep(pack, state, lookup),
       };
     })
     .sort((a, b) => compareStringsByCodeUnit(a.id, b.id));
@@ -173,13 +298,13 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
     }
   }
 
-  const dated: DependencyRelease[] = [];
+  const dated: { release: DependencyRelease; window: ReleaseWindow | null }[] = [];
   let unknownReleaseDates = 0;
 
-  for (const [key, entry] of direct) {
-    const publishedAt = input.releases.get(key)?.publishedAt ?? null;
+  for (const entry of direct.values()) {
+    const publishedAt = datedRelease(entry.dependency);
 
-    if (publishedAt === null || !Number.isFinite(Date.parse(publishedAt))) {
+    if (publishedAt === null) {
       unknownReleaseDates++;
       continue;
     }
@@ -189,51 +314,36 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
     }
 
     dated.push({
-      ecosystem: entry.dependency.ecosystem,
-      name: entry.dependency.name,
-      version: entry.dependency.version,
-      publishedAt,
-      dev: entry.dev,
-      lockfiles: [...entry.lockfiles].sort(compareStringsByCodeUnit),
+      release: {
+        ecosystem: entry.dependency.ecosystem,
+        name: entry.dependency.name,
+        version: entry.dependency.version,
+        publishedAt,
+        dev: entry.dev,
+        lockfiles: [...entry.lockfiles].sort(compareStringsByCodeUnit),
+        nextStep: discoverCommand(entry.dependency),
+      },
+      window: windowOf(publishedAt),
     });
   }
 
   dated.sort(
-    (a, b) =>
+    ({ release: a }, { release: b }) =>
       compareStringsByCodeUnit(b.publishedAt, a.publishedAt) ||
       compareStringsByCodeUnit(a.ecosystem, b.ecosystem) ||
       compareStringsByCodeUnit(a.name, b.name) ||
       compareStringsByCodeUnit(a.version, b.version)
   );
 
-  const afterCutoff: DependencyRelease[] = [];
-  const nearCutoff: DependencyRelease[] = [];
-  const recent: DependencyRelease[] = [];
-
-  if (input.cutoff) {
-    const end = cutoffEnd(input.cutoff.cutoff);
-    const nearStart = end - input.nearCutoffDays * DAY_MS;
-
-    for (const release of dated) {
-      const time = Date.parse(release.publishedAt);
-
-      if (time >= end) {
-        afterCutoff.push(release);
-      } else if (time >= nearStart) {
-        nearCutoff.push(release);
-      }
-    }
-  } else {
-    const recentStart = input.now.getTime() - recentDays * DAY_MS;
-    recent.push(...dated.filter((release) => Date.parse(release.publishedAt) >= recentStart));
-  }
+  const inWindow = (window: ReleaseWindow): DependencyRelease[] =>
+    dated.filter((entry) => entry.window === window).map((entry) => entry.release);
 
   return {
     packs,
     cutoff: input.cutoff ? { cutoff: input.cutoff.cutoff, label: input.cutoff.label } : null,
-    afterCutoff,
-    nearCutoff,
-    recent,
+    afterCutoff: inWindow('after-cutoff'),
+    nearCutoff: inWindow('near-cutoff'),
+    recent: inWindow('recent'),
     recentDays,
     directDependencies: direct.size,
     unknownReleaseDates,
@@ -246,12 +356,13 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
 
 export interface FormatStatusBriefOptions {
   maxChars: number;
-  packsDir: string;
-  /** The managed block is present in the agent file the harness reads. */
-  blockPresent: boolean;
-  /** Pack id -> project-relative path of its index.md, when it differs from `<packsDir>/<id>/index.md`. */
-  packIndexPaths: Record<string, string>;
 }
+
+const WINDOW_TAG: Readonly<Record<ReleaseWindow, string | undefined>> = {
+  'after-cutoff': 'after cutoff',
+  'near-cutoff': 'near cutoff',
+  recent: undefined,
+};
 
 function releaseDay(publishedAt: string): string {
   return publishedAt.slice(0, 10);
@@ -266,7 +377,7 @@ function packStateReason(pack: PackStatus): string | undefined {
           : pack.lockfile?.kind === 'conflict'
             ? pack.lockfile.versions.map((entry) => entry.version).join(' / ')
             : 'unknown';
-      return `docs are for ${pack.version ?? 'an unknown version'} but the lockfile resolves ${lockfileVersion}`;
+      return `docs are for ${pack.version ?? 'an unknown version'} but the lockfile resolves ${escapeBlockText(lockfileVersion)}`;
     }
     case 'missing':
       return 'configured but never built';
@@ -277,29 +388,82 @@ function packStateReason(pack: PackStatus): string | undefined {
   }
 }
 
-function dependencyLine(release: DependencyRelease, tag?: string): string {
-  const suffix = tag ? `, ${tag}` : '';
-  return `- ${release.name} ${release.version} (${release.ecosystem}, released ${releaseDay(release.publishedAt)}${suffix})`;
+/** One item of the brief; rows past `maxRows`, or past the character budget, become a count. */
+interface BriefSection {
+  heading: string;
+  rows: string[];
+  maxRows: number;
+  footer: string[];
+}
+
+function renderSection(section: BriefSection, shown: number): string[] {
+  const hidden = section.rows.length - shown;
+  return [
+    section.heading,
+    ...section.rows.slice(0, shown),
+    ...(hidden > 0 ? [`- and ${hidden} more (run \`llm-docs status\`)`] : []),
+    ...section.footer,
+  ];
 }
 
 /**
- * The session-start hook text (spec 7.2): packs that need a rebuild with the
- * fix command; then direct dependencies newer than the model's training data
- * (or recently released, when no cutoff is known) that have no pack, newest
- * first, at most 8; then the pack list when the managed block is missing.
- * Empty when there is nothing to say. Capped at `maxChars` by dropping whole
- * lines from the end.
+ * The first three items of the session-start text (spec 7.2): packs that need
+ * a rebuild with the fix; built packs whose library version is newer than the
+ * model's training data (or close to it), with where their pages are; and
+ * direct dependencies in that window without a pack, at most 8. Newest
+ * first. Empty when there is nothing to say. Over `maxChars`, text goes from
+ * the bottom up: the last item's rows first, a cut list ending with how many
+ * more there are, and an item that cannot keep even its heading is dropped
+ * with everything below it. The hook appends the pack list after this.
  */
 export function formatStatusBrief(report: StatusReport, options: FormatStatusBriefOptions): string {
-  const lines: string[] = [];
-  const needsSync = report.packs.filter((pack) => packStateReason(pack) !== undefined);
+  const sections: BriefSection[] = [];
+  const rebuild = report.packs.flatMap((pack) => {
+    const reason = packStateReason(pack);
+    const fix = pack.nextStep?.startsWith('llm-docs ') ? `\`${pack.nextStep}\`` : pack.nextStep;
+    return reason === undefined ? [] : [`- ${pack.id}: ${reason}. Fix: ${fix}`];
+  });
 
-  if (needsSync.length > 0) {
-    lines.push('Pinned docs packs that need a rebuild:');
+  if (rebuild.length > 0) {
+    sections.push({
+      heading: 'Pinned docs packs that need a rebuild:',
+      rows: rebuild,
+      maxRows: rebuild.length,
+      footer: [],
+    });
+  }
 
-    for (const pack of needsSync) {
-      lines.push(`- ${pack.id}: ${packStateReason(pack)}. Fix: \`llm-docs sync ${pack.id}\``);
-    }
+  const pinned = report.packs
+    .flatMap((pack) =>
+      pack.state !== 'orphan' &&
+      pack.releaseWindow !== null &&
+      pack.publishedAt !== null &&
+      pack.indexPath !== null &&
+      pack.version !== null
+        ? [
+            {
+              pack,
+              version: pack.version,
+              publishedAt: pack.publishedAt,
+              window: pack.releaseWindow,
+            },
+          ]
+        : []
+    )
+    .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt));
+
+  if (pinned.length > 0) {
+    sections.push({
+      heading: report.cutoff
+        ? `Pinned docs for libraries released after or close to your training data cutoff (${report.cutoff.label}, through ${report.cutoff.cutoff}). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:`
+        : `Pinned docs for libraries released in the last ${report.recentDays} days. Your training data may predate these versions: read the pinned pages before writing code against them. Newest first:`,
+      rows: pinned.map(({ pack, version, publishedAt, window }) => {
+        const tag = WINDOW_TAG[window];
+        return `- ${escapeBlockText(pack.title)} ${escapeBlockText(version)} (released ${releaseDay(publishedAt)}${tag ? `, ${tag}` : ''}): \`${pack.indexPath}\``;
+      }),
+      maxRows: pinned.length,
+      footer: [],
+    });
   }
 
   const flagged = report.cutoff
@@ -310,73 +474,44 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
     : report.recent.map((release) => ({ release, tag: undefined }));
 
   if (flagged.length > 0) {
-    if (lines.length > 0) {
-      lines.push('');
-    }
-
-    lines.push(
-      report.cutoff
+    sections.push({
+      heading: report.cutoff
         ? `Direct dependencies released after or close to your training data cutoff (${report.cutoff.label}, through ${report.cutoff.cutoff}) with no pinned docs, newest first:`
-        : `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`
-    );
-
-    for (const { release, tag } of flagged.slice(0, BRIEF_MAX_DEPENDENCIES)) {
-      lines.push(dependencyLine(release, tag));
-    }
-
-    if (flagged.length > BRIEF_MAX_DEPENDENCIES) {
-      lines.push(`- and ${flagged.length - BRIEF_MAX_DEPENDENCIES} more (run \`llm-docs status\`)`);
-    }
-
-    lines.push(
-      'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.'
-    );
+        : `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`,
+      rows: flagged.map(({ release, tag }) => {
+        const suffix = tag ? `, ${tag}` : '';
+        return `- ${escapeBlockText(release.name)} ${escapeBlockText(release.version)} (${release.ecosystem}, released ${releaseDay(release.publishedAt)}${suffix})`;
+      }),
+      maxRows: BRIEF_MAX_DEPENDENCIES,
+      footer: [
+        'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.',
+      ],
+    });
   }
 
-  const listedPacks = report.packs.filter(
-    (pack) => pack.state !== 'missing' && pack.state !== 'orphan'
-  );
+  let lines: string[] = [];
 
-  if (!options.blockPresent && listedPacks.length > 0) {
-    if (lines.length > 0) {
-      lines.push('');
+  for (const section of sections) {
+    const prefix = lines.length === 0 ? [] : [...lines, ''];
+    const wanted = Math.min(section.rows.length, section.maxRows);
+    let shown = wanted;
+    let candidate = [...prefix, ...renderSection(section, shown)];
+
+    while (candidate.join('\n').length > options.maxChars && shown > 0) {
+      shown -= 1;
+      candidate = [...prefix, ...renderSection(section, shown)];
     }
 
-    lines.push(
-      'Pinned reference docs in this repository (open the index and the page for the API you need before writing code against these libraries):'
-    );
-
-    for (const pack of listedPacks) {
-      const indexPath =
-        options.packIndexPaths[pack.id] ??
-        `${options.packsDir.replace(/\/+$/, '')}/${pack.id}/index.md`;
-      lines.push(`- ${pack.id}${pack.version ? ` ${pack.version}` : ''}: \`${indexPath}\``);
-    }
-  }
-
-  return truncateLines(lines, options.maxChars);
-}
-
-function truncateLines(lines: string[], maxChars: number): string {
-  const kept: string[] = [];
-  let length = 0;
-
-  for (const line of lines) {
-    const added = (kept.length === 0 ? 0 : 1) + line.length;
-
-    if (length + added > maxChars) {
+    if (candidate.join('\n').length > options.maxChars) {
       break;
     }
-
-    kept.push(line);
-    length += added;
+    lines = candidate;
+    if (shown < wanted) {
+      break;
+    }
   }
 
-  while (kept.at(-1) === '') {
-    kept.pop();
-  }
-
-  return kept.join('\n');
+  return lines.join('\n');
 }
 
 function table(rows: string[][]): string[] {
@@ -411,14 +546,23 @@ function lockfileSummary(pack: PackStatus): string {
   }
 }
 
+function packReleased(pack: PackStatus): string {
+  if (pack.publishedAt === null) {
+    return '-';
+  }
+  const tag = pack.releaseWindow === null ? undefined : WINDOW_TAG[pack.releaseWindow];
+  return `${releaseDay(pack.publishedAt)}${tag ? ` (${tag})` : ''}`;
+}
+
 function releaseRows(releases: DependencyRelease[]): string[] {
   return table([
-    ['NAME', 'VERSION', 'ECOSYSTEM', 'RELEASED'],
+    ['NAME', 'VERSION', 'ECOSYSTEM', 'RELEASED', 'NEXT'],
     ...releases.map((release) => [
       release.name,
       release.version,
       release.ecosystem,
       releaseDay(release.publishedAt),
+      release.nextStep,
     ]),
   ]).map((line) => `  ${line}`);
 }
@@ -433,13 +577,15 @@ export function formatStatusHuman(report: StatusReport): string {
     lines.push('Packs:');
     lines.push(
       ...table([
-        ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE'],
+        ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'NEXT'],
         ...report.packs.map((pack) => [
           pack.id,
           pack.version ?? '-',
           pack.dependency ? `${pack.dependency.ecosystem}:${pack.dependency.name}` : '-',
           lockfileSummary(pack),
           pack.state,
+          packReleased(pack),
+          pack.nextStep ?? '-',
         ]),
       ]).map((line) => `  ${line}`)
     );
@@ -481,17 +627,187 @@ export function formatStatusHuman(report: StatusReport): string {
     }
   }
 
-  if (report.afterCutoff.length + report.nearCutoff.length + report.recent.length > 0) {
-    lines.push('');
-    lines.push(
-      'Next step: add a pack with `llm-docs add <id> --dependency <ecosystem>:<name> ...`.'
-    );
-  }
-
   lines.push('');
   lines.push(
     `${report.directDependencies} direct dependencies checked; ${report.unknownReleaseDates} with an unknown release date.`
   );
 
   return `${lines.join('\n')}\n`;
+}
+
+// ============================================================================
+// Gathering
+// ============================================================================
+
+/**
+ * A project as status sees it: a root, and its config when there is one.
+ * Status and the hook both work before a project adopts packs.
+ */
+export interface ProjectContext {
+  projectRoot: string;
+  loaded: LoadedProjectConfig | null;
+}
+
+export interface GatherStatusOptions {
+  /** Cache only, no request. */
+  offline: boolean;
+  /** Network budget for missing release dates; unbounded when absent (the `status` command). */
+  budgetMs?: number;
+  /** `--model`, or the hook payload's model. Falls back to resolveModelIdFromEnvironment. */
+  modelId?: string;
+  /** `--cutoff YYYY-MM`. A malformed value is a ConfigError (exit 2). */
+  cutoff?: string;
+  env: NodeJS.ProcessEnv;
+  homeDir: string;
+  cacheDir: string;
+  now: Date;
+  /** Stops the dependency scan and the release-date lookup (the hook's deadline). */
+  signal?: AbortSignal;
+  /** Tests point the registries at a local server. */
+  endpoints?: Partial<RegistryEndpoints>;
+}
+
+export interface ProjectStatus {
+  projectRoot: string;
+  loaded: LoadedProjectConfig | null;
+  /** The packs read for this report, so the hook renders its pack list without reading them again. */
+  packs: readonly ProjectPack[];
+  report: StatusReport;
+  /** The model id status compared against, after every fallback, or null. */
+  modelId: string | null;
+  cutoff: ModelCutoff | null;
+  /**
+   * Release dates this run could not get only because it ran out of time or
+   * hit a transport error (not because the registry has none). Above zero, a
+   * background warm-up helps the next session.
+   */
+  pendingReleaseDates: number;
+  /** Scan, cache, and lookup warnings, sorted. */
+  warnings: string[];
+}
+
+async function packStatusInput(
+  loaded: LoadedProjectConfig,
+  pack: ProjectPack,
+  resolveDependencyVersion: DependencyVersionResolver
+): Promise<PackStatusInput> {
+  const config = pack.inConfig ? loaded.config.packs[pack.id] : undefined;
+  const manifest = pack.manifest.kind === 'ok' ? pack.manifest.manifest : undefined;
+  let recipeChanged = false;
+
+  if (config !== undefined && manifest !== undefined) {
+    try {
+      const resolved = await resolvePackRecipe(loaded.config, pack.id, {
+        resolveDependencyVersion,
+      });
+      recipeChanged = resolved.recipeHash !== manifest.recipeHash;
+    } catch (error) {
+      // A lockfile that no longer resolves the dependency shows in the LOCKFILE column instead.
+      if (!(error instanceof ConfigError)) {
+        throw error;
+      }
+    }
+  }
+
+  return {
+    id: pack.id,
+    title: manifest?.pack.title ?? config?.title ?? pack.id,
+    version: manifest?.pack.version ?? config?.version ?? null,
+    dependency: manifest?.dependency ?? config?.dependency ?? null,
+    versionPinned: config?.version !== undefined,
+    recipeChanged,
+    indexPath: manifest === undefined ? null : `${loaded.packsDirRelative}/${pack.id}/index.md`,
+    inConfig: pack.inConfig,
+  };
+}
+
+/**
+ * Everything computeStatus needs, from one lazy dependency scan: the packs
+ * and whether their recipes moved, the cutoff (`--cutoff`, config
+ * `model.cutoff`, LLM_DOCS_MODEL_CUTOFF, then the table match for the model
+ * id from `--model`, the payload, or the environment), and the release dates
+ * of direct dependencies and of each bound pack's version. Throws only for
+ * an unreadable project (I/O) or a malformed cutoff (ConfigError).
+ */
+export async function gatherProjectStatus(
+  project: ProjectContext,
+  options: GatherStatusOptions
+): Promise<ProjectStatus> {
+  const { projectRoot, loaded } = project;
+  const dependencies = projectDependencies(projectRoot, {
+    ...(loaded === null ? {} : { skipDirectories: [loaded.packsDirRelative] }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  const modelId =
+    resolveModelIdFromEnvironment({
+      ...(options.modelId === undefined ? {} : { payloadModel: options.modelId }),
+      env: options.env,
+      projectRoot,
+      homeDir: options.homeDir,
+    }) ?? null;
+  const configCutoff = loaded?.config.model?.cutoff;
+  const cutoff =
+    resolveModelCutoff({
+      ...(modelId === null ? {} : { modelId }),
+      ...(options.cutoff === undefined ? {} : { override: options.cutoff }),
+      ...(configCutoff === undefined ? {} : { configCutoff }),
+      env: options.env,
+    }) ?? null;
+
+  const [scan, packs] = await Promise.all([
+    dependencies.scan(),
+    loaded === null ? [] : readProjectPacks(loaded),
+  ]);
+  const packInputs =
+    loaded === null
+      ? []
+      : await Promise.all(
+          packs.map((pack) => packStatusInput(loaded, pack, dependencies.resolveVersion))
+        );
+
+  const queries = new Map<string, ReleaseQuery>();
+  for (const dependency of scan.dependencies) {
+    if (dependency.direct) {
+      queries.set(releaseKey(dependency), dependency);
+    }
+  }
+  for (const input of packInputs) {
+    const query = input.indexPath === null ? undefined : packReleaseQuery(input);
+    if (query !== undefined && !queries.has(releaseKey(query))) {
+      queries.set(releaseKey(query), query);
+    }
+  }
+
+  const lookup = await lookupReleaseDates([...queries.values()], {
+    offline: options.offline,
+    cacheDir: options.cacheDir,
+    now: () => options.now,
+    ...(options.budgetMs === undefined ? {} : { budgetMs: options.budgetMs }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.endpoints === undefined ? {} : { endpoints: options.endpoints }),
+  });
+  const pendingReleaseDates = [...queries.keys()].filter((key) => {
+    const source = lookup.releases.get(key)?.source;
+    return source === 'budget' || source === 'error';
+  }).length;
+
+  const report = computeStatus({
+    dependencies: scan.dependencies,
+    releases: lookup.releases,
+    ...(cutoff === null ? {} : { cutoff: { cutoff: cutoff.cutoff, label: cutoff.label } }),
+    nearCutoffDays: loaded?.config.hook?.nearCutoffDays ?? DEFAULT_NEAR_CUTOFF_DAYS,
+    packs: packInputs,
+    now: options.now,
+  });
+
+  return {
+    projectRoot,
+    loaded,
+    packs,
+    report,
+    modelId,
+    cutoff,
+    pendingReleaseDates,
+    warnings: [...new Set([...scan.warnings, ...lookup.warnings])].sort(compareStringsByCodeUnit),
+  };
 }

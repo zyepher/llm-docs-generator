@@ -39,6 +39,8 @@ export interface LookupReleaseDatesOptions {
   offline: boolean;
   /** Wall-time bound for the whole lookup; unfinished queries return null and are not cached. */
   budgetMs?: number;
+  /** Ends the lookup like the budget does when aborted (the session-start hook's deadline). */
+  signal?: AbortSignal;
   cacheDir?: string;
   endpoints?: Partial<RegistryEndpoints>;
   now?: () => Date;
@@ -528,6 +530,11 @@ export async function lookupReleaseDates(
   const budget = new AbortController();
   const budgetTimer =
     options.budgetMs === undefined ? undefined : setTimeout(() => budget.abort(), options.budgetMs);
+  const stop = (): void => budget.abort();
+  if (options.signal?.aborted === true) {
+    stop();
+  }
+  options.signal?.addEventListener('abort', stop, { once: true });
   const context: RequestContext = {
     client: createHttpClient(),
     signal: budget.signal,
@@ -592,6 +599,7 @@ export async function lookupReleaseDates(
     if (budgetTimer !== undefined) {
       clearTimeout(budgetTimer);
     }
+    options.signal?.removeEventListener('abort', stop);
     await context.client.close();
   }
 

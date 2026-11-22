@@ -54,7 +54,15 @@ export interface ScanDependenciesOptions {
   maxDepth?: number;
   /** Project-relative directories to leave out (the caller passes its packsDir). */
   skipDirectories?: string[];
+  /**
+   * Stop when aborted: the scan returns the lockfiles it already read, with a
+   * warning. The session-start hook passes its deadline.
+   */
+  signal?: AbortSignal;
 }
+
+const SCAN_STOPPED_WARNING =
+  'Dependency scan stopped at its time limit; lockfiles not read by then were left out.';
 
 /**
  * Why a lockfile entry was left out. Everything here is reported in one
@@ -172,6 +180,11 @@ export async function scanDependencies(
     extraSkippedDirectoryNames: EXTRA_SKIPPED_DIRECTORY_NAMES,
     skippedDirectoryPaths: new Set(skipPrefixes),
   })) {
+    if (options.signal?.aborted === true) {
+      warnings.push(SCAN_STOPPED_WARNING);
+      break;
+    }
+
     if (event.kind === 'entries-exhausted') {
       warnings.push(
         `Dependency scan stopped early: the project has more than ${MAX_WALK_ENTRIES} entries; lockfiles beyond that were not read.`
@@ -212,6 +225,11 @@ export async function scanDependencies(
   const skipped: { lockfile: string; name: string; reason: SkipReason }[] = [];
 
   for (const entry of found) {
+    if (options.signal?.aborted === true) {
+      warnings.push(SCAN_STOPPED_WARNING);
+      break;
+    }
+
     if (!entry.parser) {
       warnings.push(`${entry.lockfile}: unsupported lockfile, ${entry.unsupported ?? 'skipped'}.`);
       continue;

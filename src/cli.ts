@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
 import { Command, CommanderError } from 'commander';
 
 import packageJson from '../package.json';
 import { syncAgentBlocks, type AgentBlockOutcome, type AgentBlockStatus } from './agent/block.js';
+import { detectHarness, nodeHookIo, runSessionStartHook, sessionBrief } from './agent/hook.js';
 import {
   CONFIG_FILE_NAME,
   CONVERTER_TOOLS,
@@ -19,6 +21,7 @@ import {
   initProjectConfig,
   loadOrEmptyConfig,
   loadProjectConfig,
+  loadProjectConfigIfPresent,
   packConfigSchema,
   projectRootForCreate,
   resolvePackRecipe,
@@ -35,6 +38,8 @@ import {
 } from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
+import { defaultCacheDir } from './deps/registries.js';
+import { formatStatusHuman, gatherProjectStatus } from './deps/status.js';
 import {
   ensurePacksDir,
   previewPack,
@@ -96,6 +101,12 @@ const COMMANDS = [
     status: 'implemented',
   },
   {
+    name: 'status',
+    summary:
+      "Show the packs and their lockfile drift, and the direct dependencies released after or near the model's training data cutoff",
+    status: 'implemented',
+  },
+  {
     name: 'guides stamp',
     summary:
       'Record the hash of every section each guide cites, so verify, refresh, and sync report the guides to re-review when that text changes',
@@ -116,6 +127,11 @@ const COMMANDS = [
   {
     name: 'capabilities',
     summary: 'Describe the commands, sources, converters, transforms, and limits of this build',
+    status: 'implemented',
+  },
+  {
+    name: 'hook session-start',
+    summary: 'Used by the plugin',
     status: 'implemented',
   },
 ] as const satisfies readonly CommandEntry[];
@@ -960,6 +976,73 @@ function buildProgram(): Command {
     }
     say(result.changed ? `Wrote ${result.lockPath}.` : `${result.lockPath} is up to date.`);
   });
+
+  withProjectOptions(
+    program
+      .command('status')
+      .description(summaryOf('status'))
+      .option(
+        '--model <id>',
+        'Model id or Claude Code alias whose training data cutoff release dates are compared against'
+      )
+      .option('--cutoff <YYYY-MM>', 'Training data cutoff month (overrides --model)')
+      .option('--offline', 'Use cached release dates only, with no network requests')
+      .option('--brief', 'Print only the text the session-start hook would inject, on stdout')
+  ).action(
+    async (
+      options: ProjectOptions & {
+        model?: string;
+        cutoff?: string;
+        offline?: boolean;
+        brief?: boolean;
+      }
+    ) => {
+      // The same project rule as the hook, so --brief prints what a session there would get.
+      const start = resolve(options.project ?? process.cwd());
+      const projectRoot = (await findProjectRoot(start)) ?? start;
+      const status = await gatherProjectStatus(
+        { projectRoot, loaded: await loadProjectConfigIfPresent(projectRoot) },
+        {
+          offline: options.offline === true,
+          ...(options.model === undefined ? {} : { modelId: options.model }),
+          ...(options.cutoff === undefined ? {} : { cutoff: options.cutoff }),
+          env: process.env,
+          homeDir: homedir(),
+          cacheDir: defaultCacheDir(),
+          now: new Date(),
+        }
+      );
+
+      if (options.brief === true) {
+        const brief = await sessionBrief(status, detectHarness(process.env));
+        if (brief !== '') {
+          process.stdout.write(`${brief}\n`);
+        }
+        return;
+      }
+      if (options.json === true) {
+        writeJson(status.report);
+      }
+      process.stderr.write(formatStatusHuman(status.report));
+      for (const warning of status.warnings) {
+        say(`warning: ${warning}`);
+      }
+    }
+  );
+
+  program
+    .command('hook')
+    .description(summaryOf('hook session-start'))
+    .command('session-start')
+    .description(summaryOf('hook session-start'))
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(async () => {
+      await runSessionStartHook(nodeHookIo());
+      // Output went out with a synchronous write and the warm-up child is unreferenced, so
+      // exiting now only drops work that missed the deadline.
+      process.exit(0);
+    });
 
   withProjectOptions(
     program
