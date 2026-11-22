@@ -656,9 +656,9 @@ fails, the other pack checks are skipped):
 
 | Check | Fails when |
 |---|---|
-| `manifest-schema` | manifest missing, unparsable, not schema v3, or for another pack id |
+| `manifest-schema` | manifest missing, unparsable, not schema v3, for another pack id, inconsistent with its own recipe (`recipeHash`, `pack.title`, `pack.version`, `dependency`), or recording a path that is not a contained relative POSIX path under the directory its kind allows; a pack directory or `manifest.json` that is a symbolic link is never read |
 | `outputs` | a listed output is missing or its hash differs |
-| `unlisted-files` | a file in the pack is not listed, or the pack holds a symlink (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info) |
+| `unlisted-files` | a file in the pack is not listed, the pack holds a symlink or is one, or the walk could not examine part of it (depth, entry count, or an unreadable directory, named where it stopped) (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info). Every file verify opens resolves inside the pack directory with no link on the way; an I/O error on one file is a failing finding for that file, and every other check still runs |
 | `links` | a relative link in a page, index, or combined file does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
 | `recipe` | the config recipe for this id, resolved at the version the manifest records, has a different `recipeHash` (the config was edited) or cannot be resolved (warn when the config has no such pack: orphan); a lockfile that moved while the config stayed the same passes here, since `lockfile` reports it: one cause, one finding |
 | `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise. A `covers` entry never fails it: warn when the lockfiles resolve it to a version whose major (the leading `<number>.`) differs from `pack.version`'s, since the pack may not describe that package's version (no finer comparison: a family's packages do not always share versions) |

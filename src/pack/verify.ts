@@ -8,7 +8,7 @@
  */
 
 import { lstat, readFile, stat } from 'node:fs/promises';
-import { join, posix, sep } from 'node:path';
+import { join, posix, resolve, sep } from 'node:path';
 
 import { checkAgentBlocks } from '../agent/block.js';
 import {
@@ -20,6 +20,7 @@ import {
 } from '../config/project.js';
 import { majorVersionsDiffer, projectDependencies } from '../deps/lockfiles.js';
 import { isStaleAgentConversion } from '../sources/convert.js';
+import { isSameOrDescendant } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
@@ -77,6 +78,8 @@ export interface VerifyOptions {
 interface PackListing {
   files: Set<string>;
   symlinks: string[];
+  /** Directories the walk could not examine (unreadable, too deep, past the entry budget). */
+  unexamined: { path: string; why: string }[];
 }
 
 interface PackCheckContext {
@@ -118,28 +121,48 @@ function result(check: CheckName, packId: string | null, outcome: CheckOutcome):
 
 const toPosix = (path: string): string => path.split(sep).join('/');
 
+const PACK_WALK_MAX_DEPTH = 64;
+const PACK_WALK_MAX_ENTRIES = 200_000;
+
+/**
+ * List a pack. A walk bound that stops it short is recorded, never ignored:
+ * a part of the pack nothing examined must not pass as clean.
+ */
 async function listPack(packDir: string, guidesRoot: string | undefined): Promise<PackListing> {
-  const listing: PackListing = { files: new Set(), symlinks: [] };
+  const listing: PackListing = { files: new Set(), symlinks: [], unexamined: [] };
 
   const walk = async (root: string, prefix: string, skipGuides: boolean): Promise<void> => {
+    const at = (relativePath: string): string => posix.join(prefix, toPosix(relativePath));
+
     for await (const event of walkBoundedDirectoryTree({
       root,
-      maxDepth: 64,
-      maxEntries: 200_000,
-      maxFiles: 200_000,
+      maxDepth: PACK_WALK_MAX_DEPTH,
+      maxEntries: PACK_WALK_MAX_ENTRIES,
+      maxFiles: PACK_WALK_MAX_ENTRIES,
       skipDirectoryNames: false,
       skippedDirectoryPaths: skipGuides ? new Set(['guides']) : new Set(),
     })) {
       if (event.kind === 'file') {
-        listing.files.add(posix.join(prefix, toPosix(event.relativePath)));
+        listing.files.add(at(event.relativePath));
       } else if (event.kind === 'symlink') {
-        listing.symlinks.push(posix.join(prefix, toPosix(event.relativePath)));
+        listing.symlinks.push(at(event.relativePath));
       } else if (event.kind === 'unreadable-directory') {
         if (!isFileNotFoundError(event.error) || event.relativePath !== '') {
-          throw new Error(`Cannot read ${event.absolutePath}: ${errorMessage(event.error)}`);
+          listing.unexamined.push({
+            path: `${at(event.relativePath)}/`,
+            why: `directory cannot be read (${errorMessage(event.error)})`,
+          });
         }
+      } else if (event.kind === 'depth-pruned') {
+        listing.unexamined.push({
+          path: `${at(event.relativePath)}/`,
+          why: `directory is more than ${PACK_WALK_MAX_DEPTH} levels deep`,
+        });
       } else if (event.kind === 'entries-exhausted') {
-        throw new Error(`${root} holds more than 200000 entries.`);
+        listing.unexamined.push({
+          path: `${at(event.relativePath)}/`,
+          why: `the pack holds more than ${PACK_WALK_MAX_ENTRIES} entries and the walk stopped in this directory`,
+        });
       }
     }
   };
@@ -153,6 +176,75 @@ async function listPack(packDir: string, guidesRoot: string | undefined): Promis
   return listing;
 }
 
+/** A pack file verify may open, or why it may not. */
+type PackFile =
+  { kind: 'file'; absolutePath: string } | { kind: 'missing' } | { kind: 'unusable'; why: string };
+
+function isNotDirectoryError(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOTDIR';
+}
+
+/**
+ * The one place verify turns a pack-relative path into a file it opens. The
+ * path must resolve inside the pack directory, and each component from the
+ * pack directory down must be a real directory and, last, a regular file: a
+ * symbolic link anywhere on the way is never followed.
+ */
+async function packFile(packDir: string, path: string): Promise<PackFile> {
+  const segments = path.split('/');
+  const absolutePath = resolve(packDir, ...segments);
+
+  if (!isSameOrDescendant(packDir, absolutePath) || absolutePath === resolve(packDir)) {
+    return { kind: 'unusable', why: 'outside the pack directory' };
+  }
+
+  try {
+    for (let index = 1; index <= segments.length; index++) {
+      const stats = await lstat(join(packDir, ...segments.slice(0, index)));
+      if (stats.isSymbolicLink()) {
+        return {
+          kind: 'unusable',
+          why: 'reached through a symbolic link, which verify never follows',
+        };
+      }
+      if (index < segments.length ? !stats.isDirectory() : !stats.isFile()) {
+        return { kind: 'missing' };
+      }
+    }
+  } catch (error) {
+    if (isFileNotFoundError(error) || isNotDirectoryError(error)) {
+      return { kind: 'missing' };
+    }
+    return { kind: 'unusable', why: `unreadable (${errorMessage(error)})` };
+  }
+
+  return { kind: 'file', absolutePath };
+}
+
+/** The text of a pack page, or the fail finding that says why its links went unchecked. */
+async function readPackText(
+  context: PackCheckContext,
+  path: string
+): Promise<{ text: string } | { finding: CheckFinding }> {
+  const file = await packFile(context.packDir, path);
+  const fail = (why: string): { finding: CheckFinding } => ({
+    finding: {
+      status: 'fail',
+      path,
+      message: `${why}, so its links were not checked; run 'llm-docs sync ${context.packId}' to rebuild the pack`,
+    },
+  });
+
+  if (file.kind !== 'file') {
+    return fail(file.kind === 'missing' ? 'file is missing' : `file is ${file.why}`);
+  }
+  try {
+    return { text: await readFile(file.absolutePath, 'utf-8') };
+  } catch (error) {
+    return fail(`file is unreadable (${errorMessage(error)})`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Pack checks
 // ---------------------------------------------------------------------------
@@ -161,27 +253,29 @@ async function checkOutputs(context: PackCheckContext): Promise<CheckOutcome> {
   const findings: CheckFinding[] = [];
 
   for (const output of context.manifest.outputs) {
-    const absolutePath = join(context.packDir, ...output.path.split('/'));
-    let isFile = false;
-
-    try {
-      isFile = (await lstat(absolutePath)).isFile();
-    } catch (error) {
-      if (!isFileNotFoundError(error)) {
-        throw error;
-      }
-    }
-
-    if (!isFile) {
+    const file = await packFile(context.packDir, output.path);
+    const fail = (problem: string): void => {
       findings.push({
         status: 'fail',
         path: output.path,
-        message: `listed output is missing; run 'llm-docs sync ${context.packId}' to rebuild the pack`,
+        message: `listed output is ${problem}; run 'llm-docs sync ${context.packId}' to rebuild the pack`,
       });
+    };
+
+    if (file.kind !== 'file') {
+      fail(file.kind === 'missing' ? 'missing' : file.why);
       continue;
     }
 
-    if ((await sha256File(absolutePath)) !== output.sha256) {
+    let actual: string;
+    try {
+      actual = await sha256File(file.absolutePath);
+    } catch (error) {
+      fail(`unreadable (${errorMessage(error)})`);
+      continue;
+    }
+
+    if (actual !== output.sha256) {
       findings.push({
         status: 'fail',
         path: output.path,
@@ -224,6 +318,14 @@ async function checkUnlistedFiles(context: PackCheckContext): Promise<CheckOutco
     });
   }
 
+  for (const { path, why } of context.listing.unexamined) {
+    findings.push({
+      status: 'fail',
+      path,
+      message: `${why}, so verify could not examine what it holds; remove it, or run 'llm-docs sync ${context.packId}' to rebuild the pack`,
+    });
+  }
+
   if (guides > 0) {
     findings.push({
       status: 'info',
@@ -256,7 +358,11 @@ async function checkLinks(context: PackCheckContext): Promise<CheckOutcome> {
   const anchorsOf = async (path: string): Promise<Set<string>> => {
     let anchors = anchorsByPath.get(path);
     if (anchors === undefined) {
-      anchors = headingAnchors(await readFile(join(context.packDir, ...path.split('/')), 'utf-8'));
+      const read = await readPackText(context, path);
+      if ('finding' in read) {
+        findings.push(read.finding);
+      }
+      anchors = 'text' in read ? headingAnchors(read.text) : new Set<string>();
       anchorsByPath.set(path, anchors);
     }
     return anchors;
@@ -267,7 +373,12 @@ async function checkLinks(context: PackCheckContext): Promise<CheckOutcome> {
       continue;
     }
 
-    const text = await readFile(join(context.packDir, ...output.path.split('/')), 'utf-8');
+    const read = await readPackText(context, output.path);
+    if ('finding' in read) {
+      findings.push(read.finding);
+      continue;
+    }
+    const text = read.text;
 
     for (const link of findLinkTargets(text)) {
       const target = link.target.trim();
@@ -508,17 +619,32 @@ async function checkConversion(context: PackCheckContext): Promise<CheckOutcome>
     }
 
     // A local origin is either the original itself or a directory holding it.
-    const originPath = join(projectRoot, ...origin.path.split('/'));
+    const originPath = resolve(projectRoot, ...origin.path.split('/'));
     let current: string;
 
     try {
       const originalPath = (await stat(originPath)).isDirectory()
-        ? join(originPath, ...entry.path.split('/'))
+        ? resolve(originPath, ...entry.path.split('/'))
         : originPath;
+      if (!isSameOrDescendant(projectRoot, originalPath)) {
+        findings.push(
+          finding(
+            'fail',
+            `${label} resolves outside the project; run 'llm-docs sync ${context.packId}' to rebuild the pack`
+          )
+        );
+        continue;
+      }
       current = await sha256File(originalPath);
     } catch (error) {
       if (!isFileNotFoundError(error)) {
-        throw error;
+        findings.push(
+          finding(
+            'fail',
+            `${label}, converted by an agent, is unreadable (${errorMessage(error)}); make it readable, then run 'llm-docs verify' again`
+          )
+        );
+        continue;
       }
       findings.push(
         finding(
@@ -546,7 +672,14 @@ const PACK_CHECKS: readonly PackCheck[] = [
   { name: 'links', run: checkLinks },
   { name: 'recipe', run: checkRecipe },
   { name: 'lockfile', run: checkLockfile },
-  { name: 'citations', run: (context) => checkCitations(context.packId, context.packDir) },
+  {
+    name: 'citations',
+    // A linked guides/ fails unlisted-files; reading the guides through it would follow the link.
+    run: async (context) =>
+      context.listing.symlinks.includes('guides')
+        ? { skipped: 'guides/ is a symbolic link, which verify never follows' }
+        : checkCitations(context.packId, context.packDir),
+  },
   { name: 'conversion', run: checkConversion },
   { name: 'license', run: checkLicense },
 ];
@@ -585,11 +718,29 @@ export async function verifyPackFiles(
 
   for (const check of PACK_CHECKS) {
     if (wanted.has(check.name)) {
-      results.push(result(check.name, packId, await check.run(context)));
+      results.push(result(check.name, packId, await runCheck(check, context)));
     }
   }
 
   return results;
+}
+
+/**
+ * Run one check. A check that cannot finish (an I/O error the check did not
+ * turn into a finding itself) fails with the reason instead of ending the
+ * whole run, so every other check and pack is still reported.
+ */
+async function runCheck(check: PackCheck, context: PackCheckContext): Promise<CheckOutcome> {
+  try {
+    return await check.run(context);
+  } catch (error) {
+    return [
+      {
+        status: 'fail',
+        message: `the check could not finish: ${errorMessage(error)}; fix the cause, then run 'llm-docs verify ${context.packId}' again`,
+      },
+    ];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +798,28 @@ export async function verifyPacks(
       : [...new Set(ids)].flatMap((id) => packs.filter((pack) => pack.id === id));
 
   for (const { id: packId, dir: packDir, inConfig, manifest: read } of selected) {
+    if (read.kind === 'invalid' && read.reason === 'link') {
+      results.push(result('manifest-schema', packId, { skipped: read.message }));
+      for (const check of PACK_CHECKS) {
+        results.push(
+          result(
+            check.name,
+            packId,
+            check.name === 'unlisted-files'
+              ? [
+                  {
+                    status: 'fail',
+                    path: '.',
+                    message: `the pack directory is a symbolic link, which verify never follows; delete the link, then run 'llm-docs sync ${packId}' to build the pack in place`,
+                  },
+                ]
+              : { skipped: read.message }
+          )
+        );
+      }
+      continue;
+    }
+
     if (read.kind !== 'ok') {
       const sync = `run 'llm-docs sync ${packId}' to rebuild the pack`;
       const message =
@@ -681,7 +854,7 @@ export async function verifyPacks(
     };
 
     for (const check of PACK_CHECKS) {
-      results.push(result(check.name, packId, await check.run(context)));
+      results.push(result(check.name, packId, await runCheck(check, context)));
     }
   }
 
