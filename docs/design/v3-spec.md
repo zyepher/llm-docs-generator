@@ -901,6 +901,7 @@ plugin/
   bin/llm-docs                    POSIX sh wrapper (exec node "$(dirname "$0")/llm-docs.mjs" "$@")
   bin/llm-docs.cmd                Windows wrapper
   bin/llm-docs.mjs                the whole CLI bundled into one file (generated, committed)
+  THIRD_PARTY_NOTICES.md          license notices of the packages bundled into it (generated, committed)
   skills/add-docs/SKILL.md        planner playbook: decide source and version, write the recipe, sync, verify
   skills/write-docs-guide/SKILL.md  write a digest, fact-check it with the agent, stamp citations
   skills/llm-docs/SKILL.md        command reference and when to use which command
@@ -916,9 +917,12 @@ the Cursor hook uses a path relative to the plugin root, which also works in she
 expand `${...}`. In Claude Code the matcher lists every session source because each of them
 starts a context without the earlier note. `npm run build:plugin` regenerates
 `bin/llm-docs.mjs` (tsdown, all dependencies bundled, minified ESM, Node 22 target,
-byte-identical across builds, and refused if a machine-specific path appears in it) and stamps
-plugin and marketplace versions from `package.json`; `npm run check:plugin` fails CI when the
-committed bundle or versions are out of date, when a skill folder or agent file name differs
+byte-identical across builds, and refused if a machine-specific path appears in it), writes
+`THIRD_PARTY_NOTICES.md` from the `package.json` and license files of every package the bundle's
+module graph pulls code from (refusing a package with no license file or a license outside a
+permissive allowlist: MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apache-2.0, 0BSD, BlueOak-1.0.0), and
+stamps plugin and marketplace versions from `package.json`; `npm run check:plugin` fails CI when
+the committed bundle, notices, or versions are out of date, when a skill folder or agent file name differs
 from its frontmatter `name`, when a description is over 1024 characters, when the skills, the
 agent, or the plugin README name (in code) a command or flag that `capabilities --json` does
 not list, or when the `llm-docs` skill does not name every command or its `Check` table does
@@ -1057,7 +1061,7 @@ writes files.
   `package-lock.json`; lint, format check, type-check, build, plugin bundle check, tests (the
   schema check is a test).
 - Release: a tag `v*` that equals `v` plus the package version runs the CI gate and attaches the
-  committed bundle as `llm-docs.mjs`, with `llm-docs.mjs.sha256`, to the GitHub Release for the
+  committed bundle as `llm-docs.mjs`, with `llm-docs.mjs.sha256` and `THIRD_PARTY_NOTICES.md`, to the GitHub Release for the
   tag (`.github/workflows/release.yml`). 3.0.0 is released on GitHub only. Publishing to npm with
   provenance is a separate, manually dispatched workflow (`publish-npm.yml`) that refuses to run
   until the owner adds the `NPM_TOKEN` secret.

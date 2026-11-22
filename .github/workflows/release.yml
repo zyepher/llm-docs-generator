@@ -2,8 +2,8 @@ name: Release
 
 # On a v* tag: checks the tag equals "v" plus the package.json version, runs
 # the whole CI gate (check:plugin proves the committed plugin/bin/llm-docs.mjs
-# is what the build produces), and attaches that bundle and its SHA-256 to the
-# GitHub Release for the tag. It never publishes to npm: publish-npm.yml does,
+# is what the build produces), and attaches that bundle, its SHA-256, and the
+# bundled packages' notices to the GitHub Release for the tag. It never publishes to npm: publish-npm.yml does,
 # on manual dispatch only.
 
 on:
@@ -81,6 +81,7 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/assets"
           cp plugin/bin/llm-docs.mjs "$RUNNER_TEMP/assets/llm-docs.mjs"
+          cp plugin/THIRD_PARTY_NOTICES.md "$RUNNER_TEMP/assets/THIRD_PARTY_NOTICES.md"
           cd "$RUNNER_TEMP/assets"
           sha256sum llm-docs.mjs > llm-docs.mjs.sha256
           cat llm-docs.mjs.sha256

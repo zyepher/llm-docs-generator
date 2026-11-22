@@ -14,6 +14,7 @@ import {
   staleCutoffTableWarning,
   type Capabilities,
 } from '../../scripts/check-plugin.js';
+import { thirdPartyNotices } from '../../scripts/build-plugin.js';
 import { runSessionStartHook } from '../../src/agent/hook.js';
 import { isRecord } from '../../src/utils/guards.js';
 
@@ -186,6 +187,50 @@ describe('the package registry rule', () => {
       'docs/install.md:4',
     ]);
     expect(problems[0]).toMatch(/GitHub Release asset llm-docs\.mjs instead\.$/);
+  });
+});
+
+describe('the third-party notices', () => {
+  const pkg = (name: string, license: string): string =>
+    JSON.stringify({ name, version: '1.0.0', license, repository: `example/${name}` });
+
+  it('carry each bundled package sorted by name, with its license and license text', async () => {
+    const root = await tempDir({
+      'node_modules/zeta/package.json': pkg('zeta', 'MIT'),
+      'node_modules/zeta/LICENSE': 'MIT License\r\n\r\nCopyright (c) Zeta\r\n',
+      'node_modules/@scope/alpha/package.json': pkg('@scope/alpha', 'BSD-3-Clause'),
+      'node_modules/@scope/alpha/LICENSE.md': 'Copyright Alpha. Redistributions must retain this.',
+      'node_modules/@scope/alpha/README.md': 'not a license',
+    });
+
+    const text = (
+      await thirdPartyNotices([
+        join(root, 'node_modules', 'zeta'),
+        join(root, 'node_modules', '@scope', 'alpha'),
+      ])
+    ).toString('utf-8');
+
+    expect(text.indexOf('## @scope/alpha 1.0.0')).toBeLessThan(text.indexOf('## zeta 1.0.0'));
+    expect(text).toContain(
+      '## @scope/alpha 1.0.0\n\nLicense: BSD-3-Clause. Repository: example/@scope/alpha\n\n```text\nCopyright Alpha. Redistributions must retain this.\n```\n'
+    );
+    expect(text).toContain('```text\nMIT License\n\nCopyright (c) Zeta\n```\n');
+    expect(text).not.toContain('not a license');
+  });
+
+  it('refuse a package with a license outside the allowlist or with no license file', async () => {
+    const root = await tempDir({
+      'node_modules/copyleft/package.json': pkg('copyleft', 'GPL-3.0-only'),
+      'node_modules/copyleft/LICENSE': 'GNU GENERAL PUBLIC LICENSE',
+      'node_modules/bare/package.json': pkg('bare', 'MIT'),
+    });
+
+    await expect(thirdPartyNotices([join(root, 'node_modules', 'copyleft')])).rejects.toThrow(
+      /copyleft 1\.0\.0 is bundled into the plugin under license "GPL-3\.0-only"/
+    );
+    await expect(thirdPartyNotices([join(root, 'node_modules', 'bare')])).rejects.toThrow(
+      /bare 1\.0\.0 is bundled into the plugin but ships no LICENSE, COPYING, or NOTICE file/
+    );
   });
 });
 

@@ -10,6 +10,7 @@ Your coding agent's knowledge of a library stops at its training data cutoff. Yo
 - The `llm-docs` skill is the command reference. It covers every command, the verify checks with their fixes, and how to read the session-start note.
 - The `docs-fact-checker` agent checks each claim in a guide against the pages it cites and reports it as supported, unsupported, or contradicted. It never edits the guide.
 - `bin/llm-docs.mjs` is the whole CLI in one file, with a POSIX wrapper (`bin/llm-docs`) and a Windows wrapper (`bin/llm-docs.cmd`). Claude Code puts a plugin's `bin/` folder on the agent's shell PATH, so the agent can run `llm-docs` there without installing anything. In a host that does not, the skills tell the agent to run `node <plugin>/bin/llm-docs.mjs` instead, where `<plugin>` is the installed plugin's folder.
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) carries the license and copyright notices of the open source packages bundled into `bin/llm-docs.mjs`.
 
 The npm package is not published yet. Until it is, the plugin and the GitHub Release assets below are the only ways to get the CLI. Do not install `llm-docs` from a package registry: whatever is published under that name there is not this project.
 
