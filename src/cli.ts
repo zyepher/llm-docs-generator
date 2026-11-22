@@ -35,7 +35,14 @@ import {
 } from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
-import { ensurePacksDir, previewPack, syncPacks, type SyncReport } from './pack/build.js';
+import {
+  ensurePacksDir,
+  previewPack,
+  syncPacks,
+  type PackSyncResult,
+  type SyncReport,
+} from './pack/build.js';
+import { stampGuides, type PageChange, type SectionChange } from './pack/guides.js';
 import {
   PACK_CHECK_NAMES,
   PROJECT_CHECK_NAMES,
@@ -86,6 +93,12 @@ const COMMANDS = [
     name: 'verify',
     summary:
       'Check packs against their manifests, recipes, lockfiles, and links, and the managed blocks (read-only, offline)',
+    status: 'implemented',
+  },
+  {
+    name: 'guides stamp',
+    summary:
+      'Record the hash of every section each guide cites, so verify, refresh, and sync report the guides to re-review when that text changes',
     status: 'implemented',
   },
   {
@@ -520,6 +533,36 @@ function printAgentBlocks(blocks: readonly AgentBlockOutcome[]): void {
   }
 }
 
+const CITATION_CHANGE_LABEL: Readonly<Record<SectionChange | PageChange, string>> = {
+  'section-changed': 'section changed',
+  unresolved: 'no longer resolves',
+  'page-changed': 'page changed upstream',
+  'page-removed': 'page removed upstream',
+};
+
+function printGuideReview(pack: PackSyncResult): void {
+  const review = pack.guideReview;
+
+  if (review === undefined) {
+    return;
+  }
+
+  say(
+    review.basis === 'sections'
+      ? '  guides to re-review (cited sections changed):'
+      : '  guides to re-review (cited pages changed upstream; sections are compared once rebuilt):'
+  );
+  for (const guide of review.guides) {
+    for (const citation of guide.citations) {
+      say(`    ${guide.guide} -> ${citation.target} (${CITATION_CHANGE_LABEL[citation.change]})`);
+    }
+  }
+  if (review.basis === 'sections') {
+    const guides = review.guides.map((guide) => guide.guide).join(' ');
+    say(`  after re-reviewing them: llm-docs guides stamp ${pack.id} ${guides}`);
+  }
+}
+
 function printSyncReport(report: SyncReport): void {
   for (const pack of report.packs) {
     switch (pack.status) {
@@ -539,6 +582,7 @@ function printSyncReport(report: SyncReport): void {
     for (const warning of pack.warnings) {
       say(`  warning: ${warning}`);
     }
+    printGuideReview(pack);
   }
 
   for (const orphan of report.orphans) {
@@ -578,10 +622,11 @@ function printRefreshReport(report: SyncReport): void {
 
     const { counts } = refresh;
     const summary = `${counts.changed} changed, ${counts.added} added, ${counts.removed} removed, ${counts.unchanged} unchanged`;
+    const reason = pack.reason ?? 'upstream changed';
     const outcome = {
       unchanged: 'no upstream changes',
-      built: 'upstream changed; rebuilt',
-      'would-build': 'upstream changed; would rebuild',
+      built: `${reason}; rebuilt`,
+      'would-build': `${reason}; would rebuild`,
     }[pack.status];
     say(`${pack.id}: ${outcome} (${summary})`);
 
@@ -595,9 +640,17 @@ function printRefreshReport(report: SyncReport): void {
         say(`  ${file.status.padEnd(8)} ${file.output}`);
       }
     }
+    for (const conversion of refresh.converters) {
+      const label = (converter: { tool: string; version: string | null }): string =>
+        converter.version ?? `${converter.tool} (version unknown)`;
+      say(
+        `  converter ${conversion.output} (${label(conversion.previous)} -> ${label(conversion.current)})`
+      );
+    }
     for (const warning of pack.warnings) {
       say(`  warning: ${warning}`);
     }
+    printGuideReview(pack);
   }
 
   printAgentBlocks(report.agentBlocks);
@@ -605,7 +658,7 @@ function printRefreshReport(report: SyncReport): void {
   if (report.check) {
     say(
       report.changed
-        ? 'refresh --check: upstream changed.'
+        ? 'refresh --check: upstream or a converter changed; run refresh without --check to rebuild.'
         : 'refresh --check: every pack matches upstream.'
     );
   }
@@ -648,9 +701,14 @@ function capabilities(program: Command): unknown {
     version: packageJson.version,
     commands: COMMANDS.map((entry) => ({
       ...entry,
+      // A name with a space is a subcommand path (`guides stamp`).
       options:
-        program.commands
-          .find((command) => command.name() === entry.name)
+        entry.name
+          .split(' ')
+          .reduce<Command | undefined>(
+            (parent, name) => parent?.commands.find((command) => command.name() === name),
+            program
+          )
           ?.options.map((option) => ({ flags: option.flags, description: option.description })) ??
         [],
     })),
@@ -869,6 +927,38 @@ function buildProgram(): Command {
     }
     printRefreshReport(report);
     process.exitCode = syncExitCode(report);
+  });
+
+  const guides = program.command('guides').description(summaryOf('guides stamp'));
+
+  withProjectOptions(
+    guides
+      .command('stamp')
+      .description(summaryOf('guides stamp'))
+      .argument('<id>', 'Pack whose guides to stamp')
+      .argument(
+        '[guides...]',
+        'Guides to stamp (default: every guide), as guides/x.md, x.md, or a path to the file'
+      )
+  ).action(async (id: string, guidePaths: string[], options: ProjectOptions) => {
+    const loaded = await loadProjectConfig(await existingProjectRoot(options));
+    const result = await stampGuides(loaded, id, guidePaths, process.cwd());
+
+    if (options.json === true) {
+      writeJson(result);
+    }
+    for (const guide of result.guides) {
+      say(
+        `${id}: stamped ${guide.path} (${guide.citations} citation${guide.citations === 1 ? '' : 's'})`
+      );
+    }
+    for (const removed of result.removed) {
+      say(`${id}: dropped ${removed} from the lock (the guide no longer exists)`);
+    }
+    for (const warning of result.warnings) {
+      say(`  warning: ${warning}`);
+    }
+    say(result.changed ? `Wrote ${result.lockPath}.` : `${result.lockPath} is up to date.`);
   });
 
   withProjectOptions(

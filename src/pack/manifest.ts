@@ -5,8 +5,8 @@
  * is byte-identical.
  *
  * The schema already carries the fields later phases fill: origins for every
- * source type, detected licenses, http fetch metadata, converter records,
- * link statistics, and the `citations` output kind.
+ * source type, detected licenses, http fetch metadata, converter records, and
+ * link statistics. The citations lock is not an output (spec 3, 8).
  */
 
 import { lstat, readdir } from 'node:fs/promises';
@@ -36,7 +36,7 @@ const hashSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/, {
 });
 const relativePathSchema = z.string().min(1);
 
-const OUTPUT_KINDS = ['page', 'index', 'passthrough', 'combined', 'citations'] as const;
+const OUTPUT_KINDS = ['page', 'index', 'passthrough', 'combined'] as const;
 
 const LICENSE_STATUSES = [
   'permissive',

@@ -1207,7 +1207,7 @@ export function headingSlugs(
 /**
  * Fragment anchors a page defines: GitHub heading slugs with `-1`, `-2`
  * suffixes for duplicates, plus HTML `id`/`name` attributes. Used by
- * `verify --strict`; Phase 5 resolves citations with it.
+ * `verify --strict`.
  */
 export function headingAnchors(text: string, options: MarkdownSyntaxOptions = {}): Set<string> {
   const anchors = new Set(headingSlugs(text, options).map((heading) => heading.slug));

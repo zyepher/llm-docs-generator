@@ -170,6 +170,7 @@ describe('llm-docs v3 CLI', () => {
       'links',
       'recipe',
       'lockfile',
+      'citations',
       'conversion',
       'license',
     ]);
@@ -191,6 +192,71 @@ describe('llm-docs v3 CLI', () => {
 
     expect((await runCli(root, ['sync'])).code).toBe(0);
     expect((await runCli(root, ['verify'])).code).toBe(0);
+  });
+
+  it('stamps guide citations and names the guide to re-review when cited text changes', async () => {
+    const api = '# API\n\n## Install\n\nRun it.\n\n## Usage\n\nUse it.\n';
+    const root = await makeProject({ 'docs/api.md': api, 'docs/start.md': '# Start\n' });
+    const add = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0']);
+    expect(add.code, add.stderr).toBe(0);
+    const guides = join(root, 'agent-docs', 'demo', 'guides');
+    const lock = join(guides, 'citations.lock.json');
+    await mkdir(guides);
+    await writeFile(
+      join(guides, 'digest.md'),
+      '# Digest\n\nInstall per [install](../pages/api.md#install); begin at [start](../pages/start.md).\n'
+    );
+
+    const stamp = await runCli(root, ['guides', 'stamp', 'demo', '--json']);
+    expect(stamp.code, stamp.stderr).toBe(0);
+    expect(JSON.parse(stamp.stdout)).toMatchObject({
+      lockPath: 'agent-docs/demo/guides/citations.lock.json',
+      changed: true,
+      guides: [{ path: 'guides/digest.md', citations: 2 }],
+    });
+    expect(stamp.stderr).toContain('demo: stamped guides/digest.md (2 citations)');
+    expect(Object.keys(JSON.parse(await readFile(lock, 'utf-8')).guides)).toEqual([
+      'guides/digest.md',
+    ]);
+    // The first guide only makes the managed block's `guides` topic stale; sync fixes that alone.
+    const blockBehind = await runCli(root, ['verify']);
+    expect(blockBehind.code).toBe(1);
+    expect(blockBehind.stderr).toContain(
+      "project agent-block fail: AGENTS.md: the llm-docs block differs from what sync would write; run 'llm-docs sync'\n"
+    );
+    expect(blockBehind.stderr).toContain('verify: 1 problem found.');
+    const blockSync = await runCli(root, ['sync', '--offline']);
+    expect(blockSync.stderr).toContain('demo: up to date\nAGENTS.md: llm-docs block updated\n');
+    expect((await runCli(root, ['verify'])).code).toBe(0);
+
+    await writeFile(join(root, 'docs', 'api.md'), api.replace('Run it.', 'Run it twice.'));
+    const sync = await runCli(root, ['sync']);
+    expect(sync.code, sync.stderr).toBe(0);
+    expect(sync.stderr).toContain('demo: built (source files changed)\n');
+    expect(sync.stderr).toContain(
+      '  guides to re-review (cited sections changed):\n' +
+        '    guides/digest.md -> pages/api.md#install (section changed)\n' +
+        '  after re-reviewing them: llm-docs guides stamp demo guides/digest.md\n'
+    );
+
+    const stale = await runCli(root, ['verify']);
+    expect(stale.code).toBe(1);
+    expect(stale.stderr).toContain(
+      "demo citations fail: guides/digest.md: pages/api.md#install: cited section changed since stamping; re-review the guide, then 'llm-docs guides stamp demo guides/digest.md'"
+    );
+    expect(stale.stderr).not.toContain('pages/start.md:');
+
+    expect((await runCli(root, ['guides', 'stamp', 'demo', 'guides/digest.md'])).code).toBe(0);
+    expect((await runCli(root, ['verify'])).code).toBe(0);
+
+    const before = await readFile(lock, 'utf-8');
+    await writeFile(join(guides, 'broken.md'), '# Broken\n\n[gone](../pages/missing.md)\n');
+    const refused = await runCli(root, ['guides', 'stamp', 'demo']);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain(
+      'Nothing stamped for pack "demo": 1 citation does not resolve: guides/broken.md: pages/missing.md (no such file in the pack).'
+    );
+    expect(await readFile(lock, 'utf-8')).toBe(before);
   });
 
   it('dry-runs an add without writing anything', async () => {
@@ -410,6 +476,7 @@ describe('llm-docs v3 CLI', () => {
       'sync',
       'refresh',
       'verify',
+      'guides stamp',
       'migrate',
       'discover',
       'capabilities',
@@ -487,6 +554,32 @@ describe('llm-docs v3 CLI', () => {
       await readFile(join(root, 'agent-docs', 'manuals', 'pages', 'spec.md'), 'utf-8')
     ).toContain('Converted by markitdown: Operating voltage: 24 V');
     expect((await runCli(root, ['verify'], env)).code).toBe(0);
+
+    // A converter upgrade alone: refresh reports the reconverted pages in their own group.
+    const upgraded = { ...env, FAKE_MARKITDOWN_VERSION: '0.2.0' };
+    const upgradeCheck = await runCli(root, ['refresh', '--check'], upgraded);
+    expect(upgradeCheck.code).toBe(1);
+    expect(upgradeCheck.stderr).toContain(
+      'manuals: a converter version changed; would rebuild (0 changed, 0 added, 0 removed, 2 unchanged)\n' +
+        '  converter pages/spec.md (markitdown 0.1.9 -> markitdown 0.2.0)\n'
+    );
+    const upgrade = await runCli(root, ['refresh', '--json'], upgraded);
+    expect(upgrade.code, upgrade.stderr).toBe(0);
+    expect(JSON.parse(upgrade.stdout).packs[0]).toMatchObject({
+      status: 'built',
+      reason: 'a converter version changed',
+      refresh: {
+        converters: [
+          {
+            source: '0:spec.pdf',
+            output: 'pages/spec.md',
+            previous: { tool: 'markitdown', version: 'markitdown 0.1.9' },
+            current: { tool: 'markitdown', version: 'markitdown 0.2.0' },
+          },
+        ],
+      },
+    });
+    expect((await runCli(root, ['refresh', '--check'], upgraded)).code).toBe(0);
 
     // An agent conversion: the agent's .md is the page; a changed original is stale.
     await writeFile(join(root, 'notes', 'wiring.pdf.md'), '# Wiring\n\nRed to red.\n');

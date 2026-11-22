@@ -1,15 +1,16 @@
 /**
  * The `refresh` report (spec 5): what a fresh acquisition at the recorded
  * recipe changes against the pack on disk, per upstream file (unchanged,
- * changed, added, removed), and per git source whether the ref now resolves
- * to a different commit. The rebuild itself is the ordinary build in
- * src/pack/build.ts.
+ * changed, added, removed), per git source whether the ref now resolves to
+ * a different commit, and, separately, the converted pages whose converter
+ * version changed (spec 4.6) even though their original did not. The
+ * rebuild itself is the ordinary build in src/pack/build.ts.
  */
 
 import type { PackSelection } from '../sources/acquire.js';
 import { canonicalJsonStringify } from '../utils/json.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
-import type { ManifestOrigin, PackManifest } from './manifest.js';
+import type { ManifestOrigin, ManifestSourceEntry, PackManifest } from './manifest.js';
 
 export type RefreshFileStatus = 'unchanged' | 'changed' | 'added' | 'removed';
 
@@ -29,23 +30,47 @@ export interface RefreshRefChange {
   commit: string;
 }
 
+/** The converter that produced (or would now produce) a page: tool and `--version` line. */
+export type ConverterIdentity = Pick<
+  NonNullable<ManifestSourceEntry['converter']>,
+  'tool' | 'version'
+>;
+
+export interface RefreshConverterChange {
+  /** `<source index>:<origin-relative path>` of the converted original. */
+  source: string;
+  output: string;
+  previous: ConverterIdentity;
+  current: ConverterIdentity;
+}
+
 export interface RefreshReport {
-  /** Anything differs: a file, or the commit a git ref resolves to. */
+  /** Anything differs: a file, the commit a git ref resolves to, or a converter version. */
   changed: boolean;
   counts: Record<RefreshFileStatus, number>;
   files: RefreshFileChange[];
   refs: RefreshRefChange[];
+  /**
+   * Converted pages whose original is unchanged (or changed too) but whose
+   * converter now reports a different tool or version than the manifest
+   * records, so their text may change for that reason alone.
+   */
+  converters: RefreshConverterChange[];
 }
 
+/**
+ * `converters` maps a source index to the converter its documents would be
+ * converted with now; sources without one (or with an `agent` converter,
+ * which has no version) are absent.
+ */
 export function diffRefresh(
   manifest: PackManifest,
   selection: PackSelection,
-  origins: readonly ManifestOrigin[]
+  origins: readonly ManifestOrigin[],
+  converters: ReadonlyMap<number, ConverterIdentity>
 ): RefreshReport {
   const key = (source: number, path: string): string => `${source}:${path}`;
-  const previous = new Map(
-    manifest.sources.map((entry) => [key(entry.source, entry.path), entry.sha256])
-  );
+  const previous = new Map(manifest.sources.map((entry) => [key(entry.source, entry.path), entry]));
   const previousOutput = new Map<string, string>();
 
   for (const output of manifest.outputs) {
@@ -57,6 +82,7 @@ export function diffRefresh(
   }
 
   const files: RefreshFileChange[] = [];
+  const converterChanges: RefreshConverterChange[] = [];
   const seen = new Set<string>();
 
   for (const selected of selection.files) {
@@ -67,8 +93,28 @@ export function diffRefresh(
       source,
       output: selected.outputPath,
       status:
-        before === undefined ? 'added' : before === selected.file.sha256 ? 'unchanged' : 'changed',
+        before === undefined
+          ? 'added'
+          : before.sha256 === selected.file.sha256
+            ? 'unchanged'
+            : 'changed',
     });
+
+    const current = converters.get(selected.sourceIndex);
+    const recorded = before?.converter;
+    if (
+      selected.kind === 'convert' &&
+      current !== undefined &&
+      recorded !== undefined &&
+      (recorded.tool !== current.tool || recorded.version !== current.version)
+    ) {
+      converterChanges.push({
+        source,
+        output: selected.outputPath,
+        previous: { tool: recorded.tool, version: recorded.version },
+        current,
+      });
+    }
   }
 
   for (const source of previous.keys()) {
@@ -117,9 +163,13 @@ export function diffRefresh(
   );
 
   return {
-    changed: originsMoved || files.some((file) => file.status !== 'unchanged'),
+    changed:
+      originsMoved ||
+      converterChanges.length > 0 ||
+      files.some((file) => file.status !== 'unchanged'),
     counts,
     files,
     refs,
+    converters: converterChanges.sort((a, b) => compareStringsByCodeUnit(a.output, b.output)),
   };
 }

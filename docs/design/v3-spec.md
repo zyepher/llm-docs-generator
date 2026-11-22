@@ -61,7 +61,8 @@ explicitly named index (`llms.txt`) lists after an explicit planner-written filt
       vite.full.md              optional combined layout, tool-written, verified
       guides/                   agent-owned; never written or deleted by the tool
         *.md
-        citations.lock.json     tool-written by `guides stamp`, verified
+        citations.lock.json     written only by `guides stamp`; not a manifest output, verified
+                                by the `citations` check through recomputation (section 8)
 ```
 
 The project root is the nearest ancestor of the working directory containing `llm-docs.json`.
@@ -243,8 +244,10 @@ with a clear message instead of waiting.
 - Hashes use the `sha256:<hex>` form via `sha256Prefixed`.
 - `tokens` uses the existing `estimateTokenCount`.
 - `outputs` covers every tool-written file in the pack except `manifest.json` itself and
-  `guides/**` (guides are covered by `guides/citations.lock.json`, which is itself listed with
-  kind `citations` once it exists).
+  `guides/**`. Guides are covered by `guides/citations.lock.json`, which `guides stamp` writes
+  and only it. The lock is not a manifest output: sync never reads or writes it, so the
+  manifest stays a function of the recipe and the upstream bytes, and the `citations` check
+  verifies it by recomputing every hash it records (section 8).
 - Reading a manifest whose `schemaVersion` is not 3 fails with a message pointing to
   `llm-docs migrate`.
 
@@ -418,11 +421,16 @@ Generated, deterministic, verified. Contents:
    commit with a link, or the index URL, or the project path), the acquisition date, and the
    license line (SPDX id and attribution with a link to the license file when known).
 2. A short "How to read this pack" paragraph: open the page for the API you need; grep
-   `pages/` for exact symbol names; pages are upstream text, guides are digests and never
-   outrank pages.
-3. If `guides/` exists: a "Guides" list with each guide's title and path.
-4. "Pages": grouped by top-level directory under `pages/` (in sorted order), one table per
+   `pages/` for exact symbol names; pages are upstream text; guides, when the pack has any,
+   are the digests in `guides/` and never outrank pages.
+3. "Pages": grouped by top-level directory under `pages/` (in sorted order), one table per
    group with columns page link, title, approximate tokens.
+
+The index never enumerates guides. It is a function of the manifest alone, so adding,
+editing, removing, or stamping a guide changes neither `index.md`, the combined file, nor
+`manifest.json`, and `sync` never re-acquires a source for one. What a guide change does
+change is the managed block's `guides` topic (7.1), which `sync` rewrites without acquiring
+anything and which `sync --check` and `verify agent-block` report until then.
 
 Titles from upstream are escaped for Markdown tables (`|`, backticks, newlines, control
 characters removed, 120 character cap).

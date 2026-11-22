@@ -940,8 +940,7 @@
               "page",
               "index",
               "passthrough",
-              "combined",
-              "citations"
+              "combined"
             ]
           },
           "sha256": {

@@ -2,11 +2,11 @@
  * `sync` (spec 2.5, 2.6, 5): bring every pack in line with its recipe.
  *
  * Per pack: resolve the recipe; skip when the manifest's recipeHash matches,
- * the pack files verify, the index still lists the current guides, and local
- * sources are unchanged; otherwise acquire, select, convert, and write a
- * staging pack, verify it in place, and swap it in atomically, carrying the
- * agent-owned `guides/` across. The whole run holds an advisory lock in the
- * packs directory, and the managed agent-file blocks are updated last.
+ * the pack files verify, and local sources are unchanged; otherwise acquire,
+ * select, convert, and write a staging pack, verify it in place, and swap it
+ * in atomically, carrying the agent-owned `guides/` across. The whole run
+ * holds an advisory lock in the packs directory, and the managed agent-file
+ * blocks are updated last.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -50,8 +50,13 @@ import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { renderCombinedPack } from './combined.js';
-import { renderIndexPage, type IndexGuide } from './index-page.js';
-import { listGuides } from './guides.js';
+import { renderIndexPage } from './index-page.js';
+import {
+  listGuides,
+  reviewGuidesAfterBuild,
+  reviewGuidesForRefreshCheck,
+  type GuideReviewReport,
+} from './guides.js';
 import { createPackLinkRewriter } from './links.js';
 import { resolvePackLicense } from './license.js';
 import {
@@ -66,7 +71,7 @@ import {
   type PackManifest,
 } from './manifest.js';
 import { convertMarkdownPage, type PackFileRef } from './markdown.js';
-import { diffRefresh, type RefreshReport } from './refresh.js';
+import { diffRefresh, type ConverterIdentity, type RefreshReport } from './refresh.js';
 import { renderSourcePage } from './render-ir.js';
 import { LOCK_FILE, withPacksLock } from './lock.js';
 import { verifyPackFiles } from './verify.js';
@@ -89,6 +94,12 @@ export interface PackSyncResult {
   warnings: string[];
   /** What a refresh found upstream (`refresh` only). */
   refresh?: RefreshReport;
+  /**
+   * Guides whose stamped citations a rebuild changed (section-exact), or,
+   * under `refresh --check`, whose cited pages changed upstream (page-level).
+   * Absent when there is nothing to re-review.
+   */
+  guideReview?: GuideReviewReport;
 }
 
 export type OrphanStatus = 'orphan' | 'pruned' | 'would-prune' | 'kept';
@@ -287,8 +298,7 @@ async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): 
 
 function renderIndexFor(
   manifest: Omit<PackManifest, 'outputs'>,
-  outputs: readonly ManifestOutputEntry[],
-  guides: readonly IndexGuide[]
+  outputs: readonly ManifestOutputEntry[]
 ): string {
   return renderIndexPage({
     pack: manifest.pack,
@@ -298,7 +308,6 @@ function renderIndexFor(
     license: manifest.license,
     sources: manifest.sources,
     pages: outputs.filter((output) => output.kind === 'page'),
-    guides,
   });
 }
 
@@ -456,13 +465,6 @@ async function staleReason(
 
   if (integrity.some((entry) => entry.status === 'fail')) {
     return 'the pack files differ from the manifest';
-  }
-
-  const index = manifest.outputs.find((output) => output.path === INDEX_FILE);
-  const expectedIndex = renderIndexFor(manifest, manifest.outputs, await listGuides(packDir));
-
-  if (index === undefined || index.sha256 !== sha256Prefixed(expectedIndex)) {
-    return 'the guides changed';
   }
 
   const localIndexes = new Set(
@@ -786,7 +788,7 @@ async function buildPack(
       warnings,
     };
 
-    const indexText = renderIndexFor(manifestWithoutOutputs, outputs, await listGuides(packDir));
+    const indexText = renderIndexFor(manifestWithoutOutputs, outputs);
     await writeStagedFile(stagingDir, INDEX_FILE, (target) =>
       writeTextFileSafely(target, indexText)
     );
@@ -873,21 +875,64 @@ async function refreshOnePack(
   }
 
   const acquisitions = withPlaceholders(await acquireAll(context, recipe, workRoot, () => true));
+  const selection = await selectPackFiles(recipe, acquisitions);
+  // Resolving a converter only reads its version; nothing is converted here.
+  const converters = new Map<number, ConverterIdentity>();
+  for (const index of new Set(
+    selection.files.flatMap((selected) =>
+      selected.kind === 'convert' ? [selected.sourceIndex] : []
+    )
+  )) {
+    const spec = recipe.sources[index]?.convert;
+    if (spec !== undefined && spec !== null && spec.tool !== 'agent') {
+      const converter = await createDocumentConverter(spec, {
+        projectRoot: context.projectRoot,
+        workDir: join(workRoot, `convert-${index}`),
+      });
+      converters.set(index, { tool: converter.tool, version: converter.version });
+    }
+  }
   const report = diffRefresh(
     existing.manifest,
-    await selectPackFiles(recipe, acquisitions),
-    acquisitions.map((acquisition) => acquisition.origin)
+    selection,
+    acquisitions.map((acquisition) => acquisition.origin),
+    converters
   );
 
   if (!report.changed) {
     return { id, status: 'unchanged', warnings: [], refresh: report };
   }
+
+  const onlyConverters =
+    report.converters.length > 0 &&
+    report.refs.length === 0 &&
+    report.files.every((file) => file.status === 'unchanged');
+  const reason = onlyConverters ? 'a converter version changed' : 'upstream changed';
+
+  const packDir = join(context.loaded.packsDir, id);
+
   if (context.options.check === true) {
-    return { id, status: 'would-build', reason: 'upstream changed', warnings: [], refresh: report };
+    const review = await reviewGuidesForRefreshCheck(packDir, report);
+    return {
+      id,
+      status: 'would-build',
+      reason,
+      warnings: [],
+      refresh: report,
+      ...(review === undefined ? {} : { guideReview: review }),
+    };
   }
 
   const warnings = await buildPack(context, resolved, existing, acquisitions, workRoot);
-  return { id, status: 'built', reason: 'upstream changed', warnings, refresh: report };
+  const review = await reviewGuidesAfterBuild(packDir);
+  return {
+    id,
+    status: 'built',
+    reason,
+    warnings,
+    refresh: report,
+    ...(review === undefined ? {} : { guideReview: review }),
+  };
 }
 
 async function syncOnePack(
@@ -941,7 +986,14 @@ async function syncOnePack(
       return acquired;
     });
     const warnings = await buildPack(context, resolved, existing, acquisitions, workRoot);
-    return { id, status: 'built', reason, warnings };
+    const review = await reviewGuidesAfterBuild(join(context.loaded.packsDir, id));
+    return {
+      id,
+      status: 'built',
+      reason,
+      warnings,
+      ...(review === undefined ? {} : { guideReview: review }),
+    };
   } finally {
     await rm(workRoot, { recursive: true, force: true });
   }

@@ -241,6 +241,48 @@ describe('markitdown and docling converters', { timeout: SPAWN_HEAVY_TIMEOUT_MS 
       'markitdown 0.2.0'
     );
   });
+
+  it('refresh attributes reconverted pages to a converter version change, apart from upstream', async () => {
+    const root = await makeProject({ convert: { tool: 'markitdown' } }, DOCS);
+    await syncPacks(root, undefined);
+    expect((await syncPacks(root, undefined, { refresh: true })).packs[0]).toMatchObject({
+      status: 'unchanged',
+      refresh: { changed: false, converters: [] },
+    });
+
+    process.env.FAKE_MARKITDOWN_VERSION = '0.2.0';
+    try {
+      await writeFile(join(root, 'docs', 'spec.pdf'), 'Operating voltage: 48 V\n');
+      const check = await syncPacks(root, undefined, { refresh: true, check: true });
+      const change = (path: string, output: string) => ({
+        source: `0:${path}`,
+        output,
+        previous: { tool: 'markitdown', version: 'markitdown 0.1.9' },
+        current: { tool: 'markitdown', version: 'markitdown 0.2.0' },
+      });
+      expect(check.packs[0]).toMatchObject({
+        status: 'would-build',
+        reason: 'upstream changed',
+        refresh: {
+          files: expect.arrayContaining([
+            { source: '0:spec.pdf', output: 'pages/spec.md', status: 'changed' },
+            { source: '0:install.docx', output: 'pages/install.md', status: 'unchanged' },
+          ]),
+          converters: [
+            change('install.docx', 'pages/install.md'),
+            change('spec.pdf', 'pages/spec.md'),
+          ],
+        },
+      });
+
+      expect((await syncPacks(root, undefined, { refresh: true })).packs[0]?.status).toBe('built');
+      expect(
+        (await syncPacks(root, undefined, { refresh: true })).packs[0]?.refresh?.converters
+      ).toEqual([]);
+    } finally {
+      delete process.env.FAKE_MARKITDOWN_VERSION;
+    }
+  });
 });
 
 describe('command converters', { timeout: SPAWN_HEAVY_TIMEOUT_MS }, () => {

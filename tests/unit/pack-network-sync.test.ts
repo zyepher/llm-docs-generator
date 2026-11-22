@@ -6,13 +6,15 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { loadProjectConfig } from '../../src/config/project.js';
 import { syncPacks } from '../../src/pack/build.js';
+import { stampGuides } from '../../src/pack/guides.js';
 import { readPackManifest } from '../../src/pack/manifest.js';
 import { verifyPacks } from '../../src/pack/verify.js';
 import { ALLOW_PRIVATE_NETWORK_ENV } from '../../src/sources/http.js';
@@ -240,5 +242,75 @@ describe('network sources in sync and refresh', () => {
     expect((await syncPacks(root, undefined, { refresh: true })).packs[0]?.error).toContain(
       'changed since its last sync'
     );
+  });
+
+  it('a guides-only change never acquires a source, even offline, and never touches the pack', async () => {
+    const pages = site();
+    const { origin, requests } = await serveSite(pages);
+    const root = await makeProject({ spec: llmsPack(origin) });
+    await syncPacks(root, undefined);
+    const packDir = join(root, 'agent-docs', 'spec');
+    const pack = async (): Promise<string[]> =>
+      Promise.all(
+        ['index.md', 'manifest.json', 'pages/index.md'].map((path) =>
+          readFile(join(packDir, path), 'utf-8')
+        )
+      );
+    const built = await pack();
+    const checks = async (): Promise<Record<string, string>> =>
+      Object.fromEntries(
+        (await verifyPacks(root, undefined)).results.map((result) => [result.check, result.status])
+      );
+    requests.length = 0;
+
+    // Upstream moves meanwhile: a guide change must not pull it in.
+    pages['/spec/2026-07-28/index.md'] = '# Overview, revised\n';
+    await mkdir(join(packDir, 'guides'));
+    await writeFile(
+      join(packDir, 'guides', 'a.md'),
+      '# Digest\n\nSee [transports](../pages/basic/transports.md#transports).\n'
+    );
+
+    // Before sync: the pack is intact; only the managed block is behind, and the guide is unstamped.
+    expect(await checks()).toMatchObject({
+      'agent-block': 'fail',
+      outputs: 'pass',
+      'unlisted-files': 'info',
+      links: 'pass',
+      citations: 'warn',
+    });
+    const check = await syncPacks(root, undefined, { check: true });
+    expect(check).toMatchObject({
+      changed: true,
+      packs: [{ id: 'spec', status: 'unchanged' }],
+      agentBlocks: [{ path: 'AGENTS.md', status: 'would-update' }],
+    });
+
+    const offline = await syncPacks(root, undefined, { offline: true });
+    expect(offline).toMatchObject({
+      packs: [{ id: 'spec', status: 'unchanged' }],
+      agentBlocks: [{ path: 'AGENTS.md', status: 'updated' }],
+    });
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '`agent-docs/spec/index.md` (basic, guides)'
+    );
+    expect((await syncPacks(root, undefined, { check: true })).changed).toBe(false);
+    expect(await checks()).toMatchObject({ 'agent-block': 'pass', citations: 'warn' });
+
+    // Stamping, retitling, and removing the guide never rebuild either.
+    await stampGuides(await loadProjectConfig(root), 'spec', [], root);
+    await writeFile(join(packDir, 'guides', 'a.md'), '# Digest, retitled\n');
+    expect((await syncPacks(root, undefined, { check: true })).changed).toBe(false);
+    await rm(join(packDir, 'guides', 'a.md'));
+    expect((await syncPacks(root, undefined, { check: true })).agentBlocks).toEqual([
+      { path: 'AGENTS.md', status: 'would-update' },
+    ]);
+    expect(await checks()).toMatchObject({ links: 'pass', outputs: 'pass', citations: 'warn' });
+    expect((await syncPacks(root, undefined, { offline: true })).packs[0]?.status).toBe(
+      'unchanged'
+    );
+
+    expect(requests).toEqual([]);
+    expect(await pack()).toEqual(built);
   });
 });
