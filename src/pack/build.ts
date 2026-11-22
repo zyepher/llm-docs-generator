@@ -695,6 +695,7 @@ async function acquireAll(
         packsDir: context.loaded.packsDir,
         workDir,
         maxFileBytes: recipe.limits.maxFileBytes,
+        ...(context.options.check === true ? { skipHostGitState: true } : {}),
       })
     );
   }

@@ -75,6 +75,13 @@ export interface AcquireContext {
   /** Empty temp directory for this source's downloads; the caller removes it. */
   workDir: string;
   maxFileBytes: number;
+  /**
+   * Leave a local origin's hostCommit and hostDirty null instead of running
+   * git in the project. A check that only decides staleness never reads them,
+   * and `status` and the session-start hook must not run git there: a
+   * repository's own config can make git run a program.
+   */
+  skipHostGitState?: boolean;
 }
 
 export interface SourceAcquirer<S extends ResolvedSource> {
@@ -641,7 +648,7 @@ async function acquireLocal(
     );
   }
 
-  const gitState = await captureGitState(root);
+  const gitState = context.skipHostGitState === true ? undefined : await captureGitState(root);
 
   return {
     origin: {

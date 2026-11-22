@@ -1813,6 +1813,55 @@ describe('status and sync --check', () => {
   });
 });
 
+describe('status and the hook in a git repository', () => {
+  it.skipIf(process.platform === 'win32')(
+    'never run git there, so a repository config cannot make them run a program',
+    async () => {
+      const root = await makeProject(DOCS);
+      const marker = join(root, 'fsmonitor-ran');
+      const script = join(await makeProject({}), 'fsmonitor.sh');
+      await writeFile(script, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+      const git = (...args: string[]) =>
+        execFileAsync('git', args, {
+          cwd: root,
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: '/dev/null',
+            GIT_CONFIG_NOSYSTEM: '1',
+            GIT_AUTHOR_NAME: 'Test',
+            GIT_AUTHOR_EMAIL: 'test@example.com',
+            GIT_COMMITTER_NAME: 'Test',
+            GIT_COMMITTER_EMAIL: 'test@example.com',
+          },
+        });
+      await git('init', '--quiet');
+      await git('add', '-A');
+      await git('commit', '--quiet', '-m', 'docs');
+      const cache = await makeProject({});
+      const env = {
+        HOME: await makeProject({}),
+        LLM_DOCS_CACHE_DIR: cache,
+        CLAUDE_PROJECT_DIR: '',
+        ANTHROPIC_MODEL: '',
+      };
+      const add = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0'], env);
+      expect(add.code, add.stderr).toBe(0);
+      await git('config', 'core.fsmonitor', script);
+      await rm(marker, { force: true });
+
+      expect((await runCli(root, ['status', '--offline'], env)).code).toBe(0);
+      expect((await runCli(root, ['sync', '--check'], env)).code).toBe(0);
+      expect((await runHook(root, JSON.stringify({ cwd: root }), env, cache)).code).toBe(0);
+      expect(
+        await readFile(marker).then(
+          () => 'ran',
+          () => 'not run'
+        )
+      ).toBe('not run');
+    }
+  );
+});
+
 describe('a pack bound to a dependency from another registry', () => {
   it('has its own state and next step, and no release date from the public registry', async () => {
     const lock = {
