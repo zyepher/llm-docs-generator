@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import cutoffTable from '../../data/model-cutoffs.json';
+import { ConfigError } from '../../src/config/project.js';
 import {
   normalizeModelId,
   resolveModelCutoff,
@@ -174,7 +175,7 @@ describe('cutoff precedence', () => {
 
   it('rejects malformed explicit cutoffs instead of falling through', () => {
     expect(() => resolveModelCutoff({ override: '2025-13', env: {} })).toThrow(
-      '--cutoff must be a YYYY-MM month, got "2025-13".'
+      '--cutoff must be a YYYY-MM month (for example 2026-06), got "2025-13".'
     );
     expect(() => resolveModelCutoff({ configCutoff: 'June 2025', env: {} })).toThrow(
       'llm-docs.json model.cutoff must be a YYYY-MM month'
@@ -182,6 +183,7 @@ describe('cutoff precedence', () => {
     expect(() => resolveModelCutoff({ env: { LLM_DOCS_MODEL_CUTOFF: '2025-6' } })).toThrow(
       'LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month'
     );
+    expect(() => resolveModelCutoff({ override: '2025-13', env: {} })).toThrow(ConfigError);
   });
 });
 

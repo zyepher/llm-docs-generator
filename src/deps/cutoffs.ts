@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import cutoffTable from '../../data/model-cutoffs.json';
+import { ConfigError } from '../config/project.js';
 import { isNonEmptyString, isRecord } from '../utils/guards.js';
 
 export interface ModelCutoff {
@@ -142,7 +143,9 @@ function validatedCutoff(value: string, origin: string): string {
   const trimmed = value.trim();
 
   if (!CUTOFF_PATTERN.test(trimmed)) {
-    throw new Error(`${origin} must be a YYYY-MM month, got "${value}".`);
+    throw new ConfigError(
+      `${origin} must be a YYYY-MM month (for example 2026-06), got "${value}".`
+    );
   }
 
   return trimmed;

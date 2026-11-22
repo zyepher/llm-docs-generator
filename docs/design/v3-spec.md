@@ -582,10 +582,18 @@ no cutoff and the after-cutoff analysis is skipped (never guessed).
 Joins the dependency scan, the packs, release dates, and the cutoff:
 
 - Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved,
-  `recipe-changed`, `missing` when configured but never synced, `orphan`).
+  `recipe-changed`, `missing` when configured but never synced, `orphan`), the release date of
+  the pack's version of its bound dependency and whether it falls after or near the cutoff,
+  and the step that brings the pack back to `ok` (`llm-docs sync <id>`; for a stale pack whose
+  config pins `version`, editing that version first; for an orphan, `sync --prune` or adding
+  it back to config).
 - Direct dependencies released after the cutoff, or within `nearCutoffDays` before it, that
-  have no pack: name, version, release date, and a suggested next step.
-- `--brief`: the text the hook injects (7.2). `--json`: the full structure.
+  have no pack: name, version, release date, and a suggested next step
+  (`llm-docs discover --package <eco>:<name>@<version>`, the evidence for writing a recipe).
+- Works in a directory with no `llm-docs.json` (dependency analysis only), using the same
+  project discovery as the hook. `--cutoff` must be `YYYY-MM` (exit 2 otherwise).
+- `--brief`: the text the hook injects (7.2) for the harness detected from the environment,
+  on stdout, and nothing when there is nothing to say. `--json`: the full structure.
 
 ## 7. Agent integration
 
