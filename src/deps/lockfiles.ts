@@ -281,7 +281,18 @@ export async function scanDependencies(
         text: await readFile(absolutePath, 'utf-8'),
       });
 
-      dependencies.push(...result.dependencies);
+      for (const dependency of result.dependencies) {
+        if (
+          isVersionText(dependency.version) &&
+          isDependencyName(dependency.ecosystem, dependency.name)
+        ) {
+          dependencies.push(dependency);
+        } else {
+          warnings.push(
+            `${entry.lockfile}: skipped ${shownText(dependency.name)} at ${shownText(dependency.version)}: not a valid ${dependency.ecosystem} package name and version (a version is one line of printable characters without whitespace, at most ${VERSION_TEXT_MAX}).`
+          );
+        }
+      }
       warnings.push(...result.warnings.map((warning) => `${entry.lockfile}: ${warning}`));
 
       for (const skip of result.skipped) {
@@ -636,6 +647,11 @@ function normalizeSkipDirectories(directories: readonly string[]): string[] {
   return prefixes;
 }
 
+/** Lockfile text quoted into a warning: as is when it is one plain token, else JSON-quoted and cut. */
+function shownText(value: string): string {
+  return /^[^\s\p{C}]{1,80}$/u.test(value) ? value : `${JSON.stringify(value.slice(0, 80))}`;
+}
+
 function uniqueSorted(values: Iterable<string>): string[] {
   return [...new Set(values)].sort(compareStringsByCodeUnit);
 }
@@ -707,7 +723,7 @@ function formatSkippedWarning(
   const reasons = uniqueSorted(entries.map((entry) => entry.reason)).join(', ');
   const examples = entries
     .slice(0, MAX_SKIP_EXAMPLES)
-    .map((entry) => `${entry.lockfile}: ${entry.name} (${entry.reason})`)
+    .map((entry) => `${entry.lockfile}: ${shownText(entry.name)} (${entry.reason})`)
     .join('; ');
   const more =
     entries.length > MAX_SKIP_EXAMPLES ? `; and ${entries.length - MAX_SKIP_EXAMPLES} more` : '';
