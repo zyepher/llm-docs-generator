@@ -5,7 +5,6 @@
  * (`formatStatusHuman`) or an agent (`formatStatusBrief`).
  */
 
-import { escapeBlockText } from '../agent/block.js';
 import {
   CONFIG_FILE_NAME,
   ConfigError,
@@ -41,7 +40,14 @@ import {
   type ReleaseQuery,
 } from './registries.js';
 
-export type PackState = 'ok' | 'stale-pack' | 'recipe-changed' | 'missing' | 'orphan';
+export type PackState =
+  | 'ok'
+  | 'stale-pack'
+  | 'lockfile-conflict'
+  | 'not-in-lockfile'
+  | 'recipe-changed'
+  | 'missing'
+  | 'orphan';
 
 /**
  * Where a release date falls for the model in use: after its cutoff month,
@@ -196,18 +202,58 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
     return 'missing';
   }
 
-  if (lookup?.kind === 'found' && lookup.version !== pack.version) {
-    return 'stale-pack';
-  }
-
-  if (
-    lookup?.kind === 'conflict' &&
-    !lookup.versions.some((entry) => entry.version === pack.version)
-  ) {
-    return 'stale-pack';
+  switch (lookup?.kind) {
+    case 'found':
+      if (lookup.version !== pack.version) {
+        return 'stale-pack';
+      }
+      break;
+    case 'conflict':
+      return lookup.versions.some((entry) => entry.version === pack.version)
+        ? 'lockfile-conflict'
+        : 'stale-pack';
+    case 'missing':
+      return 'not-in-lockfile';
+    case undefined:
+      break;
   }
 
   return pack.recipeChanged ? 'recipe-changed' : 'ok';
+}
+
+const MESSAGE_TEXT_CAP = 200;
+
+/**
+ * The one escape for text a lockfile, a manifest, a registry response, or
+ * config supplies, applied where it is placed into the session note or the
+ * status report: one line, no backtick (a code span around it stays closed),
+ * no raw angle bracket (no HTML comment or block marker), capped. `@` stays:
+ * neither the note nor the report is an agent file that imports `@path`.
+ */
+function messageText(value: string): string {
+  const escaped = value
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
+    .replace(/`/g, '')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const characters = Array.from(escaped);
+  return characters.length <= MESSAGE_TEXT_CAP
+    ? escaped
+    : `${characters
+        .slice(0, MESSAGE_TEXT_CAP - 3)
+        .join('')
+        .replace(/&(?:lt?|gt?)?$/, '')}...`;
+}
+
+/** A name or path shown exactly, as a code span, once messageText made it safe to. */
+function codeSpan(value: string): string {
+  return `\`${messageText(value)}\``;
+}
+
+function dependencyLabel(dependency: DependencyRef): string {
+  return `${dependency.ecosystem}:${messageText(dependency.name)}`;
 }
 
 /**
@@ -220,19 +266,27 @@ function packNextStep(
   state: PackState,
   lookup: DependencyVersionLookup | undefined
 ): string | null {
-  const sync = `llm-docs sync ${pack.id}`;
+  const id = messageText(pack.id);
+  const sync = `llm-docs sync ${id}`;
+  const dependency = pack.dependency === null ? 'the dependency' : dependencyLabel(pack.dependency);
 
   switch (state) {
     case 'ok':
       return null;
     case 'orphan':
-      return `run 'llm-docs sync --prune' to delete it, or add packs.${pack.id} back to ${CONFIG_FILE_NAME}`;
+      return `run 'llm-docs sync --prune' to delete it, or add packs.${id} back to ${CONFIG_FILE_NAME}`;
     case 'stale-pack':
       if (pack.versionPinned) {
-        const to = lookup?.kind === 'found' ? ` to ${lookup.version}` : '';
-        return `set packs.${pack.id}.version in ${CONFIG_FILE_NAME}${to} (or remove it to follow the lockfile), then run '${sync}'`;
+        const to = lookup?.kind === 'found' ? ` to ${messageText(lookup.version)}` : '';
+        return `set packs.${id}.version in ${CONFIG_FILE_NAME}${to} (or remove it to follow the lockfile), then run '${sync}'`;
       }
       return sync;
+    case 'lockfile-conflict':
+      return pack.versionPinned
+        ? `make the lockfiles agree on one version of ${dependency}, or add a pack for each version they resolve`
+        : `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe, then run '${sync}'`;
+    case 'not-in-lockfile':
+      return `install ${dependency} so a lockfile resolves it, or remove packs.${id}.dependency from ${CONFIG_FILE_NAME}`;
     case 'recipe-changed':
     case 'missing':
       return sync;
@@ -249,7 +303,7 @@ function discoverCommand(dependency: ResolvedDependency): string {
     new URL(repository).username === ''
       ? repository
       : dependency.name;
-  return `llm-docs discover --package ${dependency.ecosystem}:${name}@${dependency.version}`;
+  return `llm-docs discover --package ${dependency.ecosystem}:${messageText(name)}@${messageText(dependency.version)}`;
 }
 
 function releaseQuery(dependency: DependencyRef, version: string): ReleaseQuery {
@@ -456,10 +510,13 @@ const WINDOW_TAG: Readonly<Record<ReleaseWindow, string | undefined>> = {
 };
 
 function releaseDay(publishedAt: string): string {
-  return publishedAt.slice(0, 10);
+  return messageText(publishedAt.slice(0, 10));
 }
 
 function packStateReason(pack: PackStatus): string | undefined {
+  const version = messageText(pack.version ?? 'an unknown version');
+  const name = pack.dependency === null ? 'its dependency' : codeSpan(pack.dependency.name);
+
   switch (pack.state) {
     case 'stale-pack': {
       const lockfileVersion =
@@ -468,10 +525,21 @@ function packStateReason(pack: PackStatus): string | undefined {
           : pack.lockfile?.kind === 'conflict'
             ? pack.lockfile.versions.map((entry) => entry.version).join(' / ')
             : 'unknown';
-      return `docs are for ${pack.version ?? 'an unknown version'} but the lockfile resolves ${escapeBlockText(lockfileVersion)}`;
+      return `docs are for ${version} but the lockfile resolves ${messageText(lockfileVersion)}`;
     }
+    case 'lockfile-conflict': {
+      const versions =
+        pack.lockfile?.kind === 'conflict'
+          ? pack.lockfile.versions
+              .map((entry) => `${messageText(entry.version)} in ${codeSpan(entry.lockfile)}`)
+              .join(', ')
+          : 'unknown';
+      return `the lockfiles resolve ${name} to different versions (${versions}); docs are for ${version}`;
+    }
+    case 'not-in-lockfile':
+      return `no lockfile resolves ${name}, so nothing checks that docs for ${version} match what the project uses`;
     case 'missing':
-      return 'configured but never built';
+      return 'not built or invalid';
     case 'recipe-changed':
       return 'its recipe in llm-docs.json changed since the last build';
     default:
@@ -538,13 +606,13 @@ function sameRow(text: string): BriefRow {
 function briefReadFirst(targets: readonly string[]): string[] {
   const paths = targets
     .map((target) => target.replace(/#.*$/, ''))
-    .filter((path) => path.split('/').every((segment) => escapeBlockText(segment) === segment));
+    .filter((path) => messageText(path) === path);
   return [...new Set(paths)].slice(0, BRIEF_MAX_READ_FIRST);
 }
 
 /**
- * The first three items of the session-start text (spec 7.2): packs that need
- * a rebuild with the fix; built packs whose library version is newer than the
+ * The first three items of the session-start text (spec 7.2): packs to fix,
+ * each with its fix; built packs whose library version is newer than the
  * model's training data (or close to it), with where their pages are (their
  * read-first pages, then the index); and direct dependencies in that window
  * without a pack, at most 8. Newest first. Empty when there is nothing to
@@ -558,12 +626,12 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
   const rebuild = report.packs.flatMap((pack) => {
     const reason = packStateReason(pack);
     const fix = pack.nextStep?.startsWith('llm-docs ') ? `\`${pack.nextStep}\`` : pack.nextStep;
-    return reason === undefined ? [] : [`- ${pack.id}: ${reason}. Fix: ${fix}`];
+    return reason === undefined ? [] : [`- ${messageText(pack.id)}: ${reason}. Fix: ${fix}`];
   });
 
   if (rebuild.length > 0) {
     sections.push({
-      heading: 'Pinned docs packs that need a rebuild:',
+      heading: 'Pinned docs packs to fix:',
       rows: rebuild.map(sameRow),
       maxRows: rebuild.length,
       footer: [],
@@ -599,7 +667,7 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
   // names it says so, and the first one says what to do when the assumption is wrong.
   const assumption =
     cutoff?.assumed === true
-      ? `Assuming your model is the configured default (${cutoff.label}, cutoff ${cutoff.cutoff})`
+      ? `Assuming your model is the configured default (${messageText(cutoff.label)}, cutoff ${messageText(cutoff.cutoff)})`
       : undefined;
   const judge = 'If you are a different model, judge by the release dates shown.';
 
@@ -608,19 +676,20 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
       cutoff === null
         ? `Pinned docs for libraries released in the last ${report.recentDays} days. Your training data may predate these versions:`
         : assumption === undefined
-          ? `Pinned docs for libraries released after or close to your training data cutoff (${cutoff.label}, through ${cutoff.cutoff}). Your memory of these libraries predates these versions:`
+          ? `Pinned docs for libraries released after or close to your training data cutoff (${messageText(cutoff.label)}, through ${messageText(cutoff.cutoff)}). Your memory of these libraries predates these versions:`
           : `${assumption}: pinned docs for libraries released after or close to that cutoff. ${judge} Your memory of these libraries predates these versions:`;
     sections.push({
       heading: `${lead} read the pinned pages before writing code against them. Newest first:`,
       rows: pinned.map(({ pack, version, publishedAt, window }) => {
         const tag = WINDOW_TAG[window];
-        const lead = `- ${escapeBlockText(pack.title)} ${escapeBlockText(version)} (released ${releaseDay(publishedAt)}${tag ? `, ${tag}` : ''}): `;
-        const short = `${lead}\`${pack.indexPath}\``;
+        const lead = `- ${messageText(pack.title)} ${messageText(version)} (released ${releaseDay(publishedAt)}${tag ? `, ${tag}` : ''}): `;
+        const index = codeSpan(pack.indexPath ?? '');
+        const short = `${lead}${index}`;
         const readFirst = briefReadFirst(pack.readFirst);
         return readFirst.length === 0
           ? sameRow(short)
           : {
-              full: `${lead}read ${readFirst.map((path) => `\`${path}\``).join(' and ')} first, then \`${pack.indexPath}\``,
+              full: `${lead}read ${readFirst.map(codeSpan).join(' and ')} first, then ${index}`,
               short,
             };
       }),
@@ -642,12 +711,12 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
         cutoff === null
           ? `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`
           : assumption === undefined
-            ? `Direct dependencies released after or close to your training data cutoff (${cutoff.label}, through ${cutoff.cutoff}) with no pinned docs, newest first:`
+            ? `Direct dependencies released after or close to your training data cutoff (${messageText(cutoff.label)}, through ${messageText(cutoff.cutoff)}) with no pinned docs, newest first:`
             : `${assumption}: direct dependencies released after or close to that cutoff with no pinned docs${pinned.length === 0 ? `. ${judge} Newest first:` : ', newest first:'}`,
       rows: flagged.map(({ release, tag }) => {
         const suffix = tag ? `, ${tag}` : '';
         return sameRow(
-          `- ${escapeBlockText(release.name)} ${escapeBlockText(release.version)} (${release.ecosystem}, released ${releaseDay(release.publishedAt)}${suffix})`
+          `- ${codeSpan(release.name)} ${messageText(release.version)} (${release.ecosystem}, released ${releaseDay(release.publishedAt)}${suffix})`
         );
       }),
       maxRows: BRIEF_MAX_DEPENDENCIES,
@@ -700,10 +769,10 @@ function table(rows: string[][]): string[] {
 function lockfileSummary(pack: PackStatus): string {
   switch (pack.lockfile?.kind) {
     case 'found':
-      return pack.lockfile.version;
+      return messageText(pack.lockfile.version);
     case 'conflict':
       return pack.lockfile.versions
-        .map((entry) => `${entry.version} (${entry.lockfile})`)
+        .map((entry) => `${messageText(entry.version)} (${messageText(entry.lockfile)})`)
         .join(', ');
     case 'missing':
       return 'not in any lockfile';
@@ -726,18 +795,18 @@ function released(release: {
 /** The line under a pack row for a package it covers, with a note when the major differs. */
 function coveredLine(pack: PackStatus, entry: CoveredDependency): string {
   const note = entry.majorDiffers
-    ? `; note: its major version differs from the pack's ${pack.version ?? ''}, so the pack may not describe this version`
+    ? `; note: its major version differs from the pack's ${messageText(pack.version ?? '')}, so the pack may not describe this version`
     : '';
   const when = entry.publishedAt === null ? 'release date unknown' : `released ${released(entry)}`;
-  return `    covers ${entry.ecosystem}:${entry.name} ${entry.version}, ${when}${note}`;
+  return `    covers ${dependencyLabel(entry)} ${messageText(entry.version)}, ${when}${note}`;
 }
 
 function releaseRows(releases: DependencyRelease[]): string[] {
   return table([
     ['NAME', 'VERSION', 'ECOSYSTEM', 'RELEASED', 'NEXT'],
     ...releases.map((release) => [
-      release.name,
-      release.version,
+      messageText(release.name),
+      messageText(release.version),
       release.ecosystem,
       releaseDay(release.publishedAt),
       release.nextStep,
@@ -762,9 +831,9 @@ export function formatStatusHuman(report: StatusReport): string {
     const [header = '', ...rows] = table([
       ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'READ FIRST', 'NEXT'],
       ...report.packs.map((pack) => [
-        pack.id,
-        pack.version ?? '-',
-        pack.dependency ? `${pack.dependency.ecosystem}:${pack.dependency.name}` : '-',
+        messageText(pack.id),
+        messageText(pack.version ?? '-'),
+        pack.dependency ? dependencyLabel(pack.dependency) : '-',
         lockfileSummary(pack),
         pack.state,
         released(pack),
@@ -784,17 +853,19 @@ export function formatStatusHuman(report: StatusReport): string {
   lines.push('');
 
   if (report.model !== null) {
-    lines.push(`Model: ${report.model.id} (${MODEL_SOURCE_TEXT[report.model.source]}).`);
+    lines.push(
+      `Model: ${messageText(report.model.id)} (${MODEL_SOURCE_TEXT[report.model.source]}).`
+    );
     if (report.model.source === 'settings') {
       lines.push(
-        `  This is the default in ${report.model.file}; a session started with another model differs. Pass --model to name it.`
+        `  This is the default in ${messageText(report.model.file)}; a session started with another model differs. Pass --model to name it.`
       );
     }
   }
 
   if (report.cutoff) {
     lines.push(
-      `Model training data cutoff: ${report.cutoff.cutoff} (${report.cutoff.label})${report.cutoff.assumed ? ', assuming that default' : ''}.`
+      `Model training data cutoff: ${messageText(report.cutoff.cutoff)} (${messageText(report.cutoff.label)})${report.cutoff.assumed ? ', assuming that default' : ''}.`
     );
     lines.push('');
     lines.push(

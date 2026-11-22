@@ -831,7 +831,7 @@ describe('llm-docs v3 CLI', () => {
       '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
       '',
       'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:',
-      '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+      '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
       'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.',
     ].join('\n');
 

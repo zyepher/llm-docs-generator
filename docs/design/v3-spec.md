@@ -778,7 +778,9 @@ and DeepMind model cards (`docs.cloud.google.com/gemini-enterprise-agent-platfor
 Joins the dependency scan, the packs, release dates, and the cutoff:
 
 - Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved or
-  lockfiles disagree with none matching, which wins over `recipe-changed`; `recipe-changed`;
+  lockfiles disagree with none matching; `lockfile-conflict` when the lockfiles disagree and
+  one matches; `not-in-lockfile` when no lockfile resolves the bound dependency; these win
+  over `recipe-changed`; `recipe-changed`;
   `missing` when configured but never synced or its manifest cannot be read; `orphan`), the
   release date of
   the pack's version of its bound dependency and whether it falls after or near the cutoff,
@@ -906,8 +908,12 @@ context for the agent. Behavior:
   dependencies (your training data may predate them)"): a fact from release dates, not a guess
   about the model.
 - Content (at most 2,000 characters; nothing at all when there is nothing to say):
-  1. Packs that need a rebuild (the lockfile moved, the recipe changed, or never built), each
-     with its fix from `status`.
+  1. Packs to fix (the lockfile moved, no lockfile resolves the bound dependency, the
+     lockfiles disagree on it, the recipe changed, or never built), each with its fix from
+     `status`. A dependency name is printed exactly, as a code span (`` `@types/node` ``).
+     Every value from a lockfile, a manifest, a registry, or config passes through one escape
+     where it is placed (one line, no backtick, `<` and `>` as `&lt;` and `&gt;`), here and in
+     the human `status` report.
   2. Built packs whose library version (the pack's version of its bound dependency), or any
      package it `covers` at the version the lockfiles resolve, was released after the model's
      training cutoff or within the near-cutoff window, most recent first, one line per pack with

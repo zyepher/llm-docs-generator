@@ -316,7 +316,7 @@ describe('the bundled CLI', () => {
     });
 
     expect(unbundled).toContain('"hookEventName":"SessionStart"');
-    expect(unbundled).toContain('hono 4.13.16 (npm, released 2026-09-02, after cutoff)');
+    expect(unbundled).toContain('`hono` 4.13.16 (npm, released 2026-09-02, after cutoff)');
     expect(bundled.stdout).toBe(unbundled);
   });
 });
