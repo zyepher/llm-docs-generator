@@ -24,9 +24,7 @@
       }
     ],
     "readFirst": [
-      "pages/docs-v3/MIGRATION.md",
-      "pages/docs/content/v4/changelog.md",
-      "pages/docs-v3/CHANGELOG.md"
+      "pages/docs/content/v4/changelog.md"
     ]
   }
 }

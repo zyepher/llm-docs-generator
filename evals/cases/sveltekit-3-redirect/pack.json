@@ -33,8 +33,8 @@
     ],
     "readFirst": [
       "pages/documentation/docs/60-appendix/35-migrating-to-sveltekit-3.md",
-      "pages/documentation/docs/60-appendix/30-migrating-to-sveltekit-2.md",
-      "pages/documentation/docs/60-appendix/40-migrating.md"
+      "pages/documentation/docs/60-appendix/40-migrating.md",
+      "pages/packages/adapter-auto/CHANGELOG.md"
     ]
   }
 }

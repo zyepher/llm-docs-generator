@@ -159,15 +159,29 @@ included, and fixed without looking at any task.
    skill includes it. Nothing that is not a change document by those name patterns is added.
 3. **Candidates** are the change documents that are pages in the built pack. One that a source's
    `include` globs leave out is not a candidate.
-4. **Order.** Migration and upgrade guides first (patterns `migration`, `migrating`, `migrate`,
+4. **Major versions.** A path names a major version as `v<N>` with no letter or digit before it
+   (so also inside a segment such as `docs-v3`), `<N>.x`, `-<N>`, or a range `v<A>-to-v<B>` or
+   `<A>-to-<B>` (naming both), each number with no digit after it; a `YYYY-MM-DD` date names
+   none. A candidate whose repository path names one or more majors, none of them the pinned
+   version's major, is dropped: a guide written for another major is not the page that says what
+   changed on the way to the pinned version. A candidate that names no major stays. This step
+   looks at version numbers only, never at a task, and it drops a candidate, not an addition
+   from step 2.
+5. **Order.** Migration and upgrade guides first (patterns `migration`, `migrating`, `migrate`,
    `upgrade`, `upgrading`), then `breaking`, then `whats-new`, then release notes
    (`release-notes`, `releases`), then changelogs and history (`changelog`, `changes`, `history`).
    The pattern is the one discover reports for the file. Within a group, a path that names the
-   pinned major version comes first (`v<major>` with no letter or digit before it, `<major>.x`, or
-   `-<major>`, each with no digit after the number), then shallower paths before deeper ones, then
+   pinned major version (as in step 4) comes first, then shallower paths before deeper ones, then
    code-unit order. Paths are repository paths.
-5. **Choice.** The first three candidates become `readFirst`, each a whole page.
-6. A case with no candidate gets no `readFirst`. (No case is in that state today.)
+6. **Choice.** The first three candidates become `readFirst`, each a whole page.
+7. A case with no candidate gets no `readFirst`.
+
+**One refinement, before any arm ran.** The rule was refined once, on 2026-11-22, before any arm
+had been run: step 4 was added because the first version selected guides written for other major
+versions (the Hono 4.13.16 pack's only read-first page was `migrating-to-v5.md`, and both Zod
+4.6.7 packs led with the Zod 3 migration guide under `docs-v3/`). The refinement does not consult
+the tasks: it compares the version numbers in a path with the pinned version's major, the same
+way for every case, controls included.
 
 **Why no fragments.** A read-first target may name one heading with `#fragment`. A fragment is the
 one part of a target that could be aimed at a task's answer, such as the `Linkification` section of
@@ -204,23 +218,24 @@ the pack but not read-first, (c) not in the pack.
 |---|---|---|---|
 | `stripe-23` | `pages/CHANGELOG.md` | none | `pages/CHANGELOG.md` (a); `pages/api/checkout/sessions/create.md`, `pages/api/subscriptions/pause.md` (b, found by search) |
 | `mcp-sdk-v2` | `pages/docs/migration/upgrade-to-v2.md`, `pages/skills/mcp-typescript-sdk-upgrade-to-v2/SKILL.md`, `pages/upgrade-to-v2-references/auth.md` | `packages/{client,codemod,core,core-internal,server,server-legacy}/CHANGELOG.md`, `packages/middleware/{express,fastify,hono,node}/CHANGELOG.md`, `test/{conformance,e2e,helpers,integration}/CHANGELOG.md`, `skills/mcp-typescript-sdk-upgrade-to-v2/SKILL.md` | `pages/docs/servers/logging-progress-cancellation.md`, `pages/upgrade-to-v2-references/protocol-ctx.md` (b, found by search; the read-first `SKILL.md` maps `extra.*` to `ctx.mcpReq.*` in one table row but does not say how to report progress) |
-| `sveltekit-3` | `pages/documentation/docs/60-appendix/35-migrating-to-sveltekit-3.md`, `.../30-migrating-to-sveltekit-2.md`, `.../40-migrating.md` | `packages/adapter-{auto,bun,cloudflare,netlify,node,static,vercel}/CHANGELOG.md`, `packages/{enhanced-img,package}/CHANGELOG.md`, `packages/kit/CHANGELOG.md`, `packages/kit/CHANGELOG-pre-1.md` | `.../35-migrating-to-sveltekit-3.md` (a); `pages/documentation/docs/30-advanced/20-hooks.md` (b); both found by search |
-| `zod-4-6` | `pages/docs-v3/MIGRATION.md`, `pages/docs/content/v4/changelog.md`, `pages/docs-v3/CHANGELOG.md` | `packages/docs-v3/CHANGELOG.md`, `packages/docs-v3/MIGRATION.md` | `pages/docs/content/blog/zod-4-6.md`, `pages/docs/content/api.md` (b, found by search) |
+| `sveltekit-3` | `pages/documentation/docs/60-appendix/35-migrating-to-sveltekit-3.md`, `.../40-migrating.md`, `pages/packages/adapter-auto/CHANGELOG.md` | `packages/adapter-{auto,bun,cloudflare,netlify,node,static,vercel}/CHANGELOG.md`, `packages/{enhanced-img,package}/CHANGELOG.md`, `packages/kit/CHANGELOG.md`, `packages/kit/CHANGELOG-pre-1.md` | `.../35-migrating-to-sveltekit-3.md` (a); `pages/documentation/docs/30-advanced/20-hooks.md` (b); both found by search |
+| `zod-4-6` | `pages/docs/content/v4/changelog.md` | `packages/docs-v3/CHANGELOG.md`, `packages/docs-v3/MIGRATION.md` | `pages/docs/content/blog/zod-4-6.md`, `pages/docs/content/api.md` (b, found by search) |
 | `effect-4` | `pages/migration/v3-to-v4.md`, `pages/MIGRATION.md`, `pages/migration/cause.md` | `packages/{effect,opentelemetry,vitest}/CHANGELOG.md`, `packages/ai/anthropic/CHANGELOG.md` | `pages/migration/v3-to-v4.md` (a); `pages/migration/error-handling.md` (b); both found by search |
-| `hono-4-13` | `pages/guides/migrating-to-v5.md` | `docs/guides/migrating-to-v5.md` | `pages/middleware/builtin/method-not-allowed.md`, `pages/api/routing.md` (b, found by search) |
+| `hono-4-13` | none | `docs/guides/migrating-to-v5.md` | `pages/middleware/builtin/method-not-allowed.md`, `pages/api/routing.md` (b, found by search) |
 | `zod-4-6-datetime` | as `zod-4-6` | as `zod-4-6` | `pages/docs/content/blog/zod-4-5.md`, `pages/docs/content/api.md` (b) |
 | `sveltekit-3-redirect` | as `sveltekit-3` | as `sveltekit-3` | `.../35-migrating-to-sveltekit-3.md` (a); `pages/packages/kit/CHANGELOG.md` (b, in the pack only because the rule added it) |
 | `effect-4-partition` | as `effect-4` | as `effect-4` | `pages/migration/v3-to-v4.md` (a); `pages/packages/effect/CHANGELOG.md` (b, in the pack only because the rule added it) |
 | `mcp-sdk-v2-tools` | as `mcp-sdk-v2` | as `mcp-sdk-v2` | `pages/upgrade-to-v2-references/behavioral-changes.md`, `pages/docs/clients/calling.md` (b); `pages/packages/server/CHANGELOG.md` (b, in the pack only because the rule added it) |
-| `markdown-it-15` | `pages/docs/migration/migration_v15.md`, `pages/docs/migration/migration_v4.md`, `pages/docs/migration/migration_v5.md` | none | `pages/docs/migration/migration_v15.md` (a); `pages/CHANGELOG.md` (b, the fourth candidate) |
+| `markdown-it-15` | `pages/docs/migration/migration_v15.md`, `pages/CHANGELOG.md` | none | `pages/docs/migration/migration_v15.md`, `pages/CHANGELOG.md` (a) |
 | `i18next-27` | `pages/CHANGELOG.md` | none | `pages/CHANGELOG.md` (a) |
 | `ctrl-stripe-14` | `pages/CHANGELOG.md` | none | control |
 | `ctrl-zod-3` | `pages/MIGRATION.md`, `pages/CHANGELOG.md` | `CHANGELOG.md`, `MIGRATION.md` | control |
 | `ctrl-markdown-it-13` | `pages/docs/4.0_migration.md`, `pages/docs/5.0_migration.md`, `pages/CHANGELOG.md` | none | control |
 | `ctrl-date-fns-2` | `pages/docs/upgradeGuide.md`, `pages/CHANGELOG.md` | `CHANGELOG.md` | control |
 
-`...` stands for `pages/documentation/docs/60-appendix`. Every case got read-first pages, and no
-answer page is outside its pack. Seven of the twelve post-cutoff cases have an answer page among
+`...` stands for `pages/documentation/docs/60-appendix`. Every case but `hono-4-13` got read-first
+pages, and no answer page is outside its pack. Seven of the twelve post-cutoff cases have an answer
+page among
 the read-first pages (`stripe-23`, `sveltekit-3`, `effect-4`, `sveltekit-3-redirect`,
 `effect-4-partition`, `markdown-it-15`, `i18next-27`), four of them `type-invisible`. In the other
 five (`mcp-sdk-v2`, `zod-4-6`, `hono-4-13`, `zod-4-6-datetime`, `mcp-sdk-v2-tools`) every answer
@@ -234,18 +249,22 @@ every answer page, any pack advantage cannot come from the read-first list point
 These are consequences of the rule, kept because adjusting them case by case is exactly the
 tuning the rule exists to prevent:
 
-- **A guide for another major.** The only change document in the Hono website at the pinned
+- **No read-first page for Hono.** The only change document in the Hono website at the pinned
   commit is `docs/guides/migrating-to-v5.md`, the guide to Hono v5's breaking changes (a release
-  candidate when the commit was made). So the Hono 4.13.16 pack's one read-first page describes a
-  later major than the one installed, and none of its sections is about the 4.13 features the
-  task needs. In `zod-4-6` and `zod-4-6-datetime` the first page is the Zod 3 migration guide
-  (`packages/docs-v3/MIGRATION.md`), because migration guides outrank changelogs and Zod 4's own
-  guide is named `changelog.mdx`. The controls get old guides too: `ctrl-markdown-it-13` marks the
-  4.0 and 5.0 migration guides.
+  candidate when the commit was made). Step 4 drops it, so the Hono 4.13.16 pack marks no
+  read-first page; the guide is still a page in the pack, because step 2 added it.
+- **Zod 4's guide alone.** In `zod-4-6` and `zod-4-6-datetime` step 4 drops the Zod 3 migration
+  guide and changelog (`packages/docs-v3/`), leaving Zod 4's own migration guide, which is named
+  `changelog.mdx` and is about the move from Zod 3, not about 4.5 or 4.6.
+- **A version written another way.** Step 4 reads only the forms it lists. `ctrl-markdown-it-13`
+  still marks the 4.0 and 5.0 migration guides (`docs/4.0_migration.md`), because `4.0_` is none
+  of those forms.
 - **Other packages' changelogs.** In monorepos every listed changelog outside the taken folders is
   added: the SvelteKit adapters' and `@sveltejs/package`'s, the MCP SDK's test helpers' and
   middleware packages', and Effect's OpenTelemetry, Vitest, and Anthropic packages'. They are
-  pages in the pack arms only, and none of them is read-first.
+  pages in the pack arms only. With step 4 dropping the SvelteKit 2 guide and
+  `CHANGELOG-pre-1.md`, the third SvelteKit read-first page is `@sveltejs/adapter-auto`'s
+  changelog: changelogs at one depth are ordered by path, and `adapter-auto` sorts before `kit`.
 - **discover lists at most 20.** Effect has 49 change documents at `effect@4.1.2` and the MCP SDK
   29 at `v2.4.0`; the rest are not seen, so not added. A full listing of both trees, ordered by the
   same rule, chooses the same three pages.

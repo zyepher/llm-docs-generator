@@ -46,13 +46,43 @@ function isChangeDocumentPattern(value: unknown): value is ChangeDocumentPattern
   return typeof value === 'string' && Object.hasOwn(PATTERN_GROUP, value);
 }
 
-/** Whether a path names major version `major` as `v<major>`, `<major>.x`, or `-<major>`. */
+/**
+ * The forms in which a path names a major version: `v<N>` (also inside a segment such as
+ * `docs-v3`), `<N>.x`, `-<N>`, and a range `v<A>-to-v<B>` or `<A>-to-<B>`, each number with no
+ * digit after it. The range form adds `<A>`; the other forms already find `v<A>` and `-<B>`.
+ */
+const MAJOR_FORMS = [
+  /(?<![a-z0-9])v(\d+)(?![0-9])/gi,
+  /(?<![0-9.])(\d+)\.x(?![a-z0-9])/gi,
+  /-(\d+)(?![0-9])/g,
+  /(?<![a-z0-9])v?(\d+)-to-v?\d+(?![0-9])/gi,
+];
+
+/** A date is not a version: `-07` in `support-2026-07-28.md` names no major. */
+const DATE = /\d{4}-\d{2}-\d{2}/g;
+
+/** Every major version a path names, without leading zeros, in order of first appearance. */
+export function namedMajors(path: string): string[] {
+  const text = path.replace(DATE, ' ');
+  const majors = MAJOR_FORMS.flatMap((form) =>
+    [...text.matchAll(form)].flatMap((match) =>
+      match[1] === undefined ? [] : [String(Number(match[1]))]
+    )
+  );
+  return [...new Set(majors)];
+}
+
 export function namesMajor(path: string, major: string): boolean {
-  return [
-    new RegExp(`(?<![a-z0-9])v${major}(?![0-9])`, 'i'),
-    new RegExp(`(?<![0-9.])${major}\\.x(?![a-z0-9])`, 'i'),
-    new RegExp(`-${major}(?![0-9])`),
-  ].some((form) => form.test(path));
+  return namedMajors(path).includes(major);
+}
+
+/**
+ * A guide for another major version is not the page that says what changed on the way to the
+ * pinned one, so a path that names majors must name the pinned one. A path naming none stays.
+ */
+function isForPinnedMajor(path: string, major: string | undefined): boolean {
+  const named = namedMajors(path);
+  return named.length === 0 || major === undefined || named.includes(major);
 }
 
 function depth(path: string): number {
@@ -110,7 +140,9 @@ export function applyReadFirstRule(input: {
     .sort(compareStringsByCodeUnit);
   const candidates = orderChangeDocuments(input.documents, input.major).flatMap((document) => {
     const page = input.pageOf.get(document.path);
-    return page === undefined ? [] : [{ ...document, page }];
+    return page === undefined || !isForPinnedMajor(document.path, input.major)
+      ? []
+      : [{ ...document, page }];
   });
   return {
     additions,

@@ -25,9 +25,6 @@
     ],
     "site": {
       "baseUrl": "https://hono.dev"
-    },
-    "readFirst": [
-      "pages/guides/migrating-to-v5.md"
-    ]
+    }
   }
 }

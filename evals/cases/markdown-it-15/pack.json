@@ -24,8 +24,7 @@
     ],
     "readFirst": [
       "pages/docs/migration/migration_v15.md",
-      "pages/docs/migration/migration_v4.md",
-      "pages/docs/migration/migration_v5.md"
+      "pages/CHANGELOG.md"
     ]
   }
 }
