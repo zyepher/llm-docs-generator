@@ -864,7 +864,7 @@ writes files.
   created in temp dirs via `file://`. No test touches the real network.
 - CLI end-to-end tests run the built CLI against temp projects (one subprocess per scenario,
   grouped to keep the suite fast).
-- CI: Linux, macOS, Windows on Node 22 and 24; `npm ci` with a committed `package-lock.json`;
+- CI: Linux, macOS, Windows on Node 22, 24, and 26; `npm ci` with a committed `package-lock.json`;
   lint, format check, type-check, build, plugin bundle check, schema check, tests.
 - Release: a tag `v*` publishes to npm with provenance from GitHub Actions (owner adds the
   `NPM_TOKEN` secret).
