@@ -83,9 +83,11 @@ Default `include` for `git` and `local` sources is `**/*.{md,mdx,markdown,rst,ht
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `repo` | string | required | An `https://` URL without credentials. `file://` is accepted with a warning that the origin is not portable. `ssh://` and `git@` remotes are rejected. |
+| `repo` | string | required | An `https://` URL without credentials: no user name or password, and no token, key, signature, or similar parameter. `file://` is accepted with a warning that the origin is not portable. `ssh://` and `git@` remotes are rejected. |
 | `ref` | string | required | A tag, a branch, or a 40-hex commit. A branch is accepted with a warning that the pin floats until the next sync records a new commit. |
 | `paths` | string array | `["."]` (the whole repository) | Repository-relative directories or files to take. No absolute paths and no `..`. |
+
+llm-docs never sends credentials to git, and it clears git's credential helpers, so it cannot fetch a private repository. To pin docs from one, copy them into a folder in the project and use a [`local`](#local) source.
 
 ```json
 {
@@ -101,9 +103,11 @@ Default `include` for `git` and `local` sources is `**/*.{md,mdx,markdown,rst,ht
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `urls` | array | required | At least one entry. An entry is an `https://` URL string, or `{ "url": ..., "path": ... }` to choose the stored path. |
+| `urls` | array | required | At least one entry. An entry is an `https://` URL string, or `{ "url": ..., "path": ... }` to choose the stored path. A URL must carry no credentials: no user name or password, and no token, key, signature, or similar parameter. |
 
 The stored path of a URL string is its pathname, percent-decoded, with `.md` appended when the last segment has no extension and `index.md` for a trailing slash. Two entries with the same stored path are a config error naming both URLs.
+
+llm-docs sends no cookies, tokens, or other credentials with a request, so it cannot fetch a page behind a login. The same holds for `llms-txt` sources. To pin such docs, copy them into a folder in the project and use a [`local`](#local) source.
 
 ```json
 {
@@ -119,7 +123,7 @@ The stored path of a URL string is its pathname, percent-decoded, with `.md` app
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `url` | string | required | The `https://` URL of an `llms.txt` file. |
+| `url` | string | required | The `https://` URL of an `llms.txt` file, without credentials. |
 | `include` | string array | required | At least one glob over the pathnames of the URLs the index lists. |
 | `stripPrefix` | string | `""` | A pathname prefix removed when deriving stored paths, such as a version segment. |
 

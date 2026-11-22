@@ -30,6 +30,7 @@ Pin the version in the URL rather than fetching the latest release, so a new rel
 
 - Node.js 22.19 or newer on the PATH that your editor or terminal passes to hooks. If `node` is missing, the hook command fails, the host treats that as a non-blocking hook error, and the session starts without the note.
 - Git, for packs built from a git repository. The hook itself never runs git.
+- Public sources. llm-docs never sends credentials, so it cannot fetch a private repository or a page behind a login. Copy those docs into a folder in your project and pin that folder as a `local` source.
 - Claude Code or Cursor. Codex support is unverified; see the Codex section below.
 
 ## Install

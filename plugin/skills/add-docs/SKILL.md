@@ -45,6 +45,8 @@ Never crawl. Do not follow links from page to page to assemble a URL list, and d
 
 For docs inside this repository, use `--local <path>`.
 
+A private repository or a page behind a login cannot be fetched, because llm-docs never sends credentials. Copy those docs into a folder in the project and use `--local <path>`.
+
 ### When no tag matches
 
 If `tags` reports `no-match`, or only `suffix` matches:
