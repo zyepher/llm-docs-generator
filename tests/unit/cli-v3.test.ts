@@ -399,6 +399,162 @@ describe('llm-docs v3 CLI', () => {
     }
   });
 
+  it('reports status and runs the session-start hook from a seeded release-date cache', async () => {
+    const dependencies = { hono: '^4.13.16', next: '^16.1.0', 'date-fns': '^2.30.0' };
+    const root = await makeProject({
+      'docs/index.md': '# Hono\n',
+      'package.json': JSON.stringify({ name: 'app', version: '1.0.0', dependencies }),
+      'package-lock.json': JSON.stringify({
+        name: 'app',
+        version: '1.0.0',
+        lockfileVersion: 3,
+        requires: true,
+        packages: {
+          '': { name: 'app', version: '1.0.0', dependencies },
+          'node_modules/hono': { version: '4.13.16' },
+          'node_modules/next': { version: '16.1.0' },
+          'node_modules/date-fns': { version: '2.30.0' },
+        },
+      }),
+      'llm-docs.json': JSON.stringify({
+        schemaVersion: 3,
+        packs: {
+          hono: {
+            title: 'Hono',
+            dependency: { ecosystem: 'npm', name: 'hono' },
+            sources: [{ type: 'local', path: 'docs' }],
+          },
+        },
+      }),
+    });
+    const cache = await makeProject({
+      'release-dates.json': JSON.stringify({
+        schemaVersion: 1,
+        entries: Object.fromEntries(
+          Object.entries({
+            'npm:hono@4.13.16': '2026-09-02T10:00:00.000Z',
+            'npm:next@16.1.0': '2026-10-21T18:00:00.000Z',
+            'npm:date-fns@2.30.0': '2023-04-28T00:00:00.000Z',
+          }).map(([key, publishedAt]) => [
+            key,
+            { publishedAt, source: 'deps.dev', fetchedAt: '2026-11-01T00:00:00.000Z' },
+          ])
+        ),
+      }),
+    });
+    // Isolated from the session running the suite: no inherited model, project, or settings.
+    const env = {
+      LLM_DOCS_CACHE_DIR: cache,
+      HOME: await makeProject({}),
+      CLAUDECODE: '1',
+      CLAUDE_PROJECT_DIR: '',
+      ANTHROPIC_MODEL: '',
+      LLM_DOCS_MODEL_CUTOFF: '',
+    };
+    const brief = [
+      'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:',
+      '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+      '',
+      'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:',
+      '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+      'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.',
+    ].join('\n');
+
+    expect((await runCli(root, ['sync'], env)).code).toBe(0);
+
+    const human = await runCli(root, ['status', '--model', 'claude-opus-5-5'], env);
+    expect(human).toEqual({
+      code: 0,
+      stdout: '',
+      stderr: [
+        'Packs:',
+        '  ID    VERSION  DEPENDENCY  LOCKFILE  STATE  RELEASED                   NEXT',
+        '  hono  4.13.16  npm:hono    4.13.16   ok     2026-09-02 (after cutoff)  -',
+        '',
+        'Model training data cutoff: 2026-06 (Claude Opus 5.5).',
+        '',
+        'Direct dependencies released after the cutoff without a pack:',
+        '  NAME  VERSION  ECOSYSTEM  RELEASED    NEXT',
+        '  next  16.1.0   npm        2026-10-21  llm-docs discover --package npm:next@16.1.0',
+        '',
+        '3 direct dependencies checked; 0 with an unknown release date.',
+        '',
+      ].join('\n'),
+    });
+
+    const json = await runCli(root, ['status', '--model', 'claude-opus-5-5', '--json'], env);
+    expect(json.code).toBe(0);
+    expect(json.stderr).toBe(human.stderr);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5' },
+      packs: [
+        {
+          id: 'hono',
+          title: 'Hono',
+          version: '4.13.16',
+          state: 'ok',
+          indexPath: 'agent-docs/hono/index.md',
+          publishedAt: '2026-09-02T10:00:00.000Z',
+          releaseWindow: 'after-cutoff',
+          nextStep: null,
+        },
+      ],
+      afterCutoff: [{ name: 'next', nextStep: 'llm-docs discover --package npm:next@16.1.0' }],
+      directDependencies: 3,
+    });
+
+    expect(await runCli(root, ['status', '--model', 'claude-opus-5-5', '--brief'], env)).toEqual({
+      code: 0,
+      stdout: `${brief}\n`,
+      stderr: '',
+    });
+
+    const badCutoff = await runCli(root, ['status', '--cutoff', '2026-6'], env);
+    expect(badCutoff.code).toBe(2);
+    expect(badCutoff.stderr).toBe(
+      'llm-docs: --cutoff must be a YYYY-MM month (for example 2026-06), got "2026-6".\n'
+    );
+
+    const payload = JSON.stringify({
+      cwd: root,
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      model: 'claude-opus-5-5',
+    });
+    const hook = (stdin: string, extra: Record<string, string> = {}, cwd = root) =>
+      new Promise<CliResult>((resolveResult) => {
+        const child = execFile(
+          process.execPath,
+          [cliPath, 'hook', 'session-start'],
+          { cwd, env: { ...process.env, ...env, ...extra } },
+          (error, stdout, stderr) => {
+            const code = error === null ? 0 : typeof error.code === 'number' ? error.code : 1;
+            resolveResult({ code, stdout, stderr });
+          }
+        );
+        child.stdin?.end(stdin);
+      });
+
+    expect(await hook(payload)).toEqual({
+      code: 0,
+      stdout: `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: brief } })}\n`,
+      stderr: '',
+    });
+    expect(await hook(payload, { CLAUDECODE: '', CURSOR_VERSION: '2.1.0' })).toEqual({
+      code: 0,
+      stdout: `${JSON.stringify({ additional_context: brief })}\n`,
+      stderr: '',
+    });
+    expect(await hook('garbage {', {}, await makeProject({}))).toEqual({
+      code: 0,
+      stdout: '',
+      stderr: '',
+    });
+    expect(await readFile(join(cache, 'hook.log'), 'utf-8')).toMatch(
+      /^\S+ the payload on stdin is not JSON; ignored it\n$/
+    );
+  });
+
   it('lists the v3 commands, sources, and limits in capabilities', async () => {
     const root = await makeProject({});
     const result = await runCli(root, ['capabilities', '--json']);
@@ -410,9 +566,11 @@ describe('llm-docs v3 CLI', () => {
       'sync',
       'refresh',
       'verify',
+      'status',
       'migrate',
       'discover',
       'capabilities',
+      'hook session-start',
     ]);
     expect(
       capabilities.commands[1].options.map((option: { flags: string }) => option.flags)

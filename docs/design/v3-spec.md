@@ -648,9 +648,12 @@ context for the agent. Behavior:
 - Harness detection: `CURSOR_VERSION` or `CURSOR_PLUGIN_ROOT` set means Cursor, which gets
   `{"additional_context": "..."}`; otherwise Claude Code and Codex shape
   `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}`.
+  `CLAUDECODE=1` identifies Claude Code; anything else (Codex included) is an unknown harness.
 - Project: `cwd` from the payload, else `CLAUDE_PROJECT_DIR`, else Cursor `workspace_roots[0]`,
   else the process cwd; then project discovery (2.1). With no `llm-docs.json`, the hook still
-  runs the dependency analysis (so it is useful before a project adopts packs).
+  runs the dependency analysis (so it is useful before a project adopts packs). A payload that
+  is malformed, over 1 MiB, or still arriving when the read budget ends is logged and ignored,
+  and these fallbacks apply.
 - Model: payload `model` (Claude Code sends it only in some sessions; headless `-p` runs omit
   it), Cursor `model_id`/`model`, Codex `model`; then `ANTHROPIC_MODEL`; then `model` from
   `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`,
@@ -661,11 +664,18 @@ context for the agent. Behavior:
   dependencies (your training data may predate them)"): a fact from release dates, not a guess
   about the model.
 - Content (at most 2,000 characters; nothing at all when there is nothing to say):
-  1. Packs whose lockfile moved (stale) with the fix command.
-  2. Direct dependencies newer than the model's training cutoff (or within the near-cutoff
+  1. Packs that need a rebuild (the lockfile moved, the recipe changed, or never built), each
+     with its fix from `status`.
+  2. Built packs whose library version (the pack's version of its bound dependency) was
+     released after the model's training cutoff or within the near-cutoff window, most recent
+     first, one line each with the title, version, release date, whether it is after or near
+     the cutoff, and the index path, under a heading that tells the agent its memory of these
+     libraries predates these versions and that it must read the pinned pages before writing
+     code against them. This is what a fully adopted project is told at every session start.
+  3. Direct dependencies newer than the model's training cutoff (or within the near-cutoff
      window) without a pack, most recent first, at most 8, with their release dates, and the
      suggestion to read their docs or create a pack with the `add-docs` skill.
-  3. When packs exist and the managed block is missing from the agent file the harness reads,
+  4. When packs exist and the managed block is missing from the agent file the harness reads,
      the pack list itself (so the hook covers projects that gitignore AGENTS.md). Codex and
      Cursor read `AGENTS.md`. Claude Code reads the project's `CLAUDE.md` and
      `CLAUDE.local.md`, and reads `AGENTS.md` only when no `CLAUDE.md` or `CLAUDE.local.md`
@@ -673,12 +683,19 @@ context for the agent. Behavior:
      files imports `@AGENTS.md`; so an ancestor `CLAUDE.md` hides the block in `AGENTS.md`,
      and the hook injects the list instead (the `agentFiles: "auto"` writing rule in 7.1 is
      unchanged). A harness the hook cannot identify is assumed not to see the block.
-- Performance: total wall time under 1.5 s. Release dates come from the cache; missing entries
-  get at most a 1,000 ms network budget, and anything still missing is fetched by a detached
-  background `status` process (at most one per project per 6 hours, tracked in the cache dir)
-  so the next session has it.
-- Failure policy: always exit 0. Errors go to `<cache dir>/hook.log` (rotated at 1 MB), never
-  to stdout. `LLM_DOCS_HOOK=off` or config `hook.enabled: false` disables output.
+
+  Over the budget, text goes from the bottom up: item 4 first, then the rows of the lowest
+  remaining item from its last row, and a cut list ends with how many more there are and
+  `llm-docs status`. Items 2 and 3 use the neutral wording and the 180-day window when no
+  cutoff resolves. `llm-docs status --brief` prints the same text.
+- Performance: total wall time under 1.5 s, counted from process start. Release dates come from
+  the cache; missing entries get at most a 1,000 ms network budget, and anything still missing
+  is fetched by a detached background `status` process (at most one per project per 6 hours,
+  tracked by a marker file in the cache dir) so the next session has it. The lockfile scan and
+  the lookups stop when the deadline nears. A run that misses the deadline prints nothing.
+- Failure policy: always exit 0. Errors go to `<cache dir>/hook.log` (rotated at 1 MB, one
+  previous file kept), never to stdout or stderr. `LLM_DOCS_HOOK=off` or config
+  `hook.enabled: false` disables output.
 
 ### 7.3 Plugin (`plugin/`)
 
