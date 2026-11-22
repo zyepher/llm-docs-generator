@@ -207,6 +207,27 @@ describe('syncPacks: reStructuredText, HTML, and OpenAPI pages', () => {
     );
   });
 
+  it('carries what the RST and HTML parsers could not convert into the pack warnings', async () => {
+    const root = await makeProject(
+      { demo: { ...PACK, sources: [{ ...SOURCE, include: ['**/*.{rst,html}'] }] } },
+      {
+        'docs/guide/quickstart.rst': `${QUICKSTART}\n.. include:: ../shared/snippet.rst\n`,
+        'docs/api/client.html':
+          '<title>Client</title><h1>Client</h1><script>x()</script><p>Hi.</p>',
+      }
+    );
+    const report = await syncPacks(root, undefined);
+    const manifest = await readPackManifest(join(root, 'agent-docs', 'demo'));
+
+    expect(manifest.warnings).toEqual([
+      '1 unresolvable relative link was converted to plain text.',
+      'Parsed with lower-confidence static rendered HTML fallback; JavaScript was not rendered or executed.',
+      'docs/api/client.html: Stripped 1 <script> element before parsing.',
+      'docs/guide/quickstart.rst line 13: Unsupported RST include directive not executed: ../shared/snippet.rst',
+    ]);
+    expect(report.packs[0]?.warnings).toEqual(expect.arrayContaining(manifest.warnings));
+  });
+
   it('names a file the parser rejects', async () => {
     const root = await makeProject(
       { demo: { ...PACK, sources: [{ ...SOURCE, include: ['api/broken.yaml'] }] } },
