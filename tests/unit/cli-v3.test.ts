@@ -410,6 +410,7 @@ describe('llm-docs v3 CLI', () => {
       'sync',
       'refresh',
       'verify',
+      'guides stamp',
       'migrate',
       'discover',
       'capabilities',

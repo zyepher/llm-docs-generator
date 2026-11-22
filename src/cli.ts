@@ -36,6 +36,7 @@ import {
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
 import { ensurePacksDir, previewPack, syncPacks, type SyncReport } from './pack/build.js';
+import { stampGuides } from './pack/guides.js';
 import {
   PACK_CHECK_NAMES,
   PROJECT_CHECK_NAMES,
@@ -86,6 +87,12 @@ const COMMANDS = [
     name: 'verify',
     summary:
       'Check packs against their manifests, recipes, lockfiles, and links, and the managed blocks (read-only, offline)',
+    status: 'implemented',
+  },
+  {
+    name: 'guides stamp',
+    summary:
+      'Record the hash of every section each guide cites, so verify, refresh, and sync report the guides to re-review when that text changes',
     status: 'implemented',
   },
   {
@@ -648,9 +655,14 @@ function capabilities(program: Command): unknown {
     version: packageJson.version,
     commands: COMMANDS.map((entry) => ({
       ...entry,
+      // A name with a space is a subcommand path (`guides stamp`).
       options:
-        program.commands
-          .find((command) => command.name() === entry.name)
+        entry.name
+          .split(' ')
+          .reduce<Command | undefined>(
+            (parent, name) => parent?.commands.find((command) => command.name() === name),
+            program
+          )
           ?.options.map((option) => ({ flags: option.flags, description: option.description })) ??
         [],
     })),
@@ -869,6 +881,38 @@ function buildProgram(): Command {
     }
     printRefreshReport(report);
     process.exitCode = syncExitCode(report);
+  });
+
+  const guides = program.command('guides').description(summaryOf('guides stamp'));
+
+  withProjectOptions(
+    guides
+      .command('stamp')
+      .description(summaryOf('guides stamp'))
+      .argument('<id>', 'Pack whose guides to stamp')
+      .argument(
+        '[guides...]',
+        'Guides to stamp (default: every guide), as guides/x.md, x.md, or a path to the file'
+      )
+  ).action(async (id: string, guidePaths: string[], options: ProjectOptions) => {
+    const loaded = await loadProjectConfig(await existingProjectRoot(options));
+    const result = await stampGuides(loaded, id, guidePaths, process.cwd());
+
+    if (options.json === true) {
+      writeJson(result);
+    }
+    for (const guide of result.guides) {
+      say(
+        `${id}: stamped ${guide.path} (${guide.citations} citation${guide.citations === 1 ? '' : 's'})`
+      );
+    }
+    for (const removed of result.removed) {
+      say(`${id}: dropped ${removed} from the lock (the guide no longer exists)`);
+    }
+    for (const warning of result.warnings) {
+      say(`  warning: ${warning}`);
+    }
+    say(result.changed ? `Wrote ${result.lockPath}.` : `${result.lockPath} is up to date.`);
   });
 
   withProjectOptions(

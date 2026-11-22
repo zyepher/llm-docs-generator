@@ -62,6 +62,13 @@ describe('llm-docs CLI skeleton', () => {
       expect.arrayContaining([
         expect.objectContaining({ name: 'discover', status: 'implemented' }),
         expect.objectContaining({ name: 'capabilities', status: 'implemented' }),
+        expect.objectContaining({
+          name: 'guides stamp',
+          options: expect.arrayContaining([
+            expect.objectContaining({ flags: '--project <dir>' }),
+            expect.objectContaining({ flags: '--json' }),
+          ]),
+        }),
       ])
     );
   });
