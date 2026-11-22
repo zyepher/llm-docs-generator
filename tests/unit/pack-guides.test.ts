@@ -14,6 +14,7 @@ import {
   stampGuides,
 } from '../../src/pack/guides.js';
 import { SyncLockedError, withPacksLock } from '../../src/pack/lock.js';
+import { verifyPacks } from '../../src/pack/verify.js';
 import { ALLOW_TEMP_SOURCES_ENV } from '../../src/sources/acquire.js';
 import { sha256Prefixed } from '../../src/utils/hash.js';
 
@@ -520,5 +521,124 @@ describe('assessCitations', () => {
       expect(assessment.kind).toBe('invalid-lock');
       expect(assessment.kind === 'invalid-lock' ? assessment.message : '').toContain(message);
     }
+  });
+});
+
+describe('verify citations', () => {
+  const verifyDemo = async (root: string) => {
+    const report = await verifyPacks(root, undefined);
+    return {
+      ok: report.ok,
+      citations: report.results.find((result) => result.check === 'citations'),
+      unlisted: report.results.find((result) => result.check === 'unlisted-files'),
+    };
+  };
+
+  it('passes with no findings for a pack without guides', async () => {
+    const root = await builtPack({});
+    const { ok, citations } = await verifyDemo(root);
+    expect(ok).toBe(true);
+    expect(citations).toEqual({ check: 'citations', packId: 'demo', status: 'pass', findings: [] });
+  });
+
+  it('warns for unstamped and edited guides and fails for changed or unresolved citations', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A, 'b.md': GUIDE_B });
+    expect((await verifyDemo(root)).citations).toMatchObject({
+      status: 'warn',
+      findings: [
+        {
+          status: 'warn',
+          path: 'guides/a.md',
+          message:
+            "not stamped; after reviewing its citations, run 'llm-docs guides stamp demo guides/a.md'",
+        },
+        { status: 'warn', path: 'guides/b.md' },
+      ],
+    });
+
+    await stamp(root);
+    const stamped = await verifyDemo(root);
+    expect(stamped.ok).toBe(true);
+    expect(stamped.citations?.status).toBe('pass');
+    expect(stamped.unlisted?.findings).toEqual([
+      {
+        status: 'info',
+        path: 'guides/',
+        message: '3 agent-owned guide files, not covered by outputs',
+      },
+    ]);
+
+    await writeFiles(root, {
+      'docs/guide/api.md': API_PAGE.replace('Run it.', 'Run it twice.'),
+      'docs/data/schema.json': '{"a":2}\n',
+    });
+    await rm(join(root, 'docs', 'guide', 'start.md'));
+    await syncPacks(root, undefined);
+    await writeFile(join(packDir(root), 'guides', 'b.md'), `${GUIDE_B}\nEdited.\n`);
+
+    const changed = await verifyDemo(root);
+    expect(changed.ok).toBe(false);
+    expect(changed.citations?.findings).toEqual([
+      {
+        status: 'fail',
+        path: 'guides/a.md',
+        message:
+          "pages/guide/api.md#install: cited section changed since stamping; re-review the guide, then 'llm-docs guides stamp demo guides/a.md'",
+      },
+      {
+        status: 'fail',
+        path: 'guides/a.md',
+        message:
+          "pages/guide/start.md: citation no longer resolves (no such file in the pack); fix the link and re-review the guide, then 'llm-docs guides stamp demo guides/a.md'",
+      },
+      {
+        status: 'warn',
+        path: 'guides/b.md',
+        message:
+          "edited after stamping; re-review the guide, then 'llm-docs guides stamp demo guides/b.md'",
+      },
+      {
+        status: 'fail',
+        path: 'guides/b.md',
+        message:
+          "files/data/schema.json: cited file changed since stamping; re-review the guide, then 'llm-docs guides stamp demo guides/b.md'",
+      },
+    ]);
+  });
+
+  it('fails an invalid lock, and warns for a stale entry or a deleted lock', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A, 'b.md': GUIDE_B });
+    await stamp(root);
+    await rm(join(packDir(root), 'guides', 'b.md'));
+    expect((await verifyDemo(root)).citations?.findings).toEqual([
+      {
+        status: 'warn',
+        path: 'guides/b.md',
+        message:
+          "the guide no longer exists but the lock still records it; 'llm-docs guides stamp demo' drops the entry",
+      },
+    ]);
+
+    await writeFile(lockFile(root), '{"schemaVersion": 1}');
+    const invalid = await verifyDemo(root);
+    expect(invalid.ok).toBe(false);
+    expect(invalid.citations?.findings).toEqual([
+      {
+        status: 'fail',
+        path: 'guides/citations.lock.json',
+        message: expect.stringMatching(
+          /^invalid citations lock \(guides\/citations\.lock\.json guides: .+\); 'llm-docs guides stamp demo' rewrites it$/
+        ),
+      },
+    ]);
+
+    await rm(lockFile(root));
+    expect((await verifyDemo(root)).citations?.findings).toEqual([
+      expect.objectContaining({
+        status: 'warn',
+        path: 'guides/a.md',
+        message: expect.stringContaining('not stamped'),
+      }),
+    ]);
   });
 });

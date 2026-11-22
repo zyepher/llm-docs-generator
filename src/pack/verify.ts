@@ -4,7 +4,7 @@
  *
  * Implemented here: config-schema, agent-block (from src/agent/block.ts),
  * manifest-schema, outputs, unlisted-files, links, recipe, lockfile,
- * conversion, license. `citations` (Phase 5) registers in PACK_CHECKS.
+ * citations (from src/pack/guides.ts), conversion, license.
  */
 
 import { lstat, readFile, stat } from 'node:fs/promises';
@@ -24,6 +24,7 @@ import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
+import { checkCitations } from './guides.js';
 import { MANIFEST_FILE_NAME, readProjectPacks, type PackManifest } from './manifest.js';
 import { findLinkTargets, headingAnchors } from './markdown.js';
 
@@ -481,16 +482,14 @@ async function checkConversion(context: PackCheckContext): Promise<CheckOutcome>
   return findings;
 }
 
-/**
- * Per-pack checks after `manifest-schema`, in report order. Later phases add
- * theirs here: `citations` (Phase 5).
- */
+/** Per-pack checks after `manifest-schema`, in report order. */
 const PACK_CHECKS: readonly PackCheck[] = [
   { name: 'outputs', run: checkOutputs },
   { name: 'unlisted-files', run: checkUnlistedFiles },
   { name: 'links', run: checkLinks },
   { name: 'recipe', run: checkRecipe },
   { name: 'lockfile', run: checkLockfile },
+  { name: 'citations', run: (context) => checkCitations(context.packId, context.packDir) },
   { name: 'conversion', run: checkConversion },
   { name: 'license', run: checkLicense },
 ];

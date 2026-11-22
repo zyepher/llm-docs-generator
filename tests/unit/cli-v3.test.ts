@@ -170,6 +170,7 @@ describe('llm-docs v3 CLI', () => {
       'links',
       'recipe',
       'lockfile',
+      'citations',
       'conversion',
       'license',
     ]);

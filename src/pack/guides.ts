@@ -29,6 +29,7 @@ import type { IndexGuide } from './index-page.js';
 import { withPacksLock } from './lock.js';
 import { ManifestError, readPackManifest, type PackManifest } from './manifest.js';
 import { collectHeadings, findLinkTargets, headingSlugs } from './markdown.js';
+import type { CheckFinding } from './verify.js';
 
 /** Pack-relative path of the lock. Not a `.md` file, so it is never listed as a guide. */
 export const CITATIONS_LOCK_PATH = 'guides/citations.lock.json';
@@ -687,4 +688,84 @@ export async function assessCitations(packDir: string): Promise<CitationsAssessm
     unstamped: onDisk.map((guide) => guide.path).filter((path) => !Object.hasOwn(recorded, path)),
     guides,
   };
+}
+
+/**
+ * The per-pack `citations` verify check (spec 5.1), a projection of
+ * `assessCitations`. Fails: an invalid lock, a citation that no longer
+ * resolves, a cited section whose hash changed. Warns: an unstamped guide, a
+ * guide edited after stamping, a lock entry whose guide is gone. Each
+ * finding names the guide and the command to run after re-review.
+ */
+export async function checkCitations(packId: string, packDir: string): Promise<CheckFinding[]> {
+  const assessment = await assessCitations(packDir);
+  const stampCommand = (guide?: string): string =>
+    `'llm-docs guides stamp ${packId}${guide === undefined ? '' : ` ${guide}`}'`;
+
+  if (assessment.kind === 'no-guides') {
+    return [];
+  }
+  if (assessment.kind === 'invalid-lock') {
+    return [
+      {
+        status: 'fail',
+        path: CITATIONS_LOCK_PATH,
+        message: `invalid citations lock (${assessment.message}); ${stampCommand()} rewrites it`,
+      },
+    ];
+  }
+
+  const findings: CheckFinding[] = [];
+
+  for (const guide of assessment.guides) {
+    if (guide.missing) {
+      findings.push({
+        status: 'warn',
+        path: guide.path,
+        message: `the guide no longer exists but the lock still records it; ${stampCommand()} drops the entry`,
+      });
+      continue;
+    }
+
+    const restamp = `re-review the guide, then ${stampCommand(guide.path)}`;
+
+    if (guide.edited) {
+      findings.push({
+        status: 'warn',
+        path: guide.path,
+        message: `edited after stamping; ${restamp}`,
+      });
+    }
+
+    for (const citation of guide.citations) {
+      if (citation.state === 'section-changed') {
+        const cited = citation.target.includes('#')
+          ? 'section'
+          : citation.target.startsWith('pages/')
+            ? 'page'
+            : 'file';
+        findings.push({
+          status: 'fail',
+          path: guide.path,
+          message: `${citation.target}: cited ${cited} changed since stamping; ${restamp}`,
+        });
+      } else if (citation.state === 'unresolved') {
+        findings.push({
+          status: 'fail',
+          path: guide.path,
+          message: `${citation.target}: citation no longer resolves (${UNRESOLVED_TEXT[citation.reason]}); fix the link and ${restamp}`,
+        });
+      }
+    }
+  }
+
+  for (const path of assessment.unstamped) {
+    findings.push({
+      status: 'warn',
+      path,
+      message: `not stamped; after reviewing its citations, run ${stampCommand(path)}`,
+    });
+  }
+
+  return findings;
 }
