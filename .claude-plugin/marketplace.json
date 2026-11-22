@@ -1,0 +1,17 @@
+{
+  "name": "llm-docs",
+  "owner": {
+    "name": "Zyepher"
+  },
+  "metadata": {
+    "description": "The llm-docs plugin: version-pinned, verified library docs for coding agents, and a session-start note about dependencies newer than the model's training data."
+  },
+  "plugins": [
+    {
+      "name": "llm-docs",
+      "source": "./plugin",
+      "description": "Session-start note about dependencies newer than the model's training data, plus skills for pinning and verifying version-matched docs with the llm-docs CLI.",
+      "version": "3.0.0"
+    }
+  ]
+}

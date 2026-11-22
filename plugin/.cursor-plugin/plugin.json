@@ -1,0 +1,23 @@
+{
+  "name": "llm-docs",
+  "version": "3.0.0",
+  "description": "Tells the agent at every session start which of the project's dependencies are newer than its training data and where their pinned docs are, and teaches it to pin, verify, and digest version-matched docs with the llm-docs CLI.",
+  "author": {
+    "name": "Zyepher"
+  },
+  "homepage": "https://github.com/Zyepher/llm-docs-generator",
+  "repository": "https://github.com/Zyepher/llm-docs-generator",
+  "license": "MIT",
+  "keywords": [
+    "documentation",
+    "docs",
+    "dependencies",
+    "lockfile",
+    "training-cutoff",
+    "llms-txt",
+    "agents-md"
+  ],
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "hooks": "./hooks/cursor-hooks.json"
+}
