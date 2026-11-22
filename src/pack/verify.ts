@@ -14,6 +14,7 @@ import { checkAgentBlocks } from '../agent/block.js';
 import {
   ConfigError,
   loadProjectConfig,
+  onlyLockfileVersionMoved,
   resolvePackRecipe,
   type DependencyVersionResolver,
   type LoadedProjectConfig,
@@ -173,7 +174,11 @@ async function checkOutputs(context: PackCheckContext): Promise<CheckOutcome> {
     }
 
     if (!isFile) {
-      findings.push({ status: 'fail', path: output.path, message: 'listed output is missing' });
+      findings.push({
+        status: 'fail',
+        path: output.path,
+        message: `listed output is missing; run 'llm-docs sync ${context.packId}' to rebuild the pack`,
+      });
       continue;
     }
 
@@ -181,7 +186,7 @@ async function checkOutputs(context: PackCheckContext): Promise<CheckOutcome> {
       findings.push({
         status: 'fail',
         path: output.path,
-        message: 'content differs from the manifest (hash mismatch)',
+        message: `content differs from the manifest (hash mismatch); pack files are tool-written, so run 'llm-docs sync ${context.packId}' to restore it`,
       });
     }
   }
@@ -204,12 +209,20 @@ async function checkUnlistedFiles(context: PackCheckContext): Promise<CheckOutco
     } else if (OS_JUNK_FILES.has(posix.basename(path))) {
       findings.push({ status: 'info', path, message: 'operating system file, ignored' });
     } else {
-      findings.push({ status: 'fail', path, message: 'file is not listed in the manifest' });
+      findings.push({
+        status: 'fail',
+        path,
+        message: `file is not listed in the manifest; move it into guides/ if it is yours, or run 'llm-docs sync ${context.packId}' to remove it`,
+      });
     }
   }
 
   for (const path of context.listing.symlinks) {
-    findings.push({ status: 'fail', path, message: 'symbolic link inside the pack' });
+    findings.push({
+      status: 'fail',
+      path,
+      message: `symbolic link inside the pack; delete it, or run 'llm-docs sync ${context.packId}' to rebuild the pack`,
+    });
   }
 
   if (guides > 0) {
@@ -321,7 +334,7 @@ async function checkRecipe(context: PackCheckContext): Promise<CheckOutcome> {
     return [
       {
         status: 'warn',
-        message: `orphan pack: llm-docs.json has no pack "${context.packId}" (remove it with 'llm-docs sync --prune')`,
+        message: `orphan pack: llm-docs.json has no pack "${context.packId}"; delete it with 'llm-docs sync --prune', or add packs.${context.packId} back to llm-docs.json`,
       },
     ];
   }
@@ -331,14 +344,26 @@ async function checkRecipe(context: PackCheckContext): Promise<CheckOutcome> {
       resolveDependencyVersion: context.resolveDependencyVersion,
     });
 
-    return resolved.recipeHash === context.manifest.recipeHash
-      ? []
-      : [
-          {
-            status: 'fail',
-            message: `the recipe in llm-docs.json changed since the last sync; run 'llm-docs sync ${context.packId}'`,
-          },
-        ];
+    if (resolved.recipeHash === context.manifest.recipeHash) {
+      return [];
+    }
+
+    const dependency = resolved.recipe.dependency;
+    const lockfileMoved =
+      dependency !== null &&
+      (await onlyLockfileVersionMoved(loaded.config, context.packId, {
+        version: context.manifest.pack.version,
+        recipeHash: context.manifest.recipeHash,
+      }));
+
+    return [
+      {
+        status: 'fail',
+        message: lockfileMoved
+          ? `packs.${context.packId} in llm-docs.json is unchanged, but the lockfile now resolves ${dependency.ecosystem}:${dependency.name} ${resolved.recipe.version} and the pack is ${context.manifest.pack.version}; run 'llm-docs sync ${context.packId}'`
+          : `packs.${context.packId} in llm-docs.json changed since the last sync; run 'llm-docs sync ${context.packId}'`,
+      },
+    ];
   } catch (error) {
     if (error instanceof ConfigError) {
       return [{ status: 'fail', message: error.message }];
@@ -382,7 +407,7 @@ async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
       return [
         {
           status: 'fail',
-          message: `no lockfile resolves ${label} (searched: ${lookup.searched.join(', ') || 'none found'})`,
+          message: `no lockfile resolves ${label} (searched: ${lookup.searched.join(', ') || 'none found'}); install the dependency, or remove packs.${context.packId}.dependency from llm-docs.json`,
         },
       ];
     case 'conflict': {
@@ -391,7 +416,7 @@ async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
       return [
         {
           status: matches ? 'warn' : 'fail',
-          message: `${matches ? '' : 'stale-pack: '}lockfiles resolve ${label} to different versions (${versions.join(', ')}); the pack is ${version}`,
+          message: `${matches ? '' : 'stale-pack: '}lockfiles resolve ${label} to different versions (${versions.join(', ')}); the pack is ${version}${matches ? '' : `, so set packs.${context.packId}.version in llm-docs.json to the one these docs describe, then run 'llm-docs sync ${context.packId}'`}`,
         },
       ];
     }
@@ -408,10 +433,10 @@ async function checkLicense(context: PackCheckContext): Promise<CheckOutcome> {
 
   const message =
     status === 'proprietary'
-      ? 'license is proprietary: check the terms before sharing this pack'
+      ? 'license is proprietary: check the terms before committing or sharing this pack'
       : declared === null
-        ? 'license unknown: no license file was detected; set "license" in the recipe once you know the terms'
-        : `license unknown: "${declared}" is not a recognized SPDX id`;
+        ? `license unknown: no license file was detected; set packs.${context.packId}.license in llm-docs.json (an SPDX id, or "proprietary") once you know the terms`
+        : `license unknown: "${declared}" is not a recognized SPDX id; set packs.${context.packId}.license to one, such as MIT or Apache-2.0`;
 
   return [{ status: context.options.strict === true ? 'fail' : 'warn', message }];
 }
@@ -468,7 +493,12 @@ async function checkConversion(context: PackCheckContext): Promise<CheckOutcome>
       if (!isFileNotFoundError(error)) {
         throw error;
       }
-      findings.push(finding('warn', `${label}, converted by an agent, no longer exists`));
+      findings.push(
+        finding(
+          'warn',
+          `${label}, converted by an agent, no longer exists; exclude it from the source or restore it, then run 'llm-docs sync ${context.packId}'`
+        )
+      );
       continue;
     }
 
@@ -578,7 +608,9 @@ export async function verifyPacks(
 
   for (const id of ids ?? []) {
     if (!packs.some((pack) => pack.id === id)) {
-      throw new ConfigError(`No pack "${id}" in llm-docs.json or ${loaded.packsDirRelative}/.`);
+      throw new ConfigError(
+        `No pack "${id}" in llm-docs.json or ${loaded.packsDirRelative}/; 'llm-docs status' lists the packs.`
+      );
     }
   }
 
@@ -587,12 +619,19 @@ export async function verifyPacks(
       ? packs
       : [...new Set(ids)].flatMap((id) => packs.filter((pack) => pack.id === id));
 
-  for (const { id: packId, dir: packDir, manifest: read } of selected) {
+  for (const { id: packId, dir: packDir, inConfig, manifest: read } of selected) {
     if (read.kind !== 'ok') {
+      const sync = `run 'llm-docs sync ${packId}' to rebuild the pack`;
       const message =
         read.kind === 'missing'
-          ? `${MANIFEST_FILE_NAME} is missing; run 'llm-docs sync ${packId}'`
-          : read.message;
+          ? `${MANIFEST_FILE_NAME} is missing; ${sync}`
+          : read.reason === 'other-version'
+            ? read.message
+            : !inConfig
+              ? `${read.message}; llm-docs.json has no pack "${packId}", so delete ${loaded.packsDirRelative}/${packId}/ or add it back to llm-docs.json`
+              : read.reason === 'wrong-id'
+                ? `${read.message}; move ${loaded.packsDirRelative}/${packId}/ away, then ${sync}`
+                : `${read.message}; ${sync}`;
       results.push(
         result('manifest-schema', packId, [{ status: 'fail', path: MANIFEST_FILE_NAME, message }])
       );

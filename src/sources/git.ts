@@ -140,7 +140,9 @@ function assertRefName(ref: string): void {
     ref.endsWith('.') ||
     ref.endsWith('.lock')
   ) {
-    throw new ConfigError(`git ref "${ref}" is not a valid tag, branch, or 40-hex commit name.`);
+    throw new ConfigError(
+      `git ref "${ref}" is not a valid tag, branch, or 40-hex commit name; fix "ref" in the source.`
+    );
   }
 }
 
@@ -158,7 +160,9 @@ function normalizeTakenPaths(paths: readonly string[]): string[] {
       value.startsWith('../') ||
       /^[A-Za-z]:/.test(value)
     ) {
-      throw new ConfigError(`git path "${path}" must be a relative path inside the repository.`);
+      throw new ConfigError(
+        `git path "${path}" must be a relative path inside the repository, such as "docs"; fix "paths" in the source.`
+      );
     }
     return value === '' ? '.' : value;
   });
@@ -220,7 +224,7 @@ async function resolveRef(git: GitRunner, repo: string, ref: string): Promise<Re
   }
 
   throw new ConfigError(
-    `git ref "${ref}" is not a tag or branch of ${redactUrl(repo)}, and not a 40-hex commit id.`
+    `git ref "${ref}" is not a tag or branch of ${redactUrl(repo)}, and not a 40-hex commit id; fix "ref" ('llm-docs discover --package <ecosystem>:<name>@<version>' lists the tags that match a release).`
   );
 }
 
@@ -310,7 +314,9 @@ export async function assertRepositoryAllowed(repoUrl: URL): Promise<void> {
   if (repoUrl.protocol === 'https:') {
     await resolveAllowedAddress(repoUrl, process.env[ALLOW_PRIVATE_NETWORK_ENV] === '1');
   } else if (repoUrl.protocol !== 'file:') {
-    throw new ConfigError(`git repo "${redactUrl(repoUrl)}" must be an https:// or file:// URL.`);
+    throw new ConfigError(
+      `git repo "${redactUrl(repoUrl)}" must be an https:// or file:// URL; ssh and git@ remotes are not supported, so use the repository's https:// URL.`
+    );
   }
 }
 
@@ -347,7 +353,9 @@ export async function fetchCommit(
   ).trim();
 
   if (!COMMIT_PATTERN.test(commit)) {
-    throw new GitError(`git fetch of ${redactUrl(repo)} at ${refspec} returned no commit.`);
+    throw new GitError(
+      `git fetch of ${redactUrl(repo)} at ${refspec} returned no commit; check that the ref still exists upstream, then sync again.`
+    );
   }
 
   return commit;
@@ -363,7 +371,7 @@ export async function acquireGit(
   await assertRepositoryAllowed(repoUrl);
   if (repoUrl.protocol === 'file:') {
     warnings.push(
-      `git source ${source.repo} is a file:// repository: a non-portable origin that only this machine can refresh.`
+      `git source ${source.repo} is a file:// repository: a non-portable origin that only this machine can refresh; use its https:// URL so others can rebuild the pack.`
     );
   }
 

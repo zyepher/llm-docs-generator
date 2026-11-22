@@ -133,7 +133,12 @@ describe('syncPacks', () => {
     });
 
     expect(report.packs).toEqual([
-      expect.objectContaining({ id: 'demo', status: 'built', reason: 'not built yet' }),
+      expect.objectContaining({
+        id: 'demo',
+        status: 'built',
+        reason: 'not-built',
+        detail: 'not built yet',
+      }),
     ]);
     expect(Object.keys(await snapshot(join(root, 'agent-docs'))).sort()).toEqual([
       '.gitignore',
@@ -188,7 +193,7 @@ describe('syncPacks', () => {
     });
     expect(rebuilt.packs[0]).toMatchObject({
       status: 'built',
-      reason: 'the pack files differ from the manifest',
+      reason: 'files-differ',
     });
     expect(await snapshot(join(root, 'agent-docs'))).toEqual(first);
   });
@@ -207,7 +212,7 @@ describe('syncPacks', () => {
     });
     const after = await snapshot(join(root, 'agent-docs'));
 
-    expect(report.packs[0]).toMatchObject({ status: 'built', reason: 'source files changed' });
+    expect(report.packs[0]).toMatchObject({ status: 'built', reason: 'sources-changed' });
     const changed = Object.keys(after).filter((path) => after[path] !== before[path]);
     expect(changed.sort()).toEqual([
       'demo/index.md',
@@ -239,7 +244,8 @@ describe('syncPacks', () => {
     await setPacks(root, { demo: { ...PACK, title: 'Renamed' } });
     expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({
       status: 'built',
-      reason: 'the recipe changed',
+      reason: 'recipe-edited',
+      detail: 'packs.demo in llm-docs.json changed',
     });
     expect(await readdir(join(root, 'agent-docs', 'demo', 'guides'))).toEqual(['01-overview.md']);
     expect(await readdir(join(root, 'agent-docs'))).toEqual(['.gitignore', 'demo']);
@@ -293,8 +299,17 @@ describe('syncPacks', () => {
 
     const pruned = await syncPacks(root, undefined, { prune: true });
     expect(pruned.orphans).toEqual([
-      { id: 'keep', status: 'kept', reason: 'it holds guides; move them, then delete the pack' },
-      { id: 'notes', status: 'kept', reason: 'not an llm-docs pack (no manifest.json)' },
+      {
+        id: 'keep',
+        status: 'kept',
+        reason: 'it holds guides; move its guides/ elsewhere, then run sync --prune again',
+      },
+      {
+        id: 'notes',
+        status: 'kept',
+        reason:
+          'not an llm-docs pack (no manifest.json), so it is never deleted; remove it by hand',
+      },
       { id: 'old', status: 'pruned' },
     ]);
     expect((await readdir(join(root, 'agent-docs'))).sort()).toEqual([
@@ -714,8 +729,8 @@ describe('verifyPacks', () => {
     await rm(join(root, 'agent-docs', 'demo', 'pages', 'guide', 'api.md'));
 
     expect(problems(await verifyPacks(root, undefined))).toEqual([
-      'demo outputs fail: pages/guide/api.md listed output is missing',
-      'demo outputs fail: pages/index.md content differs from the manifest (hash mismatch)',
+      "demo outputs fail: pages/guide/api.md listed output is missing; run 'llm-docs sync demo' to rebuild the pack",
+      "demo outputs fail: pages/index.md content differs from the manifest (hash mismatch); pack files are tool-written, so run 'llm-docs sync demo' to restore it",
       'demo links fail: index.md link target is not a file in the pack: pages/guide/api.md',
     ]);
   });
@@ -726,7 +741,7 @@ describe('verifyPacks', () => {
     const report = await verifyPacks(root, undefined);
 
     expect(problems(report)).toEqual([
-      'demo unlisted-files fail: pages/extra.md file is not listed in the manifest',
+      "demo unlisted-files fail: pages/extra.md file is not listed in the manifest; move it into guides/ if it is yours, or run 'llm-docs sync demo' to remove it",
     ]);
     expect(
       report.results.find((result) => result.check === 'unlisted-files')?.findings
@@ -763,12 +778,12 @@ describe('verifyPacks', () => {
     const root = await builtProject();
     await setPacks(root, { demo: { ...PACK, version: '2.0.0' } });
     expect(problems(await verifyPacks(root, undefined))).toEqual([
-      "demo recipe fail:  the recipe in llm-docs.json changed since the last sync; run 'llm-docs sync demo'",
+      "demo recipe fail:  packs.demo in llm-docs.json changed since the last sync; run 'llm-docs sync demo'",
     ]);
 
     await setPacks(root, {});
     const orphan =
-      'demo recipe warn:  orphan pack: llm-docs.json has no pack "demo" (remove it with \'llm-docs sync --prune\')';
+      'demo recipe warn:  orphan pack: llm-docs.json has no pack "demo"; delete it with \'llm-docs sync --prune\', or add packs.demo back to llm-docs.json';
     // The block still lists the pack the config dropped until the next sync.
     expect(problems(await verifyPacks(root, undefined))).toEqual([
       "project agent-block fail: AGENTS.md the llm-docs block differs from what sync would write; run 'llm-docs sync'",
@@ -836,7 +851,7 @@ describe('verifyPacks', () => {
       'beta',
     ]);
     expect(problems(report)).toContain(
-      'beta manifest-schema fail: manifest.json manifest.json belongs to pack "mid", not "beta"'
+      `beta manifest-schema fail: manifest.json manifest.json belongs to pack "mid", not "beta"; llm-docs.json has no pack "beta", so delete agent-docs/beta/ or add it back to llm-docs.json`
     );
   });
 
@@ -865,7 +880,7 @@ describe('verifyPacks', () => {
 
     await rm(join(root, 'package-lock.json'));
     expect((await lockfile())?.findings[0]?.message).toBe(
-      'no lockfile resolves npm:demo (searched: none found)'
+      'no lockfile resolves npm:demo (searched: none found); install the dependency, or remove packs.demo.dependency from llm-docs.json'
     );
   });
 
@@ -883,7 +898,8 @@ describe('verifyPacks', () => {
     await writeFile(join(root, 'package-lock.json'), npmLockfile('demo', '2.1.0'));
     expect((await syncPacks(root, undefined, { check: true })).packs[0]).toMatchObject({
       status: 'would-build',
-      reason: 'the recipe changed',
+      reason: 'lockfile-moved',
+      detail: 'the lockfile now resolves npm:demo 2.1.0, the pack is 2.0.0',
     });
     expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
     expect((await readPackManifest(join(root, 'agent-docs', 'demo'))).pack.version).toBe('2.1.0');
@@ -893,7 +909,7 @@ describe('verifyPacks', () => {
       status: 'failed',
       exitCode: 2,
       error:
-        'Pack "demo": no lockfile resolves npm:demo (lockfiles searched: none found); set "version" explicitly.',
+        'Pack "demo": no lockfile resolves npm:demo (lockfiles searched: none found); set packs.demo.version in llm-docs.json, or install the dependency so a lockfile records it.',
     });
   });
 
@@ -901,7 +917,7 @@ describe('verifyPacks', () => {
     const root = await makeProject({ demo: PACK }, DOCS);
     const report = await verifyPacks(root, undefined);
     expect(problems(report)).toContain(
-      "demo manifest-schema fail: manifest.json manifest.json is missing; run 'llm-docs sync demo'"
+      "demo manifest-schema fail: manifest.json manifest.json is missing; run 'llm-docs sync demo' to rebuild the pack"
     );
     expect(report.results.filter((result) => result.status === 'skipped')).toHaveLength(8);
 

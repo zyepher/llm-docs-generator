@@ -18,6 +18,7 @@ import { dirname, join, posix } from 'node:path';
 import { syncAgentBlocks, type AgentBlockOutcome } from '../agent/block.js';
 import {
   ConfigError,
+  onlyLockfileVersionMoved,
   loadProjectConfig,
   resolvePackRecipe,
   type DependencyVersionResolver,
@@ -82,11 +83,24 @@ const INDEX_FILE = 'index.md';
 
 export type PackSyncStatus = 'unchanged' | 'built' | 'would-build' | 'failed';
 
+/** Why a pack is (or would be) rebuilt; `capabilities` describes each code. */
+export type StaleReason =
+  | 'not-built'
+  | 'manifest-unreadable'
+  | 'recipe-edited'
+  | 'lockfile-moved'
+  | 'files-differ'
+  | 'sources-changed'
+  | 'upstream-changed'
+  | 'converter-changed';
+
 export interface PackSyncResult {
   id: string;
   status: PackSyncStatus;
   /** Why the pack was (or would be) rebuilt. */
-  reason?: string;
+  reason?: StaleReason;
+  /** The reason in words, with the versions or files involved. */
+  detail?: string;
   /** The failure, one line. */
   error?: string;
   /** 2 for a config or recipe problem, 3 for a runtime failure. */
@@ -569,18 +583,34 @@ async function staleReason(
   resolved: ResolvedPack,
   existing: ExistingPack,
   local: readonly (SourceAcquisition | null)[]
-): Promise<string | undefined> {
+): Promise<{ reason: StaleReason; detail: string } | undefined> {
   if (existing.kind === 'absent') {
-    return 'not built yet';
+    return { reason: 'not-built', detail: 'not built yet' };
   }
   if (existing.kind === 'corrupt') {
-    return `the manifest is unreadable (${existing.message})`;
+    return {
+      reason: 'manifest-unreadable',
+      detail: `the manifest is unreadable: ${existing.message}`,
+    };
   }
 
   const { manifest } = existing;
 
   if (manifest.recipeHash !== resolved.recipeHash) {
-    return 'the recipe changed';
+    const dependency = resolved.recipe.dependency;
+    if (
+      dependency !== null &&
+      (await onlyLockfileVersionMoved(context.loaded.config, resolved.id, {
+        version: manifest.pack.version,
+        recipeHash: manifest.recipeHash,
+      }))
+    ) {
+      return {
+        reason: 'lockfile-moved',
+        detail: `the lockfile now resolves ${dependency.ecosystem}:${dependency.name} ${resolved.recipe.version}, the pack is ${manifest.pack.version}`,
+      };
+    }
+    return { reason: 'recipe-edited', detail: `packs.${resolved.id} in llm-docs.json changed` };
   }
 
   const packDir = join(context.loaded.packsDir, resolved.id);
@@ -588,8 +618,18 @@ async function staleReason(
     checks: ['outputs', 'unlisted-files'],
   });
 
+  const differing = integrity.flatMap((entry) =>
+    entry.findings.flatMap((finding) =>
+      finding.status === 'fail' && finding.path !== undefined ? [finding.path] : []
+    )
+  );
   if (integrity.some((entry) => entry.status === 'fail')) {
-    return 'the pack files differ from the manifest';
+    const shown = differing.slice(0, 3).join(', ');
+    const more = differing.length > 3 ? ` and ${differing.length - 3} more` : '';
+    return {
+      reason: 'files-differ',
+      detail: `the pack files differ from the manifest${shown === '' ? '' : `: ${shown}${more}`}`,
+    };
   }
 
   const localIndexes = new Set(
@@ -599,7 +639,7 @@ async function staleReason(
   if (localIndexes.size > 0) {
     const selection = await selectPackFiles(resolved.recipe, withPlaceholders(local));
     if (!sameSourceSet(manifestSourceEntries(selection), manifest.sources, localIndexes)) {
-      return 'source files changed';
+      return { reason: 'sources-changed', detail: 'local source files changed' };
     }
   }
 
@@ -969,9 +1009,9 @@ async function buildPack(
 
     const statusWarning =
       manifest.license.status === 'unknown'
-        ? 'License unknown: set "license" in the recipe once you know the terms.'
+        ? `License unknown: no license file was found in the sources; set packs.${resolved.id}.license in llm-docs.json (an SPDX id, or "proprietary") once you know the terms.`
         : manifest.license.status === 'proprietary'
-          ? 'License is proprietary: check the terms before sharing this pack.'
+          ? 'License is proprietary: check the terms before committing or sharing this pack.'
           : undefined;
 
     return [
@@ -1038,7 +1078,9 @@ async function refreshOnePack(
     report.converters.length > 0 &&
     report.refs.length === 0 &&
     report.files.every((file) => file.status === 'unchanged');
-  const reason = onlyConverters ? 'a converter version changed' : 'upstream changed';
+  const stale: { reason: StaleReason; detail: string } = onlyConverters
+    ? { reason: 'converter-changed', detail: 'a converter version changed' }
+    : { reason: 'upstream-changed', detail: 'upstream changed' };
 
   const packDir = join(context.loaded.packsDir, id);
 
@@ -1047,7 +1089,7 @@ async function refreshOnePack(
     return {
       id,
       status: 'would-build',
-      reason,
+      ...stale,
       warnings: [],
       refresh: report,
       ...(review === undefined ? {} : { guideReview: review }),
@@ -1059,7 +1101,7 @@ async function refreshOnePack(
   return {
     id,
     status: 'built',
-    reason,
+    ...stale,
     warnings,
     refresh: report,
     ...(review === undefined ? {} : { guideReview: review }),
@@ -1087,19 +1129,19 @@ async function syncOnePack(
       const source = resolved.recipe.sources[index];
       return source !== undefined && !sourceUsesNetwork(source);
     });
-    const reason = await staleReason(context, resolved, existing, local);
+    const stale = await staleReason(context, resolved, existing, local);
 
-    if (reason === undefined) {
+    if (stale === undefined) {
       return { id, status: 'unchanged', warnings: [] };
     }
     if (context.options.check === true) {
-      return { id, status: 'would-build', reason, warnings: [] };
+      return { id, status: 'would-build', ...stale, warnings: [] };
     }
 
     const needsNetwork = local.some((acquisition) => acquisition === null);
     if (needsNetwork && context.options.offline === true) {
       throw new ConfigError(
-        `Pack "${id}" needs to acquire network sources (${reason}), and --offline is set.`
+        `Pack "${id}" needs a rebuild that fetches its network sources (${stale.detail}), and --offline is set; run 'llm-docs sync ${id}' without --offline.`
       );
     }
 
@@ -1121,7 +1163,7 @@ async function syncOnePack(
     return {
       id,
       status: 'built',
-      reason,
+      ...stale,
       warnings,
       ...(review === undefined ? {} : { guideReview: review }),
     };
@@ -1163,7 +1205,12 @@ async function handleOrphans(
     }
 
     if (!(await exists(join(dir, MANIFEST_FILE_NAME)))) {
-      results.push({ id, status: 'kept', reason: 'not an llm-docs pack (no manifest.json)' });
+      results.push({
+        id,
+        status: 'kept',
+        reason:
+          'not an llm-docs pack (no manifest.json), so it is never deleted; remove it by hand',
+      });
       continue;
     }
 
@@ -1171,7 +1218,7 @@ async function handleOrphans(
       results.push({
         id,
         status: 'kept',
-        reason: 'it holds guides; move them, then delete the pack',
+        reason: 'it holds guides; move its guides/ elsewhere, then run sync --prune again',
       });
       continue;
     }
@@ -1206,7 +1253,9 @@ export async function syncPacks(
 
   for (const id of selected) {
     if (!Object.hasOwn(loaded.config.packs, id)) {
-      throw new ConfigError(`No pack "${id}" in llm-docs.json; add it with 'llm-docs add ${id}'.`);
+      throw new ConfigError(
+        `No pack "${id}" in llm-docs.json; add it with 'llm-docs add ${id}', or check the id against the keys of "packs".`
+      );
     }
   }
 

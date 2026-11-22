@@ -251,7 +251,7 @@ export async function readPackManifest(packDir: string): Promise<PackManifest> {
 
   if (isRecord(raw) && raw.schemaVersion !== 3) {
     throw new ManifestError(
-      `${MANIFEST_FILE_NAME} has schemaVersion ${JSON.stringify(raw.schemaVersion ?? null)}, not 3; convert a v2 pack with 'llm-docs migrate <pack-dir>'.`,
+      `${MANIFEST_FILE_NAME} has schemaVersion ${JSON.stringify(raw.schemaVersion ?? null)}, not 3; convert a v2 pack with 'llm-docs migrate <v2-pack-dir>'.`,
       'other-version'
     );
   }
