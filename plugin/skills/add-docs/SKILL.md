@@ -7,7 +7,7 @@ description: Pin version-matched reference docs for a library into this reposito
 
 You are the planner. You choose the source, the version binding, and the page filter. The `llm-docs` CLI fetches exactly what the recipe names, converts it to one Markdown page per upstream page, and records where every byte came from. It never searches, crawls, or guesses. A pack is only as right as the evidence you base the recipe on.
 
-Run the CLI as `llm-docs`. If that command is not found, run it as `npx llm-docs`. Run `llm-docs <command> --help` before you use a flag this skill does not show.
+Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/../../bin/llm-docs.mjs` in its place, where `<skill-dir>` is the absolute path of the directory that holds this `SKILL.md` (the plugin ships the whole CLI as that one file). Never fetch the CLI from a package registry: it is not published there. Run `llm-docs <command> --help` before you use a flag this skill does not show.
 
 ## 1. Bind the pack to the dependency
 

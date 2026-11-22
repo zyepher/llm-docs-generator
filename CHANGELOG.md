@@ -8,7 +8,7 @@ v3 turns a one-shot docs converter into a project tool: recipes in `llm-docs.jso
 
 ### Breaking changes
 
-- The npm package is now `llm-docs` (it was `llm-docs-generator`). The command is still `llm-docs`.
+- The package is renamed `llm-docs` (it was `llm-docs-generator`). The command is still `llm-docs`. 3.0.0 is released on GitHub only: the plugin bundles the CLI, and each GitHub Release carries the same single file as `llm-docs.mjs` for CI. The npm package is not published yet.
 - Node.js 22.19 or newer is required (v2 needed Node 20).
 - Packs are declared as recipes in `llm-docs.json` and built into a packs directory (`agent-docs/` by default) instead of being generated per invocation into an `--output-dir`.
 - A pack holds one Markdown file per upstream page under `pages/`, plus a generated `index.md`. The single combined file is now opt-in with `layout.combined`, and is written as `<id>.full.md`.
@@ -65,7 +65,7 @@ Evaluation:
 
 ### Migrating from v2
 
-1. Install v3 and run `llm-docs init` in the project.
+1. Install the v3 plugin, or download `llm-docs.mjs` from the v3.0.0 GitHub Release and run it with `node`, then run `llm-docs init` in the project.
 2. For each v2 pack, run `llm-docs migrate <v2-pack-dir> --version <version>`. v2 manifests record no version, so you supply the one the docs describe. `--id` names the pack; the default is the directory name.
 3. Run `llm-docs sync <id>` to build the v3 pack, then `llm-docs verify`.
 4. When the v3 pack verifies, delete the v2 pack yourself. `migrate` never touches it.

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,7 +12,7 @@ import {
   type ContentBlock,
   type DocNode,
 } from '../../src/core/models.js';
-import { HtmlFormatParser, parseHtmlFile } from '../../src/parsers/html/index.js';
+import { parseHtmlFile } from '../../src/parsers/html/parser.js';
 
 const tempDirs: string[] = [];
 
@@ -22,11 +22,14 @@ async function createTempDir(): Promise<string> {
   return dir;
 }
 
-function collectContentBlocks(node: DocNode): ContentBlock[] {
+type ParsedTree = Pick<DocNode, 'title' | 'content' | 'children'> &
+  Partial<Pick<DocNode, 'description'>>;
+
+function collectContentBlocks(node: ParsedTree): ContentBlock[] {
   return [...node.content, ...node.children.flatMap((child) => collectContentBlocks(child))];
 }
 
-function collectText(node: DocNode): string {
+function collectText(node: ParsedTree): string {
   const ownContent = node.content.map((block) => block.content).join('\n');
   const childContent = node.children.map((child) => collectText(child)).join('\n');
   return [node.title, node.description, ownContent, childContent].filter(Boolean).join('\n');
@@ -37,7 +40,7 @@ afterEach(async () => {
 });
 
 describe('static HTML parser foundation', () => {
-  it('detects .html/.htm files', async () => {
+  it('accepts .html and .htm files and rejects other extensions', async () => {
     const dir = await createTempDir();
     const htmlPath = join(dir, 'index.html');
     const htmPath = join(dir, 'legacy.htm');
@@ -47,11 +50,9 @@ describe('static HTML parser foundation', () => {
     await writeFile(htmPath, '<!doctype html><h1>Legacy</h1>', 'utf-8');
     await writeFile(textPath, '<!doctype html><h1>Text</h1>', 'utf-8');
 
-    const parser = new HtmlFormatParser();
-
-    expect(await parser.detect(htmlPath)).toBe(true);
-    expect(await parser.detect(htmPath)).toBe(true);
-    expect(await parser.detect(textPath)).toBe(false);
+    expect((await parseHtmlFile(htmlPath)).title).toBe('Index');
+    expect((await parseHtmlFile(htmPath)).title).toBe('Legacy');
+    await expect(parseHtmlFile(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
   });
 
   it('parses title/H1 fallback, headings, paragraphs, and lists into DocNode IR', async () => {
@@ -79,13 +80,10 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const parsedText = collectText(root);
 
-    expect(root).toMatchObject({
-      type: DocNodeType.SECTION,
-      title: 'Getting Started',
-    });
+    expect(root.title).toBe('Getting Started');
     expect(root.metadata.get('format')).toBe('html');
     expect(root.metadata.get('sourcePath')).toBe(sourcePath);
     expect(root.metadata.get('parser')).toBe('html-static-subset');
@@ -148,7 +146,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const blocks = collectContentBlocks(root);
     const codeBlocks = blocks.filter((block) => block.type === ContentBlockType.CODE);
     const dataBlocks = blocks.filter((block) => block.type === ContentBlockType.DATA);
@@ -185,7 +183,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const codeBlocks = collectContentBlocks(root).filter(
       (block) => block.type === ContentBlockType.CODE
     );
@@ -214,7 +212,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const parsedText = collectText(root);
     const warnings = root.metadata.get('warnings');
     const strippedElementCounts = root.metadata.get('strippedElementCounts');
@@ -244,7 +242,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const parsedText = collectText(root);
 
     expect(parsedText).toContain(
@@ -273,7 +271,7 @@ describe('static HTML parser foundation', () => {
         'utf-8'
       );
 
-      const root = await new HtmlFormatParser().parse(sourcePath);
+      const root = await parseHtmlFile(sourcePath);
       const parsedText = collectText(root);
       const warnings = root.metadata.get('warnings');
       const strippedElementCounts = root.metadata.get('strippedElementCounts') as Record<
@@ -305,7 +303,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const parsedText = collectText(root);
 
     expect(parsedText).toContain('Read [linked page](./linked.html).');
@@ -315,67 +313,19 @@ describe('static HTML parser foundation', () => {
     expect(root.metadata.get('links')).toEqual([{ text: 'linked page', href: './linked.html' }]);
   });
 
-  it.skipIf(!canCreateSymlinks)(
-    'detects and parses nested directories deterministically without following symlinks',
-    async () => {
-      const dir = await createTempDir();
-      const sourceDir = join(dir, 'docs');
-      const nestedDir = join(sourceDir, 'api');
-      const symlinkTarget = join(dir, 'external');
+  it.skipIf(!canCreateSymlinks)('rejects non-HTML files and root symlinks', async () => {
+    const dir = await createTempDir();
+    const textPath = join(dir, 'guide.txt');
+    const targetPath = join(dir, 'target.html');
+    const symlinkPath = join(dir, 'linked.html');
 
-      await mkdir(nestedDir, { recursive: true });
-      await mkdir(symlinkTarget, { recursive: true });
-      await writeFile(join(sourceDir, 'zoo.html'), '<title>Zoo</title><p>Zed.</p>', 'utf-8');
-      await writeFile(join(nestedDir, 'api.htm'), '<title>API</title><p>Reference.</p>', 'utf-8');
-      await writeFile(join(sourceDir, 'notes.txt'), '<title>Notes</title>', 'utf-8');
-      await writeFile(join(symlinkTarget, 'hidden.html'), '<title>Hidden</title>', 'utf-8');
-      await symlink(symlinkTarget, join(sourceDir, 'linked-docs'));
-      await symlink(join(symlinkTarget, 'hidden.html'), join(sourceDir, 'linked-file.html'));
+    await writeFile(textPath, '<!doctype html><h1>Guide</h1>', 'utf-8');
+    await writeFile(targetPath, '<title>Linked</title>', 'utf-8');
+    await symlink(targetPath, symlinkPath);
 
-      const parser = new HtmlFormatParser();
-
-      expect(await parser.detect(sourceDir)).toBe(true);
-
-      const root = await parser.parse(sourceDir);
-      const sourcePaths = root.metadata.get('sourcePaths');
-
-      expect(root).toMatchObject({
-        type: DocNodeType.ROOT,
-        title: 'docs',
-      });
-      expect(root.metadata.get('format')).toBe('html');
-      expect(root.metadata.get('sourcePath')).toBe(sourceDir);
-      expect(root.metadata.get('sourceKind')).toBe('rendered-html-fallback');
-      expect(root.metadata.get('count')).toBe(2);
-      expect(sourcePaths).toEqual([join(nestedDir, 'api.htm'), join(sourceDir, 'zoo.html')]);
-      expect(root.children.map((child) => child.title)).toEqual(['API', 'Zoo']);
-      expect(collectText(root)).not.toContain('Hidden');
-    }
-  );
-
-  it.skipIf(!canCreateSymlinks)(
-    'rejects non-HTML files and root symlinks through the facade and helper',
-    async () => {
-      const dir = await createTempDir();
-      const textPath = join(dir, 'guide.txt');
-      const targetPath = join(dir, 'target.html');
-      const symlinkPath = join(dir, 'linked.html');
-
-      await writeFile(textPath, '<!doctype html><h1>Guide</h1>', 'utf-8');
-      await writeFile(targetPath, '<title>Linked</title>', 'utf-8');
-      await symlink(targetPath, symlinkPath);
-
-      const parser = new HtmlFormatParser();
-
-      expect(await parser.detect(textPath)).toBe(false);
-      await expect(parser.parse(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
-      await expect(parseHtmlFile(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
-
-      expect(await parser.detect(symlinkPath)).toBe(false);
-      await expect(parser.parse(symlinkPath)).rejects.toThrow(/Invalid HTML source path/);
-      await expect(parseHtmlFile(symlinkPath)).rejects.toThrow(/Invalid HTML file path/);
-    }
-  );
+    await expect(parseHtmlFile(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
+    await expect(parseHtmlFile(symlinkPath)).rejects.toThrow(/Invalid HTML file path/);
+  });
 
   it('preserves nested list items with indentation (regression: nested lists dropped)', async () => {
     const dir = await createTempDir();
@@ -396,7 +346,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('Top item');
@@ -421,7 +371,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const tableBlocks = collectContentBlocks(root).filter(
       (block) => block.type === ContentBlockType.DATA && block.annotations?.get('type') === 'table'
     );
@@ -452,7 +402,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('Lead-in prose before the list.');
@@ -511,7 +461,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('Before the comment.');
@@ -540,7 +490,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('Kept prose.');
@@ -562,7 +512,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('Before the script.');
@@ -583,7 +533,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('See A -> B for the flow.');
@@ -603,7 +553,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     // Inline <code> is backtick-wrapped, still with no injected spaces.
@@ -630,7 +580,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
 
     expect(root.title).toBe('Manual');
     expect(root.children.map((child) => child.title)).toEqual(['Chapter One', 'Chapter Two']);
@@ -660,7 +610,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
 
     expect(root.title).toBe('Widgets');
     // First h1 equals the extracted title and is not re-nested; the second one
@@ -686,7 +636,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
 
     expect(root.title).toBe('Getting Started');
     expect(root.content.map((block) => block.content)).toContain('Intro prose.');
@@ -713,7 +663,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('Real content prose.');
@@ -739,7 +689,7 @@ describe('static HTML parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new HtmlFormatParser().parse(sourcePath);
+    const root = await parseHtmlFile(sourcePath);
     const text = collectText(root);
 
     expect(text).toContain('Call `fetch()` with a required url argument.');

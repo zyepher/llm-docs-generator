@@ -18,7 +18,7 @@ import {
   type DocNode,
 } from '../../core/models.js';
 import { slugifyText } from '../../utils/slug.js';
-import { ParserError } from '../base.js';
+import { ParserError } from '../parser-error.js';
 
 const STRIPPED_ELEMENTS = ['script', 'style', 'template'] as const;
 const VOID_ELEMENTS = new Set([
@@ -101,12 +101,12 @@ export interface HtmlDocument {
   metadata: Map<string, unknown>;
 }
 
-export interface HtmlParserWarning {
+interface HtmlParserWarning {
   message: string;
   tag?: string;
 }
 
-export interface HtmlLink {
+interface HtmlLink {
   text: string;
   href: string;
 }
@@ -1101,7 +1101,7 @@ function basenameWithoutHtmlExtension(path: string): string {
   return basename(path).replace(/\.html?$/i, '') || 'HTML Document';
 }
 
-export function getParserDetails(): Record<string, string | boolean> {
+function getParserDetails(): Record<string, string | boolean> {
   return {
     subset:
       'document title, H1-H6 section hierarchy (a title-matching H1 is not re-nested), paragraphs, simple lists, pre/code blocks, and simple tables; nav/header/footer/aside chrome is excluded',

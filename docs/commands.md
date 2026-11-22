@@ -290,3 +290,18 @@ These v2 commands exit `2` with a one-line pointer to the replacement:
 | `source-truth`, `verify-docs` | None. Source-truth mode is gone; agents read the code directly. |
 | `plugins` | A `command` converter (`convert.tool: "command"`). |
 | `agent` | The `llm-docs` plugin. |
+
+## Running in CI
+
+A CI runner has no plugin, and the npm package is not published yet. Each GitHub Release carries the whole CLI as one file, `llm-docs.mjs`, with its SHA-256 in `llm-docs.mjs.sha256`. A job downloads it for a pinned version and runs it with Node 22.19 or newer:
+
+```sh
+curl -fsSLO https://github.com/Zyepher/llm-docs-generator/releases/download/v3.0.0/llm-docs.mjs
+echo "<sha256 from llm-docs.mjs.sha256>  llm-docs.mjs" | sha256sum -c -
+node llm-docs.mjs sync --check
+node llm-docs.mjs verify
+```
+
+Pin the version in the URL instead of fetching the latest release, so a new release never changes the gate without a commit. Copy the hash from the release's `llm-docs.mjs.sha256` into the workflow once, when you pick the version, so the job refuses a file that differs from the one you reviewed. On macOS runners, use `shasum -a 256 -c -` in place of `sha256sum -c -`.
+
+Run `node llm-docs.mjs refresh --check` on a schedule instead of on every commit, because it fetches upstream.

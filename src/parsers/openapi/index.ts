@@ -17,7 +17,7 @@ import {
   type ContentBlock,
   type DocNode,
 } from '../../core/models.js';
-import { BaseParser, FormatType, ParserError } from '../base.js';
+import { ParserError } from '../parser-error.js';
 import { errorMessage, isRecord } from '../../utils/guards.js';
 import { slugifyText } from '../../utils/slug.js';
 import { loadYaml } from '../../utils/yaml.js';
@@ -44,7 +44,7 @@ type ApiSourceKind = 'openapi' | 'swagger';
 type ApiFileFormat = 'json' | 'yaml';
 type ApiDocument = Record<string, unknown>;
 
-export interface ApiVersionInfo {
+interface ApiVersionInfo {
   sourceKind: ApiSourceKind;
   specVersion: string;
 }
@@ -73,190 +73,158 @@ interface SummaryContext {
 }
 
 /**
- * OpenAPI / Swagger format parser.
+ * Parse an explicit local OpenAPI / Swagger file into DocNode IR.
  */
-export class OpenApiFormatParser extends BaseParser {
-  readonly name = 'OpenAPI / Swagger Parser';
-  readonly format = FormatType.OPENAPI;
+export async function parseOpenApiFile(sourcePath: string): Promise<DocNode> {
+  const document = await loadDocument(sourcePath);
+  const versionInfo = getVersionInfo(document);
+  const paths = document.paths;
 
-  /**
-   * Detect OpenAPI / Swagger documents by content, not extension alone.
-   *
-   * Performance: O(n) JSON/YAML parse after an O(1) extension check.
-   */
-  async detect(sourcePath: string): Promise<boolean> {
-    const ext = this.getFileExtension(sourcePath);
-    if (ext !== 'json' && ext !== 'yaml' && ext !== 'yml') {
-      return false;
-    }
-
-    if (!(await this.fileExists(sourcePath))) {
-      return false;
-    }
-
-    try {
-      const document = await this.loadDocument(sourcePath);
-      // Numbers are accepted because unquoted YAML versions (`openapi: 3.0`,
-      // `swagger: 2.0`) parse as numbers.
-      return (
-        typeof document.openapi === 'string' ||
-        typeof document.openapi === 'number' ||
-        typeof document.swagger === 'string' ||
-        typeof document.swagger === 'number'
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Parse an explicit local OpenAPI / Swagger file into DocNode IR.
-   */
-  async parse(sourcePath: string): Promise<DocNode> {
-    const document = await this.loadDocument(sourcePath);
-    const versionInfo = this.getVersionInfo(document);
-    const paths = document.paths;
-
-    if (!isRecord(paths)) {
-      throw new ParserError('OpenAPI / Swagger document must contain a paths object', this.name);
-    }
-
-    try {
-      return this.convertDocument(document, paths, versionInfo, sourcePath);
-    } catch (error) {
-      if (error instanceof ParserError) {
-        throw error;
-      }
-      // Surface unexpected conversion failures (e.g. a RangeError from deeply
-      // nested schemas exhausting the call stack) as an honest ParserError
-      // instead of leaking a raw runtime error.
-      const message = errorMessage(error);
-      throw new ParserError(`Failed to convert OpenAPI / Swagger document: ${message}`, this.name);
-    }
-  }
-
-  private async loadDocument(sourcePath: string): Promise<ApiDocument> {
-    const fileFormat = getOpenApiFileFormat(sourcePath, this.name);
-    const content = await readFile(sourcePath, 'utf-8');
-
-    let parsed: unknown;
-
-    try {
-      parsed = fileFormat === 'json' ? JSON.parse(content) : loadYaml(content);
-    } catch (error) {
-      const message = errorMessage(error);
-      throw new ParserError(`Failed to parse OpenAPI / Swagger document: ${message}`, this.name);
-    }
-
-    if (!isRecord(parsed) || Array.isArray(parsed)) {
-      throw new ParserError('OpenAPI / Swagger document root must be an object', this.name);
-    }
-
-    return parsed;
-  }
-
-  private getVersionInfo(document: ApiDocument): ApiVersionInfo {
-    const openapi = document.openapi;
-    if (typeof openapi === 'string' || typeof openapi === 'number') {
-      // js-yaml parses unquoted `openapi: 3.0` as the number 3 and
-      // `openapi: 3.1` as the number 3.1; restore the intended version string.
-      let openapiVersion: string;
-      if (typeof openapi === 'number') {
-        openapiVersion = Number.isInteger(openapi) ? `${openapi}.0.0` : String(openapi);
-      } else {
-        openapiVersion = openapi.trim();
-      }
-      if (/^3\.\d+(?:\.\d+)?(?:[-+].*)?$/.test(openapiVersion)) {
-        return { sourceKind: 'openapi', specVersion: openapiVersion };
-      }
-
-      throw new ParserError(
-        `Unsupported OpenAPI version "${openapiVersion}". Supported versions: OpenAPI 3.x and Swagger 2.0`,
-        this.name
-      );
-    }
-
-    const swagger = document.swagger;
-    if (typeof swagger === 'string' || typeof swagger === 'number') {
-      // js-yaml parses unquoted `swagger: 2.0` as the number 2.
-      const swaggerVersion = swagger === 2 ? '2.0' : String(swagger).trim();
-      if (swaggerVersion === '2.0') {
-        return { sourceKind: 'swagger', specVersion: swaggerVersion };
-      }
-
-      throw new ParserError(
-        `Unsupported Swagger version "${swaggerVersion}". Supported versions: OpenAPI 3.x and Swagger 2.0`,
-        this.name
-      );
-    }
-
+  if (!isRecord(paths)) {
     throw new ParserError(
-      'Unsupported OpenAPI / Swagger document: expected an openapi 3.x or swagger 2.0 version field',
-      this.name
+      'OpenAPI / Swagger document must contain a paths object',
+      'OpenAPI / Swagger Parser'
     );
   }
 
-  private convertDocument(
-    document: ApiDocument,
-    paths: Record<string, unknown>,
-    versionInfo: ApiVersionInfo,
-    sourcePath: string
-  ): DocNode {
-    const info = isRecord(document.info) ? document.info : {};
-    const title = readTrimmedString(info.title) ?? defaultRootTitle(versionInfo.sourceKind);
-    const version = readTrimmedString(info.version);
-    const description = readTrimmedString(info.description) ?? '';
-
-    const metadata = new Map<string, unknown>();
-    metadata.set('format', versionInfo.sourceKind);
-    metadata.set('sourceKind', versionInfo.sourceKind);
-    metadata.set('sourcePath', sourcePath);
-    metadata.set('specVersion', versionInfo.specVersion);
-    if (version !== undefined) {
-      metadata.set('version', version);
+  try {
+    return convertDocument(document, paths, versionInfo, sourcePath);
+  } catch (error) {
+    if (error instanceof ParserError) {
+      throw error;
     }
-    metadata.set('title', title);
-    metadata.set('servers', collectServers(document, versionInfo));
-
-    const root = createDocNode(
-      DocNodeType.ROOT,
-      slugify(title || basenameWithoutExtension(sourcePath)),
-      title,
-      {
-        description,
-        metadata,
-      }
+    // Surface unexpected conversion failures (e.g. a RangeError from deeply
+    // nested schemas exhausting the call stack) as an honest ParserError
+    // instead of leaking a raw runtime error.
+    const message = errorMessage(error);
+    throw new ParserError(
+      `Failed to convert OpenAPI / Swagger document: ${message}`,
+      'OpenAPI / Swagger Parser'
     );
-
-    const tagDescriptions = collectTagDescriptions(document);
-    const omissions: ValueOmissions = { overCap: 0, notRepresentable: 0 };
-    const operations = collectOperationEntries(document, paths, versionInfo, omissions);
-    // The authentication category claims its id first so a real tag named
-    // "Authentication" is disambiguated by the shared uniqueId guard.
-    const usedCategoryIds = new Map<string, number>();
-    const authenticationNode = buildAuthenticationNode(document, versionInfo, usedCategoryIds);
-    const categories = groupOperationsByCategory(
-      operations,
-      tagDescriptions,
-      versionInfo,
-      usedCategoryIds
-    );
-    root.children =
-      authenticationNode !== undefined ? [authenticationNode, ...categories] : categories;
-
-    const omissionWarnings = summarizeValueOmissions(omissions);
-    if (omissionWarnings.length > 0) {
-      metadata.set('warnings', omissionWarnings);
-    }
-
-    return root;
   }
 }
 
-export const openApiParser = new OpenApiFormatParser();
+async function loadDocument(sourcePath: string): Promise<ApiDocument> {
+  const fileFormat = getOpenApiFileFormat(sourcePath, 'OpenAPI / Swagger Parser');
+  const content = await readFile(sourcePath, 'utf-8');
 
-export async function parseOpenApiFile(sourcePath: string): Promise<DocNode> {
-  return await openApiParser.parse(sourcePath);
+  let parsed: unknown;
+
+  try {
+    parsed = fileFormat === 'json' ? JSON.parse(content) : loadYaml(content);
+  } catch (error) {
+    const message = errorMessage(error);
+    throw new ParserError(
+      `Failed to parse OpenAPI / Swagger document: ${message}`,
+      'OpenAPI / Swagger Parser'
+    );
+  }
+
+  if (!isRecord(parsed) || Array.isArray(parsed)) {
+    throw new ParserError(
+      'OpenAPI / Swagger document root must be an object',
+      'OpenAPI / Swagger Parser'
+    );
+  }
+
+  return parsed;
+}
+
+function getVersionInfo(document: ApiDocument): ApiVersionInfo {
+  const openapi = document.openapi;
+  if (typeof openapi === 'string' || typeof openapi === 'number') {
+    // js-yaml parses unquoted `openapi: 3.0` as the number 3 and
+    // `openapi: 3.1` as the number 3.1; restore the intended version string.
+    let openapiVersion: string;
+    if (typeof openapi === 'number') {
+      openapiVersion = Number.isInteger(openapi) ? `${openapi}.0.0` : String(openapi);
+    } else {
+      openapiVersion = openapi.trim();
+    }
+    if (/^3\.\d+(?:\.\d+)?(?:[-+].*)?$/.test(openapiVersion)) {
+      return { sourceKind: 'openapi', specVersion: openapiVersion };
+    }
+
+    throw new ParserError(
+      `Unsupported OpenAPI version "${openapiVersion}". Supported versions: OpenAPI 3.x and Swagger 2.0`,
+      'OpenAPI / Swagger Parser'
+    );
+  }
+
+  const swagger = document.swagger;
+  if (typeof swagger === 'string' || typeof swagger === 'number') {
+    // js-yaml parses unquoted `swagger: 2.0` as the number 2.
+    const swaggerVersion = swagger === 2 ? '2.0' : String(swagger).trim();
+    if (swaggerVersion === '2.0') {
+      return { sourceKind: 'swagger', specVersion: swaggerVersion };
+    }
+
+    throw new ParserError(
+      `Unsupported Swagger version "${swaggerVersion}". Supported versions: OpenAPI 3.x and Swagger 2.0`,
+      'OpenAPI / Swagger Parser'
+    );
+  }
+
+  throw new ParserError(
+    'Unsupported OpenAPI / Swagger document: expected an openapi 3.x or swagger 2.0 version field',
+    'OpenAPI / Swagger Parser'
+  );
+}
+
+function convertDocument(
+  document: ApiDocument,
+  paths: Record<string, unknown>,
+  versionInfo: ApiVersionInfo,
+  sourcePath: string
+): DocNode {
+  const info = isRecord(document.info) ? document.info : {};
+  const title = readTrimmedString(info.title) ?? defaultRootTitle(versionInfo.sourceKind);
+  const version = readTrimmedString(info.version);
+  const description = readTrimmedString(info.description) ?? '';
+
+  const metadata = new Map<string, unknown>();
+  metadata.set('format', versionInfo.sourceKind);
+  metadata.set('sourceKind', versionInfo.sourceKind);
+  metadata.set('sourcePath', sourcePath);
+  metadata.set('specVersion', versionInfo.specVersion);
+  if (version !== undefined) {
+    metadata.set('version', version);
+  }
+  metadata.set('title', title);
+  metadata.set('servers', collectServers(document, versionInfo));
+
+  const root = createDocNode(
+    DocNodeType.ROOT,
+    slugify(title || basenameWithoutExtension(sourcePath)),
+    title,
+    {
+      description,
+      metadata,
+    }
+  );
+
+  const tagDescriptions = collectTagDescriptions(document);
+  const omissions: ValueOmissions = { overCap: 0, notRepresentable: 0 };
+  const operations = collectOperationEntries(document, paths, versionInfo, omissions);
+  // The authentication category claims its id first so a real tag named
+  // "Authentication" is disambiguated by the shared uniqueId guard.
+  const usedCategoryIds = new Map<string, number>();
+  const authenticationNode = buildAuthenticationNode(document, versionInfo, usedCategoryIds);
+  const categories = groupOperationsByCategory(
+    operations,
+    tagDescriptions,
+    versionInfo,
+    usedCategoryIds
+  );
+  root.children =
+    authenticationNode !== undefined ? [authenticationNode, ...categories] : categories;
+
+  const omissionWarnings = summarizeValueOmissions(omissions);
+  if (omissionWarnings.length > 0) {
+    metadata.set('warnings', omissionWarnings);
+  }
+
+  return root;
 }
 
 function collectOperationEntries(

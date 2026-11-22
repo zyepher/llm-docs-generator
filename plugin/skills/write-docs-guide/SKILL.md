@@ -9,7 +9,7 @@ A guide is a short digest that lives next to a pack, in `agent-docs/<id>/guides/
 
 Pages outrank guides. A page is upstream text at a pinned version, and `llm-docs verify` proves it unchanged. A guide is a summary someone wrote. When the two disagree, the page is right and the guide needs fixing.
 
-Run the CLI as `llm-docs`, or as `npx llm-docs` if that command is not found.
+Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/../../bin/llm-docs.mjs` in its place, where `<skill-dir>` is the absolute path of the directory that holds this `SKILL.md` (the plugin ships the whole CLI as that one file). Never fetch the CLI from a package registry: it is not published there.
 
 ## Decide whether a guide earns its place
 

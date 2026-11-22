@@ -8,12 +8,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import packageJson from '../../package.json';
 import {
+  findRegistryInstructions,
   lintPlugin,
   parseCapabilities,
   staleCutoffTableWarning,
   type Capabilities,
 } from '../../scripts/check-plugin.js';
+import { thirdPartyNotices } from '../../scripts/build-plugin.js';
 import { runSessionStartHook } from '../../src/agent/hook.js';
+import { runHookProcess } from '../helpers/hook-process.js';
 import { isRecord } from '../../src/utils/guards.js';
 
 const run = promisify(execFile);
@@ -155,6 +158,83 @@ describe('plugin skills and agent', () => {
   });
 });
 
+describe('the package registry rule', () => {
+  it('passes the committed plugin and docs', async () => {
+    expect(await findRegistryInstructions(repoRoot, ['plugin', 'docs'])).toEqual([]);
+  });
+
+  it('names each line that tells the reader to get the CLI from a registry', async () => {
+    const root = await tempDir({
+      'plugin/skills/x/SKILL.md': [
+        'Run it as `npx llm-docs` if that command is not found.',
+        'Or `npx --yes llm-docs@3 verify`, `pnpm dlx llm-docs sync`, `bunx llm-docs`.',
+        'Never `npx tsx scripts/build.ts` or `npm install llm-docs-generator`.',
+      ].join('\n'),
+      'docs/install.md': [
+        '# Install',
+        'npm install --save-dev llm-docs',
+        'yarn global add llm-docs',
+        '"$schema": "./node_modules/llm-docs/schema/llm-docs.schema.json"',
+        'curl -fsSLO https://github.com/o/r/releases/download/v3.0.0/llm-docs.mjs',
+      ].join('\n'),
+    });
+
+    const problems = await findRegistryInstructions(root, ['plugin', 'docs']);
+    expect(problems.map((problem) => problem.split(': ')[0])).toEqual([
+      'plugin/skills/x/SKILL.md:1',
+      'plugin/skills/x/SKILL.md:2',
+      'docs/install.md:2',
+      'docs/install.md:3',
+      'docs/install.md:4',
+    ]);
+    expect(problems[0]).toMatch(/GitHub Release asset llm-docs\.mjs instead\.$/);
+  });
+});
+
+describe('the third-party notices', () => {
+  const pkg = (name: string, license: string): string =>
+    JSON.stringify({ name, version: '1.0.0', license, repository: `example/${name}` });
+
+  it('carry each bundled package sorted by name, with its license and license text', async () => {
+    const root = await tempDir({
+      'node_modules/zeta/package.json': pkg('zeta', 'MIT'),
+      'node_modules/zeta/LICENSE': 'MIT License\r\n\r\nCopyright (c) Zeta\r\n',
+      'node_modules/@scope/alpha/package.json': pkg('@scope/alpha', 'BSD-3-Clause'),
+      'node_modules/@scope/alpha/LICENSE.md': 'Copyright Alpha. Redistributions must retain this.',
+      'node_modules/@scope/alpha/README.md': 'not a license',
+    });
+
+    const text = (
+      await thirdPartyNotices([
+        join(root, 'node_modules', 'zeta'),
+        join(root, 'node_modules', '@scope', 'alpha'),
+      ])
+    ).toString('utf-8');
+
+    expect(text.indexOf('## @scope/alpha 1.0.0')).toBeLessThan(text.indexOf('## zeta 1.0.0'));
+    expect(text).toContain(
+      '## @scope/alpha 1.0.0\n\nLicense: BSD-3-Clause. Repository: example/@scope/alpha\n\n```text\nCopyright Alpha. Redistributions must retain this.\n```\n'
+    );
+    expect(text).toContain('```text\nMIT License\n\nCopyright (c) Zeta\n```\n');
+    expect(text).not.toContain('not a license');
+  });
+
+  it('refuse a package with a license outside the allowlist or with no license file', async () => {
+    const root = await tempDir({
+      'node_modules/copyleft/package.json': pkg('copyleft', 'GPL-3.0-only'),
+      'node_modules/copyleft/LICENSE': 'GNU GENERAL PUBLIC LICENSE',
+      'node_modules/bare/package.json': pkg('bare', 'MIT'),
+    });
+
+    await expect(thirdPartyNotices([join(root, 'node_modules', 'copyleft')])).rejects.toThrow(
+      /copyleft 1\.0\.0 is bundled into the plugin under license "GPL-3\.0-only"/
+    );
+    await expect(thirdPartyNotices([join(root, 'node_modules', 'bare')])).rejects.toThrow(
+      /bare 1\.0\.0 is bundled into the plugin but ships no LICENSE, COPYING, or NOTICE file/
+    );
+  });
+});
+
 describe('the bundled CLI', () => {
   it('prints the package version', async () => {
     const { stdout } = await run(process.execPath, [bundle, '--version']);
@@ -209,21 +289,14 @@ describe('the bundled CLI', () => {
       model: 'claude-opus-5-5',
     });
 
-    const bundled = await new Promise<string>((resolveOutput, reject) => {
-      const child = execFile(
-        process.execPath,
-        [bundle, 'hook', 'session-start'],
-        { cwd: root, env },
-        (error, stdout, stderr) => {
-          if (error !== null || stderr !== '') {
-            reject(error ?? new Error(stderr));
-            return;
-          }
-          resolveOutput(stdout);
-        }
-      );
-      child.stdin?.end(payload);
+    const bundled = await runHookProcess({
+      cli: bundle,
+      stdin: payload,
+      cwd: root,
+      env,
+      cacheDir: cache,
     });
+    expect(bundled).toMatchObject({ code: 0, stderr: '', log: '' });
 
     let unbundled = '';
     await runSessionStartHook({
@@ -244,7 +317,7 @@ describe('the bundled CLI', () => {
 
     expect(unbundled).toContain('"hookEventName":"SessionStart"');
     expect(unbundled).toContain('hono 4.13.16 (npm, released 2026-09-02, after cutoff)');
-    expect(bundled).toBe(unbundled);
+    expect(bundled.stdout).toBe(unbundled);
   });
 });
 

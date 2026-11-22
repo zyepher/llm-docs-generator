@@ -1,8 +1,10 @@
 name: Release
 
-# Publishes the package to npm with provenance when a v* tag is pushed. The tag
-# must equal "v" plus the package.json version, and the whole CI gate runs
-# first. The only secret it needs is NPM_TOKEN.
+# On a v* tag: checks the tag equals "v" plus the package.json version, runs
+# the whole CI gate (check:plugin proves the committed plugin/bin/llm-docs.mjs
+# is what the build produces), and attaches that bundle, its SHA-256, and the
+# bundled packages' notices to the GitHub Release for the tag. It never publishes to npm: publish-npm.yml does,
+# on manual dispatch only.
 
 on:
   push:
@@ -10,15 +12,16 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   FORCE_COLOR: '0'
   NO_COLOR: '1'
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -28,14 +31,29 @@ jobs:
         with:
           node-version: 22.x
           cache: npm
-          registry-url: https://registry.npmjs.org
 
       - name: Check the tag matches the package version
         run: |
           version="$(node -p "require('./package.json').version")"
           if [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match package.json version $version; tag the release as v$version." >&2
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version; tag the release as v$version."
             exit 1
+          fi
+
+      - name: Take the release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && (/^## / || /^\[[^]]+\]: /) { exit }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no section headed '## [$version]'; add one and tag again."
+            exit 1
+          fi
+          if grep -qF "## [$version] - Unreleased" CHANGELOG.md; then
+            echo "::warning::CHANGELOG.md still marks $version as Unreleased."
           fi
 
       - name: Install dependencies
@@ -59,7 +77,24 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Publish to npm
-        run: npm publish --provenance --access public
+      - name: Prepare the release assets
+        run: |
+          mkdir "$RUNNER_TEMP/assets"
+          cp plugin/bin/llm-docs.mjs "$RUNNER_TEMP/assets/llm-docs.mjs"
+          cp plugin/THIRD_PARTY_NOTICES.md "$RUNNER_TEMP/assets/THIRD_PARTY_NOTICES.md"
+          cd "$RUNNER_TEMP/assets"
+          sha256sum llm-docs.mjs > llm-docs.mjs.sha256
+          cat llm-docs.mjs.sha256
+
+      - name: Create or update the GitHub Release
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          assets=("$RUNNER_TEMP"/assets/*)
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          fi

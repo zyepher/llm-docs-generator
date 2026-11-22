@@ -13,12 +13,14 @@
  *    `verify` runs.
  * 4. `claude plugin validate --strict` passes for the plugin and the
  *    marketplace, when the `claude` CLI is on PATH (CI does not have it).
+ * 5. No file under plugin/ or docs/ tells anyone to get the CLI from a
+ *    package registry (see REGISTRY_INSTRUCTIONS).
  */
 
 import { execFile } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -37,6 +39,21 @@ const AGENT_KEYS = new Set(['name', 'description']);
 const DESCRIPTION_MAX_CHARS = 1024;
 const PROGRAM_FLAGS = ['--help', '--version'];
 const CUTOFF_REVIEW_DAYS = 90;
+
+/**
+ * `llm-docs` is not published to npm and nobody has claimed the name there,
+ * so any instruction to fetch it from a registry would make agents and CI
+ * download and run whatever a stranger publishes under that name. When this
+ * repository publishes the package, delete the rule (these two constants,
+ * findRegistryInstructions, its call in main(), and its test in
+ * tests/unit/plugin.test.ts), then document the registry install.
+ */
+const REGISTRY_INSTRUCTIONS = [
+  /\b(?:npx|bunx|pnpx|(?:pnpm|yarn)\s+dlx|npm\s+exec)(?:\s+-[\w-]+)*\s+llm-docs(?![\w-])/,
+  /\b(?:(?:npm|pnpm|bun)\s+(?:install|i|add)|yarn\s+(?:global\s+)?add)(?:\s+-[\w-]+)*\s+llm-docs(?![\w-])/,
+  /node_modules\/llm-docs\//,
+];
+const REGISTRY_SCANNED_DIRS = ['plugin', 'docs'];
 
 export interface Capabilities {
   commands: ReadonlyArray<{ name: string; flags: readonly string[] }>;
@@ -293,6 +310,34 @@ export async function lintPlugin(pluginDir: string, capabilities: Capabilities):
   return problems;
 }
 
+/** Each line of a file under `dirs` (relative to `root`) that tells the reader to get the CLI from a package registry. */
+export async function findRegistryInstructions(
+  root: string,
+  dirs: readonly string[]
+): Promise<string[]> {
+  const problems: string[] = [];
+
+  for (const dir of dirs) {
+    const entries = await readdir(join(root, dir), { recursive: true, withFileTypes: true });
+    const files = entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .sort();
+
+    for (const file of files) {
+      const where = relative(root, file).split(sep).join('/');
+      (await readFile(file, 'utf-8')).split(/\r?\n/).forEach((line, index) => {
+        if (REGISTRY_INSTRUCTIONS.some((pattern) => pattern.test(line))) {
+          problems.push(
+            `${where}:${index + 1}: tells the reader to get llm-docs from a package registry, where it is not published and the name is not ours; point to the plugin's bin/llm-docs.mjs or the GitHub Release asset llm-docs.mjs instead.`
+          );
+        }
+      });
+    }
+  }
+  return problems;
+}
+
 /**
  * A reminder, never a failure, when the shipped model cutoff table has not
  * been reviewed for CUTOFF_REVIEW_DAYS: vendors release models every few
@@ -355,6 +400,7 @@ async function main(): Promise<void> {
     const { stdout } = await run(process.execPath, [bundle, 'capabilities', '--json']);
     const lint = await lintPlugin(join(REPO_ROOT, 'plugin'), parseCapabilities(JSON.parse(stdout)));
     problems.push(...lint);
+    problems.push(...(await findRegistryInstructions(REPO_ROOT, REGISTRY_SCANNED_DIRS)));
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

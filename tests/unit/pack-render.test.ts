@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ContentBlockType, createContentBlock } from '../../src/core/models.js';
-import { parseHtmlFile } from '../../src/parsers/html/index.js';
+import { parseHtmlFile } from '../../src/parsers/html/parser.js';
 import { parseOpenApiFile } from '../../src/parsers/openapi/index.js';
-import { parseRstFile } from '../../src/parsers/rst/index.js';
+import { parseRstFile } from '../../src/parsers/rst/parser.js';
 import { renderDocumentMarkdown, renderOpenApiPages } from '../../src/pack/render-ir.js';
 
 const tempDirs: string[] = [];

@@ -27,7 +27,7 @@ import {
   type DocNode,
 } from '../../core/models.js';
 import { slugifyText } from '../../utils/slug.js';
-import { ParserError } from '../base.js';
+import { ParserError } from '../parser-error.js';
 
 const SECTION_ADORNMENT_PATTERN = /^([=\-~^"`'#*+_:.<>])\1*\s*$/;
 const BULLET_PATTERN = /^\s*[-+*]\s+\S/;
@@ -87,7 +87,7 @@ interface Directive {
   argument: string;
 }
 
-export class RstParser {
+class RstParser {
   constructor(private readonly filePath: string) {}
 
   async parse(): Promise<RstDocument> {
