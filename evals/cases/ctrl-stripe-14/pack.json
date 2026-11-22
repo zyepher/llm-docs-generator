@@ -3,15 +3,26 @@
   "pack": {
     "title": "Stripe Node.js library",
     "description": "Official Stripe API client for Node.js",
-    "dependency": { "ecosystem": "npm", "name": "stripe" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "stripe"
+    },
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/stripe/stripe-node",
         "ref": "v{version}",
-        "paths": ["README.md", "CHANGELOG.md"],
-        "include": ["**/*.md"]
+        "paths": [
+          "README.md",
+          "CHANGELOG.md"
+        ],
+        "include": [
+          "**/*.md"
+        ]
       }
+    ],
+    "readFirst": [
+      "pages/CHANGELOG.md"
     ]
   }
 }

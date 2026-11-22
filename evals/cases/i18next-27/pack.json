@@ -3,15 +3,26 @@
   "pack": {
     "title": "i18next",
     "description": "Internationalization framework for JavaScript",
-    "dependency": { "ecosystem": "npm", "name": "i18next" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "i18next"
+    },
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/i18next/i18next",
         "ref": "v{version}",
-        "paths": ["README.md", "CHANGELOG.md"],
-        "include": ["**/*.md"]
+        "paths": [
+          "README.md",
+          "CHANGELOG.md"
+        ],
+        "include": [
+          "**/*.md"
+        ]
       }
+    ],
+    "readFirst": [
+      "pages/CHANGELOG.md"
     ]
   }
 }

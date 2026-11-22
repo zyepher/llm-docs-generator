@@ -10,6 +10,8 @@ export const EVALS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const CASES_DIR = join(EVALS_DIR, 'cases');
 export const CACHE_DIR = join(EVALS_DIR, '.cache');
 export const RESULTS_DIR = join(EVALS_DIR, 'results');
+export const PACK_CACHE_DIR = join(CACHE_DIR, 'packs');
+export const PREPARED_STAMP = '.prepared.json';
 
 export type CaseKind = 'post-cutoff' | 'control';
 

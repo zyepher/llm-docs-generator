@@ -3,17 +3,31 @@
   "pack": {
     "title": "Hono",
     "description": "Web framework built on Web Standards",
-    "dependency": { "ecosystem": "npm", "name": "hono" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "hono"
+    },
     "version": "4.13.16",
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/honojs/website",
         "ref": "6d4ba9115255b16a3a7388670787731ec49461ea",
-        "paths": ["docs/api", "docs/middleware/builtin"],
-        "include": ["**/*.md"]
+        "paths": [
+          "docs/api",
+          "docs/middleware/builtin",
+          "docs/guides/migrating-to-v5.md"
+        ],
+        "include": [
+          "**/*.md"
+        ]
       }
     ],
-    "site": { "baseUrl": "https://hono.dev" }
+    "site": {
+      "baseUrl": "https://hono.dev"
+    },
+    "readFirst": [
+      "pages/guides/migrating-to-v5.md"
+    ]
   }
 }

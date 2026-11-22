@@ -3,15 +3,30 @@
   "pack": {
     "title": "Zod",
     "description": "TypeScript-first schema validation",
-    "dependency": { "ecosystem": "npm", "name": "zod" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "zod"
+    },
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/colinhacks/zod",
         "ref": "v{version}",
-        "paths": ["packages/docs/content"],
-        "include": ["**/*.md", "**/*.mdx"]
+        "paths": [
+          "packages/docs/content",
+          "packages/docs-v3/CHANGELOG.md",
+          "packages/docs-v3/MIGRATION.md"
+        ],
+        "include": [
+          "**/*.md",
+          "**/*.mdx"
+        ]
       }
+    ],
+    "readFirst": [
+      "pages/docs-v3/MIGRATION.md",
+      "pages/docs/content/v4/changelog.md",
+      "pages/docs-v3/CHANGELOG.md"
     ]
   }
 }

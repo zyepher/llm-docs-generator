@@ -3,15 +3,38 @@
   "pack": {
     "title": "SvelteKit",
     "description": "Web application framework built on Svelte and Vite",
-    "dependency": { "ecosystem": "npm", "name": "@sveltejs/kit" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "@sveltejs/kit"
+    },
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/sveltejs/kit",
         "ref": "@sveltejs/kit@{version}",
-        "paths": ["documentation/docs"],
-        "include": ["**/*.md"]
+        "paths": [
+          "documentation/docs",
+          "packages/adapter-auto/CHANGELOG.md",
+          "packages/adapter-bun/CHANGELOG.md",
+          "packages/adapter-cloudflare/CHANGELOG.md",
+          "packages/adapter-netlify/CHANGELOG.md",
+          "packages/adapter-node/CHANGELOG.md",
+          "packages/adapter-static/CHANGELOG.md",
+          "packages/adapter-vercel/CHANGELOG.md",
+          "packages/enhanced-img/CHANGELOG.md",
+          "packages/kit/CHANGELOG-pre-1.md",
+          "packages/kit/CHANGELOG.md",
+          "packages/package/CHANGELOG.md"
+        ],
+        "include": [
+          "**/*.md"
+        ]
       }
+    ],
+    "readFirst": [
+      "pages/documentation/docs/60-appendix/35-migrating-to-sveltekit-3.md",
+      "pages/documentation/docs/60-appendix/30-migrating-to-sveltekit-2.md",
+      "pages/documentation/docs/60-appendix/40-migrating.md"
     ]
   }
 }
