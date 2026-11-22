@@ -214,7 +214,10 @@ describe('parsePackageSpec', () => {
     ['npm:', /--package must be/],
     ['npm:hono@', /version "" is not a version/],
     ['npm:hono@4 .1', /is not a version/],
-    ['npm:../../evil', /is not a npm package name/],
+    [
+      'npm:../../evil',
+      /"\.\.\/\.\.\/evil" is not a valid npm package name; write it as the npm registry spells it/,
+    ],
     ['swiftpm:git@github.com:apple/swift-nio.git', /needs an https:\/\/ or file:\/\/ URL/],
     ['swiftpm:https://user:secret@example.com/repo', /without credentials/],
   ])('refuses %s as a usage error', (value, message) => {
@@ -798,7 +801,8 @@ describe('discoverPackage', () => {
     expect(unknown.registry).toEqual({ status: 'package-not-found', source: 'crates.io' });
     expect(unknown.repository).toEqual({
       status: 'missing',
-      reason: 'crates.io has no package cargo:nothing.',
+      reason:
+        "crates.io has no package cargo:nothing; check the name against the registry's spelling.",
     });
     expect(unknown.tags.status).toBe('skipped');
 
@@ -818,7 +822,8 @@ describe('discoverPackage', () => {
     expect(noRepo.registry.status).toBe('found');
     expect(noRepo.repository).toEqual({
       status: 'missing',
-      reason: 'The registry metadata names no repository.',
+      reason:
+        'crates.io names no repository for norepo 0.1.0, so no tags were read; this tool cannot tell where its source lives.',
     });
   });
 
@@ -853,10 +858,18 @@ describe('discoverPackage', () => {
       status: 'unreachable',
       error: expect.stringMatching(/^git ls-remote failed for https:\/\/127\.0\.0\.1:9\/gone/),
     });
+    expect(gone.docDirectories).toEqual({
+      status: 'skipped',
+      reason: 'https://127.0.0.1:9/gone could not be reached; see tags.error.',
+    });
 
     const untagged = await discoverPackage(parsePackageSpec(`swiftpm:${upstream.url}@3.0.0`));
     expect(untagged.tags).toEqual({ status: 'no-match', tagCount: 3 });
-    expect(untagged.docDirectories).toEqual({ status: 'skipped', reason: 'No tag names 3.0.0.' });
+    expect(untagged.docDirectories).toEqual({
+      status: 'skipped',
+      reason:
+        'None of the 3 tags names 3.0.0, so this tool cannot tell which commit was released as 3.0.0.',
+    });
     expect(untagged.changeDocuments).toEqual({
       status: 'skipped',
       reason: 'No tree was listed at a matched tag; see docDirectories.',

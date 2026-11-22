@@ -175,7 +175,9 @@ export function parsePackageSpec(value: string): PackageSpec {
   }
 
   if (!NAME_PATTERN.test(name) || name.split('/').some((segment) => /^\.{0,2}$/.test(segment))) {
-    throw new ConfigError(`--package name "${name}" is not a ${ecosystem} package name.`);
+    throw new ConfigError(
+      `--package name "${name}" is not a valid ${ecosystem} package name; write it as the ${ecosystem} registry spells it.`
+    );
   }
 
   return { ecosystem, name, version };
@@ -525,7 +527,8 @@ export async function discoverPackage(
       status: 'not-applicable',
       reason: 'A SwiftPM package is identified by its repository URL; there is no registry.',
     },
-    repository: { status: 'missing', reason: 'The registry metadata names no repository.' },
+    // Every path that leaves the repository missing replaces this with its own reason.
+    repository: { status: 'missing', reason: 'No repository was looked up.' },
     tags: skipped('There is no repository to read tags from.'),
     docDirectories: skipped('No tag was matched.'),
     // Listed only from the same tree as docDirectories; its reason says why there is none.
@@ -549,7 +552,7 @@ export async function discoverPackage(
     if (lookup.status === 'package-not-found') {
       result.repository = {
         status: 'missing',
-        reason: `${lookup.source} has no package ${spec.ecosystem}:${spec.name}.`,
+        reason: `${lookup.source} has no package ${spec.ecosystem}:${spec.name}; check the name against the registry's spelling.`,
       };
       return result;
     }
@@ -564,6 +567,10 @@ export async function discoverPackage(
     result.package.version = lookup.metadata.version;
     result.package.versionSource = spec.version === undefined ? 'registry-latest' : 'requested';
     if (lookup.metadata.repository === null) {
+      result.repository = {
+        status: 'missing',
+        reason: `${lookup.source} names no repository for ${spec.name} ${lookup.metadata.version}, so no tags were read; this tool cannot tell where its source lives.`,
+      };
       return result;
     }
     declared = lookup.metadata.repository;
@@ -593,6 +600,7 @@ export async function discoverPackage(
     }
     result.repository = { status: 'ok', url: normalized.url, directory: null };
     result.tags = { status: 'unreachable', error: errorMessage(error) };
+    result.docDirectories = skipped(`${normalized.url} could not be reached; see tags.error.`);
     return result;
   }
 
@@ -615,7 +623,7 @@ export async function discoverPackage(
         throw error;
       }
       result.tags = { status: 'unreachable', error: errorMessage(error) };
-      result.docDirectories = skipped('The repository could not be reached.');
+      result.docDirectories = skipped(`${normalized.url} could not be reached; see tags.error.`);
       return result;
     }
 
@@ -633,7 +641,7 @@ export async function discoverPackage(
       result.docDirectories = skipped(
         version === null
           ? 'No version was given and no tag looks like a release (1.2.3 or v1.2.3); pass --package swiftpm:<url>@<version>.'
-          : `No tag names ${version}.`
+          : `None of the ${tags.size} tags names ${version}, so this tool cannot tell which commit was released as ${version}.`
       );
       return result;
     }
@@ -670,7 +678,7 @@ export async function discoverPackage(
     const listed = first.form === 'suffix' ? undefined : first;
     if (listed === undefined) {
       result.docDirectories = skipped(
-        `Only tags that end in ${version} matched (${matches.map((match) => match.tag).join(', ')}); none has an exact form, so none was listed. Pass the one you mean to 'llm-docs add --git <repo> --ref <tag>'.`
+        `Only tags that end in ${version} matched (${matches.map((match) => match.tag).join(', ')}); none has an exact form, so none was listed. Pass the one you mean to 'llm-docs add --git ${normalized.url} --ref <tag>'.`
       );
     } else {
       if (matches.length > 1) {
