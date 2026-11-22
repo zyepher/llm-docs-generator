@@ -16,17 +16,17 @@ import {
   findProjectRoot,
   formatSchemaIssues,
   initProjectConfig,
+  loadOrEmptyConfig,
   loadProjectConfig,
   packConfigSchema,
-  parseProjectConfig,
   projectRootForCreate,
   resolvePackRecipe,
   saveProjectConfig,
   sourceConfigSchema,
   PACK_ID_PATTERN,
-  type LoadedProjectConfig,
   type PackConfig,
 } from './config/project.js';
+import { migrateV2Pack } from './config/migrate.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, type Ecosystem } from './deps/lockfiles.js';
 import { ensurePacksDir, previewPack, syncPacks, type SyncReport } from './pack/build.js';
@@ -77,6 +77,12 @@ const COMMANDS = [
   {
     name: 'verify',
     summary: 'Check packs against their manifests, recipes, and links (read-only, offline)',
+    status: 'implemented',
+  },
+  {
+    name: 'migrate',
+    summary:
+      'Write a recipe into llm-docs.json for a v2 pack, from its manifest (the v2 pack is left as is)',
     status: 'implemented',
   },
   {
@@ -465,17 +471,6 @@ function buildPackRecipe(options: AddOptions): PackConfig {
   return checkedPack.data;
 }
 
-async function loadOrEmptyConfig(projectRoot: string): Promise<LoadedProjectConfig> {
-  try {
-    return await loadProjectConfig(projectRoot);
-  } catch (error) {
-    if (error instanceof ConfigError && error.message.startsWith(`No ${CONFIG_FILE_NAME}`)) {
-      return parseProjectConfig(projectRoot, JSON.stringify({ schemaVersion: 3, packs: {} }));
-    }
-    throw error;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Reporting
 // ---------------------------------------------------------------------------
@@ -826,6 +821,42 @@ function buildProgram(): Command {
     }
     printRefreshReport(report);
     process.exitCode = syncExitCode(report);
+  });
+
+  withProjectOptions(
+    program
+      .command('migrate')
+      .description(summaryOf('migrate'))
+      .argument('<v2-pack-dir>', 'Directory of a v2 pack (the one holding its manifest.json)')
+      .option('--id <id>', 'Pack id (default: the v2 pack directory name)')
+      .option('--version <version>', 'Docs version the pack describes (v2 manifests record none)')
+  ).action(async (packDir: string, options: ProjectOptions & { id?: string; version?: string }) => {
+    const outcome = await migrateV2Pack(resolve(packDir), {
+      projectRoot: await creatingProjectRoot(options),
+      id: options.id,
+      version: options.version,
+    });
+
+    if (outcome.status === 'refused') {
+      throw new UsageError(outcome.message);
+    }
+
+    const next = `llm-docs sync ${outcome.id}`;
+
+    if (options.json === true) {
+      writeJson({
+        id: outcome.id,
+        recipe: outcome.pack,
+        configPath: outcome.configPath,
+        warnings: outcome.warnings,
+        next,
+      });
+    }
+    say(`Wrote packs.${outcome.id} to ${outcome.configPath}; the v2 pack is unchanged.`);
+    for (const warning of outcome.warnings) {
+      say(`  warning: ${warning}`);
+    }
+    say(`Next: ${next}`);
   });
 
   program

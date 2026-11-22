@@ -32,6 +32,15 @@ export function isSameOrDescendant(parentPath: string, candidatePath: string): b
   return relativePath === '' || (!isParentRelativePath(relativePath) && !isAbsolute(relativePath));
 }
 
+/** realpath(path), or undefined when the path does not exist. */
+export async function realpathIfExists(path: string): Promise<string | undefined> {
+  try {
+    return await realpath(path);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Canonicalize outputDir even when it does not exist yet: walk up to the nearest
  * existing ancestor, realpath that, then re-append the missing segments. This

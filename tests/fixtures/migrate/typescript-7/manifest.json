@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "0.1.0",
+  "generatedAt": "2026-07-19T14:29:23.443Z",
+  "generator": {
+    "name": "llm-docs-generator",
+    "version": "2.0.0",
+    "cliName": "llm-docs"
+  },
+  "mode": "local-source-docs",
+  "source": {
+    "input": "/private/tmp/claude-501/-Users-dev-Developer-srank/6867684c-d9fb-40d6-9782-7439cae2c8a2/scratchpad/ts7-src",
+    "resolvedPath": "/private/tmp/claude-501/-Users-dev-Developer-srank/6867684c-d9fb-40d6-9782-7439cae2c8a2/scratchpad/ts7-src",
+    "type": "directory",
+    "formatHint": "markdown",
+    "resolvedFormat": "markdown",
+    "fileCount": 2,
+    "aggregateHash": "sha256:76c512b7976ec41bd279eb33051dacd99bb423fc315051a0ce8838dfb8a66b6c",
+    "label": "typescript-go @ HEAD 2026-07-19 (maps to TS7 line)"
+  },
+  "sourceFiles": [
+    {
+      "path": "typescript-7-intentional-changes.md",
+      "resolvedPath": "/private/tmp/claude-501/-Users-dev-Developer-srank/6867684c-d9fb-40d6-9782-7439cae2c8a2/scratchpad/ts7-src/typescript-7-intentional-changes.md",
+      "byteSize": 16694,
+      "hash": "sha256:84a2ce2827ea8f64027eaa1337ceaa9aca8c8082c55cb621ae21d23c69287557",
+      "lineCount": 428,
+      "estimatedTokenCount": 4171,
+      "format": "markdown"
+    }
+  ],
+  "output": {
+    "filenamePrefix": "typescript-7"
+  },
+  "parser": {
+    "name": "Markdown Parser",
+    "version": "2.0.0",
+    "format": "markdown"
+  },
+  "formatter": {
+    "name": "UniversalFormatter",
+    "version": "2.0.0",
+    "format": "universal-llm-docs"
+  },
+  "generatedOutputs": [
+    {
+      "path": "llm-docs/typescript-7-full-llms.txt",
+      "kind": "llm-docs",
+      "name": "agent-readable docs text",
+      "byteSize": 21742,
+      "hash": "sha256:1987f37ab2d9d0ddadae60b8ce4d6b8a8ad4339780c28566b04ce106f19983d2",
+      "lineCount": 531,
+      "estimatedTokenCount": 5433
+    }
+  ],
+  "warnings": [],
+  "inputProvenance": {
+    "schema": "llm-docs-generator.input-provenance.v1",
+    "manifestMode": "local-source-docs",
+    "artifactRole": "generated-docs",
+    "inputKind": "built-in-local-source-docs"
+  }
+}
