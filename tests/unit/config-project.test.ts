@@ -252,6 +252,74 @@ describe('llm-docs.json validation', () => {
       { schemaVersion: 3, packs: { x: { ...localPack, readFirst: ['pages/a.md', 'pages/a.md'] } } },
       'packs.x.readFirst: must not repeat a target',
     ],
+    [{ schemaVersion: 3, packs: { x: { ...localPack, covers: [] } } }, 'packs.x.covers'],
+    [
+      {
+        schemaVersion: 3,
+        packs: {
+          x: {
+            ...localPack,
+            covers: Array.from({ length: 21 }, (_, index) => ({
+              ecosystem: 'npm',
+              name: `pkg-${index}`,
+            })),
+          },
+        },
+      },
+      'packs.x.covers',
+    ],
+    [
+      {
+        schemaVersion: 3,
+        packs: { x: { ...localPack, covers: [{ ecosystem: 'maven', name: 'x' }] } },
+      },
+      'packs.x.covers[0].ecosystem',
+    ],
+    [
+      {
+        schemaVersion: 3,
+        packs: { x: { ...localPack, covers: [{ ecosystem: 'npm', name: '' }] } },
+      },
+      'packs.x.covers[0].name',
+    ],
+    [
+      {
+        schemaVersion: 3,
+        packs: { x: { ...localPack, covers: [{ ecosystem: 'npm', name: 'a', version: '1' }] } },
+      },
+      'packs.x.covers[0]: unknown key "version"',
+    ],
+    [
+      {
+        schemaVersion: 3,
+        packs: {
+          x: {
+            ...localPack,
+            covers: [
+              { ecosystem: 'pypi', name: 'Foo_Bar' },
+              { ecosystem: 'pypi', name: 'foo-bar' },
+            ],
+          },
+        },
+      },
+      'packs.x.covers: must not repeat a dependency',
+    ],
+    [
+      {
+        schemaVersion: 3,
+        packs: {
+          x: {
+            ...localPack,
+            dependency: { ecosystem: 'npm', name: '@mcp/server' },
+            covers: [
+              { ecosystem: 'npm', name: '@mcp/client' },
+              { ecosystem: 'npm', name: '@mcp/server' },
+            ],
+          },
+        },
+      },
+      'packs.x.covers[1]: is the pack\'s own "dependency"',
+    ],
   ])('rejects %j', (config, message) => {
     expect(parseError(config)).toContain(message);
   });
@@ -497,6 +565,29 @@ describe('resolvePackRecipe', () => {
     expect(Object.hasOwn(without.recipe, 'readFirst')).toBe(false);
     expect(one.recipe.readFirst).toEqual(['pages/migration.md']);
     expect(new Set([without.recipeHash, one.recipeHash, other.recipeHash]).size).toBe(3);
+  });
+
+  it('keeps the recipe hash of a pack without covers, and records covers in recipe order', async () => {
+    const without = await resolvePackRecipe(config(localPack), 'vite', PINNED);
+    const covers = [
+      { ecosystem: 'npm', name: '@mcp/client' },
+      { ecosystem: 'pypi', name: 'mcp_extras' },
+    ];
+    const withCovers = await resolvePackRecipe(config({ ...localPack, covers }), 'vite', PINNED);
+    const reordered = await resolvePackRecipe(
+      config({ ...localPack, covers: [...covers].reverse() }),
+      'vite',
+      PINNED
+    );
+
+    expect(without.recipeHash).toBe(LOCAL_PACK_HASH_BEFORE_READ_FIRST);
+    expect(Object.hasOwn(without.recipe, 'covers')).toBe(false);
+    expect(withCovers.recipe.covers).toEqual(covers);
+    // Pinned like the hash above, so the recorded form of covers cannot drift unnoticed.
+    expect(withCovers.recipeHash).toBe(
+      'sha256:d2e867424e011de5a77530a3d764dfd9d4a09897f26953995a38325de30a0689'
+    );
+    expect(reordered.recipeHash).not.toBe(withCovers.recipeHash);
   });
 
   it('substitutes placeholders in readFirst and re-checks the result', async () => {

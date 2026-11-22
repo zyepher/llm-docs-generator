@@ -272,6 +272,10 @@ describe('llm-docs v3 CLI', () => {
       '2.0.0',
       '--recipe',
       '{"exclude":["guide/**"]}',
+      '--covers',
+      'npm:demo-client',
+      '--covers',
+      'pypi:demo_extras',
       '--dry-run',
       '--json',
       '--project',
@@ -279,12 +283,36 @@ describe('llm-docs v3 CLI', () => {
     ]);
 
     expect(result.code).toBe(0);
+    const covers = [
+      { ecosystem: 'npm', name: 'demo-client' },
+      { ecosystem: 'pypi', name: 'demo_extras' },
+    ];
     const output = JSON.parse(result.stdout);
-    expect(output).toMatchObject({ id: 'demo', dryRun: true, recipe: { version: '2.0.0' } });
+    expect(output).toMatchObject({
+      id: 'demo',
+      dryRun: true,
+      recipe: { version: '2.0.0', covers },
+    });
     expect(output.files).toEqual([
       { outputPath: 'pages/index.md', kind: 'page', source: 'docs/index.md' },
     ]);
     expect(await readdir(root)).toEqual(['docs']);
+
+    const human = await runCli(root, [
+      'add',
+      'demo',
+      '--local',
+      'docs',
+      '--version',
+      '2.0.0',
+      '--covers',
+      'npm:demo-client',
+      '--dry-run',
+    ]);
+    expect(human.code).toBe(0);
+    expect(human.stderr).toContain(
+      '"covers": [\n      {\n        "ecosystem": "npm",\n        "name": "demo-client"\n      }\n    ]'
+    );
   });
 
   it('follows the lockfile for a dependency-bound pack and flags an explicit version that disagrees', async () => {
@@ -583,6 +611,32 @@ describe('llm-docs v3 CLI', () => {
         '--project',
         root,
       ],
+      [
+        'add',
+        'demo',
+        '--local',
+        'docs',
+        '--version',
+        '1',
+        '--covers',
+        'demo-client',
+        '--project',
+        root,
+      ],
+      [
+        'add',
+        'demo',
+        '--local',
+        'docs',
+        '--dependency',
+        'npm:demo',
+        '--version',
+        '1',
+        '--covers',
+        'npm:demo',
+        '--project',
+        root,
+      ],
     ];
     const expected = [
       "run 'llm-docs init' or pass --project <dir>",
@@ -591,6 +645,8 @@ describe('llm-docs v3 CLI', () => {
       'source path: must be project-relative, not absolute',
       'source: unknown key "bogus"',
       '--dependency must be <ecosystem>:<name>',
+      '--covers must be <ecosystem>:<name>',
+      'pack covers[0]: is the pack\'s own "dependency"',
     ];
 
     for (const [index, args] of cases.entries()) {

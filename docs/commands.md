@@ -49,6 +49,7 @@ Writes one pack recipe into `llm-docs.json` and builds that pack. It takes exact
 Use it to create a pack. The [`add-docs` skill](../plugin/skills/add-docs/SKILL.md) is the procedure an agent follows to choose the source and version.
 
 - An existing pack id is refused unless `--replace` is given.
+- `--covers <ecosystem>:<name>` (repeatable) lists another package the same docs describe, such as the client package next to a server SDK. It writes `covers` (see [`covers`](config.md#covers)) and binds no version; `--dry-run` shows it in the recipe.
 - When the build rejects the recipe as a config error, including an unresolved `--read-first` target, `llm-docs.json` is put back as it was.
 - `--dry-run` lists the files the recipe takes without building anything, and writes nothing. It prints the recipe and every output path with the source it comes from, and says for each `--read-first` target whether a taken file lands at its path. A heading fragment can only be checked once pages are built.
 - A rebuild that changes sections cited by guides prints the guides to re-review, as `sync` does.
@@ -148,7 +149,7 @@ Pack checks, in report order:
 | `unlisted-files` | A file in the pack is not in the manifest, or the pack holds a symbolic link. Files under `guides/` and `.DS_Store`, `Thumbs.db`, and `desktop.ini` are reported as info only. | Move the file out of the pack, or into `guides/` if it is agent-written text. |
 | `links` | A relative link in a page, the index, or the combined file does not resolve to a file in the pack, points outside it, or is site-absolute (`/x`). Links with a scheme and links in code are ignored. Under `--strict`, also a fragment that matches no heading on the target page (fragments into `guides/` are not checked). | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
 | `recipe` | The recipe in `llm-docs.json` was edited: resolved at the version the manifest records, it gives another `recipeHash`, or it cannot be resolved. A lockfile that only moved the bound dependency passes here, because `lockfile` reports it. Warns when the config has no such pack (an orphan). | Run `llm-docs sync <id>`. For an orphan, run `llm-docs sync --prune` or add the pack back. |
-| `lockfile` | The pack has a dependency and the lockfiles resolve it to another version, or no lockfile resolves it. When lockfiles disagree, warns if one of them matches the pack's version and fails otherwise. | Run `llm-docs sync <id>`. If the recipe sets `version`, change or remove it first, because an explicit version wins. |
+| `lockfile` | The pack has a dependency and the lockfiles resolve it to another version, or no lockfile resolves it. When lockfiles disagree, warns if one of them matches the pack's version and fails otherwise. A package the pack `covers` never fails it: it warns only when the lockfiles resolve that package to another major version than the pack's, since the pack may not describe that version. | Run `llm-docs sync <id>`. If the recipe sets `version`, change or remove it first, because an explicit version wins. For a covered package on another major, add a pack for it or drop it from `covers`. |
 | `citations` | A guide citation no longer resolves, a cited section changed since it was stamped, or `citations.lock.json` is invalid. Warns for an unstamped guide, a guide edited after stamping, and a lock entry for a deleted guide. | Review the guide with the `write-docs-guide` skill, then run `llm-docs guides stamp <id> <guide>`. |
 | `conversion` | An `agent` conversion is stale: the original changed after its `.md` was written, as recorded at the last sync or, for local sources, as the original reads on disk now. Warns when a local original no longer exists. | Write the `.md` again from the current original, then run `llm-docs sync <id>`. |
 | `license` | Warns for an `unknown` or `proprietary` license. Fails under `--strict`. | Set `license` on the pack in `llm-docs.json` to an SPDX id or `"proprietary"`, then run `llm-docs sync <id>`. |
@@ -157,8 +158,8 @@ Pack checks, in report order:
 
 Joins the dependency scan, the packs, release dates, and the model's training cutoff into one report:
 
-- Each pack with its version, dependency, lockfile version, state, release date and whether it is after or near the cutoff, its read-first targets (a count in the table, the full list in JSON), and the step that brings it back to `ok`.
-- Direct dependencies released after the cutoff, or within `hook.nearCutoffDays` before it, that have no pack, each with a `discover` command as the next step.
+- Each pack with its version, dependency, lockfile version, state, release date and whether it is after or near the cutoff, its read-first targets (a count in the table, the full list in JSON), and the step that brings it back to `ok`. Under the row, one line per package the pack `covers` that the lockfiles resolve, with its version and release date, and a note when its major version differs from the pack's.
+- Direct dependencies released after the cutoff, or within `hook.nearCutoffDays` before it, that have no pack, each with a `discover` command as the next step. A package a pack `covers` counts as having a pack.
 - With no cutoff, direct dependencies released in the last 180 days instead.
 
 It works in a directory with no `llm-docs.json`, where it reports dependencies only. Without `--project`, it finds the project the way the session-start hook does, so `status --brief` prints the note a session started in the same directory gets. With `--project <dir>`, `<dir>` is the project root.
@@ -188,7 +189,8 @@ Pack states:
 
 | Field | Meaning |
 |---|---|
-| `packs[]` | `id`, `title`, `version`, `dependency`, `state`, `lockfile` (the lockfile lookup, for packs with a dependency), `indexPath`, `readFirst` (project-relative paths), `publishedAt`, `releaseWindow` (`after-cutoff`, `near-cutoff`, `recent`, or `null`), and `nextStep` (`null` when `ok`). Sorted by id. |
+| `packs[]` | `id`, `title`, `version`, `dependency`, `state`, `lockfile` (the lockfile lookup, for packs with a dependency), `indexPath`, `readFirst` (project-relative paths), `covered`, `publishedAt` (of the pack's version of its dependency), `releaseWindow` (`after-cutoff`, `near-cutoff`, `recent`, or `null`), and `nextStep` (`null` when `ok`). Sorted by id. |
+| `packs[].covered[]` | Each package the pack `covers`, at each version the lockfiles resolve for it: `ecosystem`, `name`, `version`, `lockfiles`, `publishedAt`, `releaseWindow`, and `majorDiffers` (its major version differs from the pack's). A covered package no lockfile resolves is left out. |
 | `model` | `{ id, source }`, where `source` is `flag` (`--model`), `env` (`ANTHROPIC_MODEL`), or `settings` (with `file`, the settings file it was read from), or `null` when no model is known. |
 | `cutoff` | `{ cutoff, label, source, assumed }`, or `null` when none resolved. `label` names the model or the setting the cutoff came from. `source` is `flag`, `config`, `env` (`LLM_DOCS_MODEL_CUTOFF`), or `table`. `assumed` is true when the cutoff is the table's for a model read from a settings file. |
 | `afterCutoff[]`, `nearCutoff[]`, `recent[]` | Direct dependencies without a pack: `ecosystem`, `name`, `version`, `publishedAt`, `dev`, `lockfiles`, and `nextStep`. `recent` is used only when no cutoff resolves. |

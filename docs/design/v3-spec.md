@@ -96,6 +96,7 @@ never silently disable behavior.
       "title": "Vite",
       "description": "Build tool and dev server",   // optional, one line, escaped into the block
       "dependency": { "ecosystem": "npm", "name": "vite" },  // optional
+      "covers": [{ "ecosystem": "npm", "name": "create-vite" }],  // optional, 1 to 20: see rules
       "version": "8.2.0",                  // required unless dependency is set; then optional,
                                            // and when omitted the lockfile version is used
       "sources": [
@@ -145,6 +146,15 @@ Rules:
   need not be semver (`2026-07-28`
   is a valid version for a protocol revision).
 - `dependency.ecosystem` is one of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`.
+- `covers` lists 1 to 20 more dependencies, in the shape of `dependency` and under its rules,
+  that the pack's docs also describe (one docs set for a family: `@modelcontextprotocol/server`
+  and `@modelcontextprotocol/client`, `@tanstack/*`, the `effect` packages). No two may name the
+  same package (PyPI names compared after PEP 503 normalization), and none may equal the pack's
+  own `dependency`. It binds no version: the pack's version still comes from `dependency` or
+  `version` alone, and the `lockfile` check ignores `covers` for that. Like `readFirst`, it is
+  absent from the resolved recipe when the pack sets none, so no existing recipeHash changes; it
+  is recorded in the manifest's recipe, so `status` and the hook read it without config. Its
+  effects are in 5.1, 6.4, and 7.2.
 - `packsDir`, `agentFiles` entries, and local `path`s must be project-relative and stay inside
   the project after resolution (`isSameOrDescendant`). Absolute paths are rejected.
 
@@ -234,7 +244,7 @@ no lock.
   "recipeHash": "sha256:...",          // hash of the canonical JSON of `recipe`
                                        // (`recipe.readFirst` is absent, never [], when the
                                        // pack marks no pages, so packs built before the field
-                                       // existed keep their recipeHash)
+                                       // existed keep their recipeHash; `recipe.covers` likewise)
   "acquiredAt": "2026-11-05T10:00:00.000Z",
   "origins": [                          // one per source, same order as recipe.sources
     { "type": "git", "repo": "https://github.com/vitejs/vite", "ref": "v8.2.0",
@@ -564,7 +574,8 @@ command carries `--project <dir>` when the user passed it. The CLI prints no col
   a project that has packs). Idempotent; never overwrites config.
 - `llm-docs add <id> (--git <repo> --ref <ref> [--path <p>]... | --url <u>... | --urls-file
   <f> | --llms-txt <u> --include <glob>... [--strip-prefix <prefix>] | --local <path>)
-  [--include <glob>]... [--dependency <eco>:<name>] [--version <v>] [--mount <m>] [--title <t>]
+  [--include <glob>]... [--dependency <eco>:<name>] [--covers <eco>:<name>]... [--version <v>]
+  [--mount <m>] [--title <t>]
   [--convert docling|markitdown|agent] [--convert-include <glob>...] [--site <baseUrl>]
   [--recipe <json>] [--read-first <target>]... [--replace] [--dry-run]`: write the recipe into
   config (creating config if absent), then `sync <id>`. `--version` or `--dependency` is
@@ -626,7 +637,7 @@ fails, the other pack checks are skipped):
 | `unlisted-files` | a file in the pack is not listed, or the pack holds a symlink (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info) |
 | `links` | a relative link in a page, index, or combined file does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
 | `recipe` | the config recipe for this id, resolved at the version the manifest records, has a different `recipeHash` (the config was edited) or cannot be resolved (warn when the config has no such pack: orphan); a lockfile that moved while the config stayed the same passes here, since `lockfile` reports it: one cause, one finding |
-| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise |
+| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise. A `covers` entry never fails it: warn when the lockfiles resolve it to a version whose major (the leading `<number>.`) differs from `pack.version`'s, since the pack may not describe that package's version (no finer comparison: a family's packages do not always share versions) |
 | `citations` | a guide citation does not resolve, its cited section hash changed since stamping, or the lock is invalid; an unstamped guide, a guide edited after stamping, or a lock entry for a deleted guide is a warning |
 | `conversion` | an `agent` conversion's original changed since the last sync (warn when a local original no longer exists) |
 | `license` | warn for `unknown` and `proprietary`; fail under `--strict` |
@@ -750,12 +761,15 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
   the built pack's read-first targets (4.8) as project-relative paths (the full list in
   `--json`, a count in the human table), and the step that brings the pack back to `ok`
   (`llm-docs sync <id>`; for a stale pack whose config pins `version`, editing that version
-  first; for an orphan, `sync --prune` or adding it back to config).
+  first; for an orphan, `sync --prune` or adding it back to config). Each package the pack
+  `covers` (2.2) that the lockfiles resolve, at each resolved version, with its lockfiles,
+  release date, window, and whether its major version differs from the pack's (`covered` in
+  `--json`; a line under the pack's row in the human table, with a note when the major differs).
 - Direct dependencies released after the cutoff, or within `nearCutoffDays` before it, that
-  have no pack bound to that name at any version: name, version, release date, and a suggested
-  next step (`llm-docs discover --package <eco>:<name>@<version>`, the evidence for writing a
-  recipe; for SwiftPM the repository URL is the name). With no cutoff, the direct dependencies
-  released in the last 180 days instead, as the hook does.
+  have no pack bound to that name or covering it, at any version: name, version, release date,
+  and a suggested next step (`llm-docs discover --package <eco>:<name>@<version>`, the evidence
+  for writing a recipe; for SwiftPM the repository URL is the name). With no cutoff, the direct
+  dependencies released in the last 180 days instead, as the hook does.
 - Without `--model`, the model id comes from `ANTHROPIC_MODEL` and the Claude Code settings
   files, as in the hook (7.2). The report names the model and where its id came from (`--model`,
   `ANTHROPIC_MODEL`, or a settings file, named by path), and marks a cutoff reached through a
@@ -863,9 +877,10 @@ context for the agent. Behavior:
 - Content (at most 2,000 characters; nothing at all when there is nothing to say):
   1. Packs that need a rebuild (the lockfile moved, the recipe changed, or never built), each
      with its fix from `status`.
-  2. Built packs whose library version (the pack's version of its bound dependency) was
-     released after the model's training cutoff or within the near-cutoff window, most recent
-     first, one line each with the title, version, release date, whether it is after or near
+  2. Built packs whose library version (the pack's version of its bound dependency), or any
+     package it `covers` at the version the lockfiles resolve, was released after the model's
+     training cutoff or within the near-cutoff window, most recent first, one line per pack with
+     the title, version, the most recent of those release dates, whether it is after or near
      the cutoff, and the index path, under a heading that tells the agent its memory of these
      libraries predates these versions and that it must read the pinned pages before writing
      code against them. This is what a fully adopted project is told at every session start.
@@ -875,7 +890,7 @@ context for the agent. Behavior:
      merged; the index links the rest. A path that the 7.1 escaping would alter is left out
      rather than shown altered.
   3. Direct dependencies newer than the model's training cutoff (or within the near-cutoff
-     window) without a pack, most recent first, at most 8, with their release dates, and the
+     window) without a pack (a package a pack `covers` has one), most recent first, at most 8, with their release dates, and the
      suggestion to read their docs or create a pack with the `add-docs` skill.
   4. When packs exist and the managed block is missing from the agent file the harness reads,
      the pack list itself (so the hook covers projects that gitignore AGENTS.md). Codex and

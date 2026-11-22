@@ -22,10 +22,13 @@ import {
   type ModelIdentity,
 } from './cutoffs.js';
 import {
+  dependencyKey,
   findDependencyVersion,
+  majorVersionsDiffer,
   normalizeDependencyName,
   projectDependencies,
   type DependencyRef,
+  type DependencyScan,
   type DependencyVersionLookup,
   type Ecosystem,
   type ResolvedDependency,
@@ -64,8 +67,22 @@ export interface PackStatusInput {
    * `#fragment` kept), in recipe order; empty when it marks none.
    */
   readFirst: string[];
+  /** Other packages the docs also describe (`covers`), which bind no version. */
+  covers: DependencyRef[];
   /** llm-docs.json lists the pack. */
   inConfig: boolean;
+}
+
+/** A package a pack covers, at a version the lockfiles resolve for it. */
+export interface CoveredDependency {
+  ecosystem: Ecosystem;
+  name: string;
+  version: string;
+  lockfiles: string[];
+  publishedAt: string | null;
+  releaseWindow: ReleaseWindow | null;
+  /** Its major version differs from the pack's, so the pack may describe another release line. */
+  majorDiffers: boolean;
 }
 
 export interface PackStatus {
@@ -79,6 +96,8 @@ export interface PackStatus {
   indexPath: string | null;
   /** Project-relative read-first targets of the built pack, in recipe order (spec 4.8). */
   readFirst: string[];
+  /** Each covered package at each version the lockfiles resolve; one absent from them is left out. */
+  covered: CoveredDependency[];
   /** When the pack's version of its bound dependency was released, when known. */
   publishedAt: string | null;
   /** Set when that release is newer than the model's training data, or close to it. */
@@ -233,19 +252,44 @@ function discoverCommand(dependency: ResolvedDependency): string {
   return `llm-docs discover --package ${dependency.ecosystem}:${name}@${dependency.version}`;
 }
 
-function dependencyKey(ecosystem: Ecosystem, name: string): string {
-  return `${ecosystem}:${normalizeDependencyName(ecosystem, name)}`;
+function releaseQuery(dependency: DependencyRef, version: string): ReleaseQuery {
+  return {
+    ecosystem: dependency.ecosystem,
+    name: normalizeDependencyName(dependency.ecosystem, dependency.name),
+    version,
+  };
 }
 
 /** The release a pack's docs describe: its version of its bound dependency. */
 function packReleaseQuery(pack: PackStatusInput): ReleaseQuery | undefined {
   return pack.dependency === null || pack.version === null
     ? undefined
-    : {
-        ecosystem: pack.dependency.ecosystem,
-        name: normalizeDependencyName(pack.dependency.ecosystem, pack.dependency.name),
-        version: pack.version,
-      };
+    : releaseQuery(pack.dependency, pack.version);
+}
+
+/** The versions the lockfiles resolve for a dependency, each with the lockfiles that say so. */
+function resolvedVersions(
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles'>,
+  dependency: DependencyRef
+): { version: string; lockfiles: string[] }[] {
+  const lookup = findDependencyVersion(scan, dependency);
+
+  switch (lookup.kind) {
+    case 'found':
+      return [{ version: lookup.version, lockfiles: lookup.lockfiles }];
+    case 'missing':
+      return [];
+    case 'conflict': {
+      const byVersion = new Map<string, string[]>();
+      for (const entry of lookup.versions) {
+        byVersion.set(entry.version, [...(byVersion.get(entry.version) ?? []), entry.lockfile]);
+      }
+      return [...byVersion].map(([version, lockfiles]) => ({
+        version,
+        lockfiles: lockfiles.sort(compareStringsByCodeUnit),
+      }));
+    }
+  }
 }
 
 /**
@@ -280,6 +324,20 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
       const lookup = pack.dependency ? findDependencyVersion(scan, pack.dependency) : undefined;
       const state = packState(pack, lookup);
       const publishedAt = datedRelease(packReleaseQuery(pack));
+      const covered = pack.covers.flatMap((dependency) =>
+        resolvedVersions(scan, dependency).map(({ version, lockfiles }): CoveredDependency => {
+          const released = datedRelease(releaseQuery(dependency, version));
+          return {
+            ecosystem: dependency.ecosystem,
+            name: dependency.name,
+            version,
+            lockfiles,
+            publishedAt: released,
+            releaseWindow: released === null ? null : windowOf(released),
+            majorDiffers: pack.version !== null && majorVersionsDiffer(version, pack.version),
+          };
+        })
+      );
 
       return {
         id: pack.id,
@@ -290,6 +348,7 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
         ...(lookup === undefined ? {} : { lockfile: lookup }),
         indexPath: pack.indexPath,
         readFirst: pack.readFirst,
+        covered,
         publishedAt,
         releaseWindow: publishedAt === null ? null : windowOf(publishedAt),
         nextStep: packNextStep(pack, state, lookup),
@@ -297,9 +356,10 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
     })
     .sort((a, b) => compareStringsByCodeUnit(a.id, b.id));
 
+  // A covered package has a pack too: its docs are pinned, just not at a version of their own.
   const boundDependencies = new Set(
     input.packs.flatMap((pack) =>
-      pack.dependency ? [dependencyKey(pack.dependency.ecosystem, pack.dependency.name)] : []
+      [...(pack.dependency ? [pack.dependency] : []), ...pack.covers].map(dependencyKey)
     )
   );
 
@@ -339,7 +399,7 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
       continue;
     }
 
-    if (boundDependencies.has(dependencyKey(entry.dependency.ecosystem, entry.dependency.name))) {
+    if (boundDependencies.has(dependencyKey(entry.dependency))) {
       continue;
     }
 
@@ -510,23 +570,28 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
     });
   }
 
+  // One row per pack, dated by the newest release among its own version and the covered
+  // packages the lockfiles resolve, so a pack covering a newer package is listed once.
   const pinned = report.packs
-    .flatMap((pack) =>
-      pack.state !== 'orphan' &&
-      pack.releaseWindow !== null &&
-      pack.publishedAt !== null &&
-      pack.indexPath !== null &&
-      pack.version !== null
-        ? [
-            {
-              pack,
-              version: pack.version,
-              publishedAt: pack.publishedAt,
-              window: pack.releaseWindow,
-            },
-          ]
-        : []
-    )
+    .flatMap((pack) => {
+      const newest = [
+        { publishedAt: pack.publishedAt, window: pack.releaseWindow },
+        ...pack.covered.map((entry) => ({
+          publishedAt: entry.publishedAt,
+          window: entry.releaseWindow,
+        })),
+      ]
+        .flatMap(({ publishedAt, window }) =>
+          publishedAt === null || window === null ? [] : [{ publishedAt, window }]
+        )
+        .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt))[0];
+      return pack.state !== 'orphan' &&
+        newest !== undefined &&
+        pack.indexPath !== null &&
+        pack.version !== null
+        ? [{ pack, version: pack.version, ...newest }]
+        : [];
+    })
     .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt));
 
   const cutoff = report.cutoff;
@@ -647,12 +712,24 @@ function lockfileSummary(pack: PackStatus): string {
   }
 }
 
-function packReleased(pack: PackStatus): string {
-  if (pack.publishedAt === null) {
+function released(release: {
+  publishedAt: string | null;
+  releaseWindow: ReleaseWindow | null;
+}): string {
+  if (release.publishedAt === null) {
     return '-';
   }
-  const tag = pack.releaseWindow === null ? undefined : WINDOW_TAG[pack.releaseWindow];
-  return `${releaseDay(pack.publishedAt)}${tag ? ` (${tag})` : ''}`;
+  const tag = release.releaseWindow === null ? undefined : WINDOW_TAG[release.releaseWindow];
+  return `${releaseDay(release.publishedAt)}${tag ? ` (${tag})` : ''}`;
+}
+
+/** The line under a pack row for a package it covers, with a note when the major differs. */
+function coveredLine(pack: PackStatus, entry: CoveredDependency): string {
+  const note = entry.majorDiffers
+    ? `; note: its major version differs from the pack's ${pack.version ?? ''}, so the pack may not describe this version`
+    : '';
+  const when = entry.publishedAt === null ? 'release date unknown' : `released ${released(entry)}`;
+  return `    covers ${entry.ecosystem}:${entry.name} ${entry.version}, ${when}${note}`;
 }
 
 function releaseRows(releases: DependencyRelease[]): string[] {
@@ -682,22 +759,26 @@ export function formatStatusHuman(report: StatusReport): string {
   if (report.packs.length === 0) {
     lines.push('Packs: none configured.');
   } else {
-    lines.push('Packs:');
-    lines.push(
-      ...table([
-        ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'READ FIRST', 'NEXT'],
-        ...report.packs.map((pack) => [
-          pack.id,
-          pack.version ?? '-',
-          pack.dependency ? `${pack.dependency.ecosystem}:${pack.dependency.name}` : '-',
-          lockfileSummary(pack),
-          pack.state,
-          packReleased(pack),
-          pack.readFirst.length === 0 ? '-' : String(pack.readFirst.length),
-          pack.nextStep ?? '-',
-        ]),
-      ]).map((line) => `  ${line}`)
-    );
+    const [header = '', ...rows] = table([
+      ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'READ FIRST', 'NEXT'],
+      ...report.packs.map((pack) => [
+        pack.id,
+        pack.version ?? '-',
+        pack.dependency ? `${pack.dependency.ecosystem}:${pack.dependency.name}` : '-',
+        lockfileSummary(pack),
+        pack.state,
+        released(pack),
+        pack.readFirst.length === 0 ? '-' : String(pack.readFirst.length),
+        pack.nextStep ?? '-',
+      ]),
+    ]);
+    lines.push('Packs:', `  ${header}`);
+    report.packs.forEach((pack, index) => {
+      lines.push(
+        `  ${rows[index] ?? ''}`,
+        ...pack.covered.map((entry) => coveredLine(pack, entry))
+      );
+    });
   }
 
   lines.push('');
@@ -846,6 +927,7 @@ async function packStatusInput(
     readFirst: (manifest?.recipe.readFirst ?? []).map(
       (target) => `${loaded.packsDirRelative}/${pack.id}/${target}`
     ),
+    covers: manifest?.recipe.covers ?? config?.covers ?? [],
     inConfig: pack.inConfig,
   };
 }
@@ -905,9 +987,17 @@ export async function gatherProjectStatus(
     }
   }
   for (const input of packInputs) {
-    const query = input.indexPath === null ? undefined : packReleaseQuery(input);
-    if (query !== undefined && !queries.has(releaseKey(query))) {
-      queries.set(releaseKey(query), query);
+    if (input.indexPath === null) {
+      continue;
+    }
+    const own = packReleaseQuery(input);
+    const covered = input.covers.flatMap((dependency) =>
+      resolvedVersions(scan, dependency).map(({ version }) => releaseQuery(dependency, version))
+    );
+    for (const query of [...(own === undefined ? [] : [own]), ...covered]) {
+      if (!queries.has(releaseKey(query))) {
+        queries.set(releaseKey(query), query);
+      }
     }
   }
 

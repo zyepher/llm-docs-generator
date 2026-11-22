@@ -42,6 +42,7 @@ Run the CLI as `llm-docs`, or as `npx llm-docs` if that command is not found. Ev
 | `--urls-file <file>` | Pages to fetch, one URL per line, `#` starts a comment. |
 | `--local <path>` | A project-relative folder or file. |
 | `--dependency <ecosystem>:<name>` | Binds the pack to a dependency, so the lockfile decides the version. |
+| `--covers <ecosystem>:<name>` | Another package the same docs describe, such as a client next to a server SDK (repeatable, at most 20). Status and the session-start note then count it as documented. Binds no version. |
 | `--version <version>` | The docs version. Required unless `--dependency` is set. |
 | `--include <glob>` | Files a source takes (repeatable). For `--llms-txt`, URL paths. |
 | `--mount <dir>` | Subfolder under `pages/` and `files/` for this source. |
@@ -121,6 +122,7 @@ The hook prints nothing when there is nothing to say, when `LLM_DOCS_HOOK=off` i
 | `hook.enabled`, `hook.nearCutoffDays` | Turns the session-start note off, and sets how many days before the cutoff count as near it (default 90). |
 | `model.cutoff` | Training data cutoff as `YYYY-MM`, for status and the hook. |
 | `packs.<id>.dependency`, `.version` | The dependency binding and the explicit version. |
+| `packs.<id>.covers` | Up to 20 more dependencies the pack's docs describe, as `--covers` sets them. They bind no version; `verify` warns when one resolves to another major version than the pack's. |
 | `packs.<id>.sources` | The sources. Each has a `type` (`git`, `urls`, `llms-txt`, `local`) and may set `mount`, `include`, `exclude`, `passthrough`, `convert`, and `transforms`. |
 | `packs.<id>.sources[].transforms` | Opt-in text transforms: `strip-mintlify-banner`, `strip-html-comments`, `drop-frontmatter-description`. |
 | `packs.<id>.site` | `baseUrl` and path `aliases` of the docs website. |

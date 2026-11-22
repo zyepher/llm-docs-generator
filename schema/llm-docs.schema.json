@@ -104,6 +104,36 @@
             ],
             "additionalProperties": false
           },
+          "covers": {
+            "minItems": 1,
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ecosystem": {
+                  "type": "string",
+                  "enum": [
+                    "npm",
+                    "pypi",
+                    "cargo",
+                    "go",
+                    "pub",
+                    "swiftpm"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "ecosystem",
+                "name"
+              ],
+              "additionalProperties": false
+            }
+          },
           "version": {
             "type": "string",
             "pattern": "^[^\\s<>\\p{Cc}]+$"

@@ -19,7 +19,7 @@ import { canCreateSymlinks } from '../helpers/symlinks.js';
 import { BLOCK_BEGIN, BLOCK_END } from '../../src/agent/block.js';
 import { syncPacks } from '../../src/pack/build.js';
 import { readPackManifest } from '../../src/pack/manifest.js';
-import { verifyPacks, type VerifyReport } from '../../src/pack/verify.js';
+import { verifyPacks, type VerifyOptions, type VerifyReport } from '../../src/pack/verify.js';
 import { ALLOW_TEMP_SOURCES_ENV } from '../../src/sources/acquire.js';
 
 const tempDirs: string[] = [];
@@ -938,6 +938,38 @@ describe('verifyPacks', () => {
     expect(problems(await verifyPacks(root, undefined))).toEqual([
       "demo recipe fail:  packs.demo in llm-docs.json changed since the last sync; run 'llm-docs sync demo'",
       "demo lockfile fail:  stale-pack: lockfiles resolve npm:demo 2.1.0 (package-lock.json), the pack is 2.0.0; run 'llm-docs sync demo'",
+    ]);
+  });
+
+  it('records covered packages and only warns when one resolves to another major version', async () => {
+    const pack = {
+      ...PACK,
+      version: '2.0.0',
+      covers: [
+        { ecosystem: 'npm', name: 'demo-client' },
+        { ecosystem: 'npm', name: 'demo-absent' },
+      ],
+    };
+    const root = await makeProject({ demo: pack }, DOCS);
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+    expect((await readPackManifest(join(root, 'agent-docs', 'demo'))).recipe.covers).toEqual(
+      pack.covers
+    );
+
+    const lockfile = (client: string): VerifyOptions => ({
+      resolveDependencyVersion: (dependency) =>
+        dependency.name === 'demo-client'
+          ? { kind: 'found', version: client, lockfiles: ['package-lock.json'] }
+          : { kind: 'missing', searched: ['package-lock.json'] },
+    });
+
+    const sameMajor = await verifyPacks(root, undefined, lockfile('2.7.0'));
+    expect(problems(sameMajor)).toEqual([]);
+
+    const otherMajor = await verifyPacks(root, undefined, lockfile('3.1.0'));
+    expect(otherMajor.ok).toBe(true);
+    expect(problems(otherMajor)).toEqual([
+      "demo lockfile warn:  covers npm:demo-client, which the lockfiles resolve to 3.1.0, another major version than the pack's 2.0.0: the pack may not describe that package's version; add a pack for it, or remove it from packs.demo.covers in llm-docs.json",
     ]);
   });
 

@@ -424,6 +424,23 @@ describe('what the hook says', () => {
     );
   });
 
+  it('counts a package the pack covers as pinned, naming the pack once with the newest date', async () => {
+    const covering = { ...HONO, covers: [{ ecosystem: 'npm', name: 'next' }] };
+    const root = await project({
+      lock: npmLock({ hono: '4.13.16', next: '16.1.0' }),
+      packs: { hono: covering },
+      config: { agentFiles: 'auto' },
+      build: ['hono'],
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
+      [
+        PINNED_HEADING,
+        '- Hono 4.13.16 (released 2026-10-21, after cutoff): `agent-docs/hono/index.md`',
+      ].join('\n')
+    );
+  });
+
   it('names the read-first pages of pinned packs, at most two each, before the index', async () => {
     const root = await project({
       lock: npmLock({ hono: '4.13.16', next: '16.1.0', zod: '4.1.0' }),

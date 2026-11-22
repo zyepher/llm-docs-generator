@@ -60,6 +60,7 @@ function pack(id: string, overrides: Partial<PackStatusInput> = {}): PackStatusI
     recipeChanged: false,
     indexPath: `agent-docs/${id}/index.md`,
     readFirst: [],
+    covers: [],
     inConfig: true,
     ...overrides,
   };
@@ -300,6 +301,88 @@ describe('computeStatus next steps and pack releases', () => {
     ]);
     expect(report.afterCutoff).toEqual([]);
     expect(report.nearCutoff).toEqual([]);
+  });
+});
+
+describe('packs that cover other packages', () => {
+  const cutoff: StatusCutoff = { cutoff: '2026-06', label: 'x', source: 'table', assumed: false };
+  // One docs set for a family: bound to the server, covering the client, the core (on another
+  // major), and a package the project does not depend on.
+  const mcp = pack('mcp', {
+    title: 'MCP SDK',
+    version: '2.4.0',
+    dependency: { ecosystem: 'npm', name: '@mcp/server' },
+    covers: [
+      { ecosystem: 'npm', name: '@mcp/client' },
+      { ecosystem: 'npm', name: '@mcp/core' },
+      { ecosystem: 'npm', name: '@mcp/absent' },
+    ],
+  });
+  const input = baseInput({
+    dependencies: [
+      dep('@mcp/server', '2.4.0'),
+      dep('@mcp/client', '2.4.0'),
+      dep('@mcp/core', '3.1.0', { direct: false }),
+      dep('other', '1.0.0'),
+    ],
+    releases: releases({
+      'npm:@mcp/server@2.4.0': '2025-12-01T00:00:00.000Z',
+      'npm:@mcp/client@2.4.0': '2026-10-23T00:00:00.000Z',
+      'npm:@mcp/core@3.1.0': '2026-08-01T00:00:00.000Z',
+      'npm:other@1.0.0': '2026-09-01T00:00:00.000Z',
+    }),
+    cutoff,
+    packs: [mcp],
+  });
+
+  it('counts covered packages as documented and lists those the lockfiles resolve', () => {
+    const report = computeStatus(input);
+
+    expect(report.afterCutoff.map((release) => release.name)).toEqual(['other']);
+    expect(report.packs[0]?.covered).toEqual([
+      {
+        ecosystem: 'npm',
+        name: '@mcp/client',
+        version: '2.4.0',
+        lockfiles: ['package-lock.json'],
+        publishedAt: '2026-10-23T00:00:00.000Z',
+        releaseWindow: 'after-cutoff',
+        majorDiffers: false,
+      },
+      {
+        ecosystem: 'npm',
+        name: '@mcp/core',
+        version: '3.1.0',
+        lockfiles: ['package-lock.json'],
+        publishedAt: '2026-08-01T00:00:00.000Z',
+        releaseWindow: 'after-cutoff',
+        majorDiffers: true,
+      },
+    ]);
+    expect(report.packs[0]).toMatchObject({
+      publishedAt: '2025-12-01T00:00:00.000Z',
+      releaseWindow: null,
+    });
+  });
+
+  it('lists the pack once in the brief, dated by its newest covered release', () => {
+    expect(formatStatusBrief(computeStatus(input), BRIEF_OPTIONS).split('\n').slice(1, 2)).toEqual([
+      '- MCP SDK 2.4.0 (released 2026-10-23, after cutoff): `agent-docs/mcp/index.md`',
+    ]);
+
+    const older = computeStatus({ ...input, packs: [{ ...mcp, covers: [] }] });
+    expect(formatStatusBrief(older, BRIEF_OPTIONS)).not.toContain('MCP SDK');
+    expect(older.afterCutoff.map((release) => release.name)).toEqual(['@mcp/client', 'other']);
+  });
+
+  it('shows covered packages under the pack row, with a note when the major differs', () => {
+    expect(formatStatusHuman(computeStatus(input)).split('\n').slice(0, 5)).toEqual([
+      'Packs:',
+      '  ID   VERSION  DEPENDENCY       LOCKFILE  STATE  RELEASED    READ FIRST  NEXT',
+      '  mcp  2.4.0    npm:@mcp/server  2.4.0     ok     2025-12-01  -           -',
+      '    covers npm:@mcp/client 2.4.0, released 2026-10-23 (after cutoff)',
+      "    covers npm:@mcp/core 3.1.0, released 2026-08-01 (after cutoff); note: its major version differs from the pack's 2.4.0, so the pack may not describe this version",
+    ]);
   });
 });
 

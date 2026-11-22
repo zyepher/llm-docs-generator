@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   findDependencyVersion,
   lockfileEcosystem,
+  majorVersionsDiffer,
   normalizePypiName,
   parsePep508Name,
   scanDependencies,
@@ -595,5 +596,15 @@ describe('findDependencyVersion', () => {
     expect(lockfileEcosystem('requirements-test.txt')).toBe('pypi');
     expect(lockfileEcosystem('x/Package.resolved')).toBe('swiftpm');
     expect(lockfileEcosystem('README.md')).toBeUndefined();
+  });
+});
+
+describe('majorVersionsDiffer', () => {
+  it('compares leading numbers only, and never a version without one', () => {
+    expect(majorVersionsDiffer('2.4.0', '3.0.0')).toBe(true);
+    expect(majorVersionsDiffer('v2.4.0', '2.9.1-beta.1')).toBe(false);
+    expect(majorVersionsDiffer('10.0.0', '1.0.0')).toBe(true);
+    expect(majorVersionsDiffer('2026-07-28', '1.2.0')).toBe(false);
+    expect(majorVersionsDiffer('latest', '1.2.0')).toBe(false);
   });
 });

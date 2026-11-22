@@ -18,7 +18,7 @@ import {
   type DependencyVersionResolver,
   type LoadedProjectConfig,
 } from '../config/project.js';
-import { projectDependencies } from '../deps/lockfiles.js';
+import { majorVersionsDiffer, projectDependencies } from '../deps/lockfiles.js';
 import { isStaleAgentConversion } from '../sources/convert.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
@@ -366,6 +366,11 @@ async function checkRecipe(context: PackCheckContext): Promise<CheckOutcome> {
 }
 
 async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
+  return [...(await boundDependencyFindings(context)), ...(await coveredFindings(context))];
+}
+
+/** The bound dependency must resolve to the pack's version (spec 2.4). */
+async function boundDependencyFindings(context: PackCheckContext): Promise<CheckFinding[]> {
   const dependency = context.manifest.dependency;
 
   if (dependency === null) {
@@ -414,6 +419,35 @@ async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
       ];
     }
   }
+}
+
+/**
+ * A covered package binds no version, so the only thing worth saying is a
+ * different major version, and only as a warning: the packages of one
+ * family do not always share versions.
+ */
+async function coveredFindings(context: PackCheckContext): Promise<CheckFinding[]> {
+  const findings: CheckFinding[] = [];
+  const version = context.manifest.pack.version;
+
+  for (const covered of context.manifest.recipe.covers ?? []) {
+    const lookup = await context.resolveDependencyVersion(covered);
+    const resolved =
+      lookup.kind === 'found'
+        ? [lookup.version]
+        : lookup.kind === 'conflict'
+          ? [...new Set(lookup.versions.map((entry) => entry.version))]
+          : [];
+
+    for (const other of resolved.filter((entry) => majorVersionsDiffer(entry, version))) {
+      findings.push({
+        status: 'warn',
+        message: `covers ${covered.ecosystem}:${covered.name}, which the lockfiles resolve to ${other}, another major version than the pack's ${version}: the pack may not describe that package's version; add a pack for it, or remove it from packs.${context.packId}.covers in llm-docs.json`,
+      });
+    }
+  }
+
+  return findings;
 }
 
 /** Spec 4.10: an unknown or proprietary license warns, and fails under --strict. */
