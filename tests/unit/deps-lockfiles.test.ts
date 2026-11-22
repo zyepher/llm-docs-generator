@@ -445,6 +445,62 @@ describe('scanDependencies walking', () => {
       'flask',
       'shallow-enough',
     ]);
+    expect(scan.warnings).toContain(
+      'Dependency scan did not look more than 6 directories deep, so lockfiles below a/b/c/d/e/f/g were not read.'
+    );
+  });
+
+  it('leaves a lockfile over the size cap unread, and a lookup in its ecosystem says so', async () => {
+    const root = await makeProject({
+      'package-lock.json': JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          '': { dependencies: { zod: '4.0.0' } },
+          'node_modules/zod': { version: '4.0.0' },
+        },
+      }),
+      'requirements.txt': 'flask==3.0.3\n',
+    });
+    const capped = await scanDependencies(root, { maxLockfileBytes: 20 });
+
+    expect(summarize(capped)).toEqual(['flask@3.0.3 direct']);
+    expect(capped.lockfiles).toEqual(['package-lock.json', 'requirements.txt']);
+    expect(capped.warnings).toEqual([
+      expect.stringMatching(
+        /^package-lock\.json: skipped, it is \d+ bytes, over the 20-byte limit for a lockfile\.$/
+      ),
+    ]);
+    expect(findDependencyVersion(capped, { ecosystem: 'npm', name: 'zod' })).toEqual({
+      kind: 'unread',
+      lockfiles: [
+        {
+          lockfile: 'package-lock.json',
+          ecosystems: ['npm'],
+          reason: expect.stringMatching(/^is \d+ bytes, over the 20-byte limit/),
+        },
+      ],
+    });
+    expect(findDependencyVersion(capped, { ecosystem: 'pypi', name: 'flask' })).toMatchObject({
+      kind: 'found',
+      version: '3.0.3',
+    });
+
+    const whole = await scanDependencies(root);
+    expect(whole.unread).toEqual([]);
+    expect(findDependencyVersion(whole, { ecosystem: 'npm', name: 'zod' })).toMatchObject({
+      kind: 'found',
+      version: '4.0.0',
+    });
+  });
+
+  it('marks every ecosystem unread when the scan stops before it has searched the project', async () => {
+    const root = await makeProject({ 'requirements.txt': 'flask==3.0.3\n' });
+    const scan = await scanDependencies(root, { signal: AbortSignal.abort() });
+
+    expect(scan.warnings).toEqual([
+      'Dependency scan stopped at its time limit; lockfiles not read by then were left out.',
+    ]);
+    expect(findDependencyVersion(scan, { ecosystem: 'cargo', name: 'serde' }).kind).toBe('unread');
   });
 
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
@@ -536,7 +592,12 @@ describe('scanDependencies walking', () => {
   it('returns an empty scan for a project without lockfiles', async () => {
     const root = await makeProject({ 'README.md': '# nothing\n' });
 
-    expect(await scanDependencies(root)).toEqual({ dependencies: [], lockfiles: [], warnings: [] });
+    expect(await scanDependencies(root)).toEqual({
+      dependencies: [],
+      lockfiles: [],
+      unread: [],
+      warnings: [],
+    });
   });
 });
 
@@ -553,6 +614,7 @@ describe('findDependencyVersion', () => {
 
   it('finds one version across lockfiles', () => {
     const scan = {
+      unread: [],
       dependencies: [
         dependency({}),
         dependency({ lockfile: 'apps/web/pnpm-lock.yaml' }),
@@ -570,6 +632,7 @@ describe('findDependencyVersion', () => {
 
   it('falls back to transitive entries when nothing declares the dependency', () => {
     const scan = {
+      unread: [],
       dependencies: [dependency({ direct: false, version: '5.4.0' })],
       lockfiles: ['package-lock.json'],
     };
@@ -583,6 +646,7 @@ describe('findDependencyVersion', () => {
 
   it('reports conflicting direct versions with their lockfiles', () => {
     const scan = {
+      unread: [],
       dependencies: [
         dependency({}),
         dependency({ version: '5.4.0', lockfile: 'legacy/package-lock.json' }),
@@ -601,6 +665,7 @@ describe('findDependencyVersion', () => {
 
   it('reports the lockfiles of the ecosystem that were searched when missing', () => {
     const scan = {
+      unread: [],
       dependencies: [dependency({})],
       lockfiles: ['package-lock.json', 'requirements.txt', 'uv.lock'],
     };
@@ -613,6 +678,7 @@ describe('findDependencyVersion', () => {
 
   it('matches PyPI names after PEP 503 normalization', () => {
     const scan = {
+      unread: [],
       dependencies: [
         dependency({
           ecosystem: 'pypi',

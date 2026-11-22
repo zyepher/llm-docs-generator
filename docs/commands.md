@@ -174,6 +174,7 @@ Pack states:
 | `stale-pack` | The lockfile resolves another version (or lockfiles disagree and none matches). | `llm-docs sync <id>`, after editing `version` when the recipe pins one. |
 | `lockfile-conflict` | Lockfiles resolve the bound dependency to different versions, one of them the pack's. | Set `version` to the one the docs describe, or make the lockfiles agree. |
 | `not-in-lockfile` | No lockfile resolves the bound dependency, so nothing checks the pack's version. | Install the dependency, or remove `dependency` from the recipe. |
+| `lockfile-unread` | A lockfile of the dependency's ecosystem was not read (over the 64 MiB lockfile limit), so the pack's version is unknown. | Check the version by hand. |
 | `recipe-changed` | The recipe changed since the last sync. | `llm-docs sync <id>`. |
 | `missing` | Configured but not built, or its manifest cannot be read. | `llm-docs sync <id>`. |
 | `orphan` | Built but no longer in the config. | `llm-docs sync --prune`, or add it back. |

@@ -529,6 +529,13 @@ async function boundDependencyFindings(context: PackCheckContext): Promise<Check
         },
       ];
     }
+    case 'unread':
+      return [
+        {
+          status: 'fail',
+          message: `${label} could not be checked against the lockfiles, because ${lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`).join('; ')}; shrink or split that lockfile, or remove packs.${context.packId}.dependency from llm-docs.json`,
+        },
+      ];
   }
 }
 
@@ -543,6 +550,13 @@ async function coveredFindings(context: PackCheckContext): Promise<CheckFinding[
 
   for (const covered of context.manifest.recipe.covers ?? []) {
     const lookup = await context.resolveDependencyVersion(covered);
+    if (lookup.kind === 'unread') {
+      findings.push({
+        status: 'warn',
+        message: `covers ${covered.ecosystem}:${covered.name}, which could not be checked against the lockfiles, because ${lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`).join('; ')}`,
+      });
+      continue;
+    }
     const resolved =
       lookup.kind === 'found'
         ? [lookup.version]

@@ -677,8 +677,15 @@ per problem with the pack id, check name, and path.
 
 `scanDependencies(projectRoot)` walks the project with the shared walker (max depth 6, at most
 200,000 entries, skip `node_modules`, `.git`, build, vendor, virtualenv, and tool cache dirs,
-and `packsDir`), finds lockfiles, and returns resolved dependencies. The hook's deadline can
-stop the scan early, with a warning:
+and `packsDir`), finds lockfiles, and returns resolved dependencies. Directories below the
+depth limit are named in one warning. A lockfile larger than `maxLockfileBytes` (64 MiB for
+commands; 4 MiB for the hook, whose deadline cannot interrupt a synchronous parse) is skipped
+with a warning naming it and its size. The hook's deadline can stop the scan early, with a
+warning. A lockfile skipped either way is listed in `unread`, and a lookup in its ecosystem
+answers `unread` rather than guessing from the other lockfiles. Every entry a parser returns
+must have a version that is one line of printable characters without whitespace, at most 128
+characters, and a name that follows its registry's rule; any other entry is skipped with a
+warning naming the lockfile and the package:
 
 ```ts
 type Ecosystem = 'npm' | 'pypi' | 'cargo' | 'go' | 'pub' | 'swiftpm'
@@ -779,8 +786,10 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
 
 - Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved or
   lockfiles disagree with none matching; `lockfile-conflict` when the lockfiles disagree and
-  one matches; `not-in-lockfile` when no lockfile resolves the bound dependency; these win
-  over `recipe-changed`; `recipe-changed`;
+  one matches; `not-in-lockfile` when no lockfile resolves the bound dependency;
+  `lockfile-unread` when a lockfile of its ecosystem was skipped (too large, or past the
+  hook's deadline), so its version is unknown; these win over `recipe-changed`;
+  `recipe-changed`;
   `missing` when configured but never synced or its manifest cannot be read; `orphan`), the
   release date of
   the pack's version of its bound dependency and whether it falls after or near the cutoff,
@@ -913,7 +922,9 @@ context for the agent. Behavior:
      `status`. A dependency name is printed exactly, as a code span (`` `@types/node` ``).
      Every value from a lockfile, a manifest, a registry, or config passes through one escape
      where it is placed (one line, no backtick, `<` and `>` as `&lt;` and `&gt;`), here and in
-     the human `status` report.
+     the human `status` report. A `lockfile-unread` pack gets no row: the note says nothing
+     about a lockfile it did not read, and the warm-up `status` run, which reads lockfiles up
+     to 64 MiB, is started for it.
   2. Built packs whose library version (the pack's version of its bound dependency), or any
      package it `covers` at the version the lockfiles resolve, was released after the model's
      training cutoff or within the near-cutoff window, most recent first, one line per pack with

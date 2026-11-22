@@ -31,6 +31,7 @@ import {
   type DependencyVersionLookup,
   type Ecosystem,
   type ResolvedDependency,
+  type UnreadLockfile,
 } from './lockfiles.js';
 import {
   lookupReleaseDates,
@@ -45,6 +46,7 @@ export type PackState =
   | 'stale-pack'
   | 'lockfile-conflict'
   | 'not-in-lockfile'
+  | 'lockfile-unread'
   | 'recipe-changed'
   | 'missing'
   | 'orphan';
@@ -168,6 +170,8 @@ export interface ComputeStatusInput {
   now: Date;
   /** Window for the no-cutoff `recent` list; default 180 days. */
   recentDays?: number;
+  /** Lockfiles the scan found but did not read; a pack bound through one is `lockfile-unread`. */
+  unread?: UnreadLockfile[];
 }
 
 const DEFAULT_RECENT_DAYS = 180;
@@ -214,6 +218,8 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
         : 'stale-pack';
     case 'missing':
       return 'not-in-lockfile';
+    case 'unread':
+      return 'lockfile-unread';
     case undefined:
       break;
   }
@@ -287,6 +293,13 @@ function packNextStep(
         : `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe, then run '${sync}'`;
     case 'not-in-lockfile':
       return `install ${dependency} so a lockfile resolves it, or remove packs.${id}.dependency from ${CONFIG_FILE_NAME}`;
+    case 'lockfile-unread': {
+      const unread =
+        lookup?.kind === 'unread'
+          ? lookup.lockfiles.map((entry) => `${messageText(entry.lockfile)} ${entry.reason}`)
+          : [];
+      return `check by hand that the lockfiles resolve ${dependency} to ${messageText(pack.version ?? 'the pack version')}: ${unread.join('; ')}`;
+    }
     case 'recipe-changed':
     case 'missing':
       return sync;
@@ -323,7 +336,7 @@ function packReleaseQuery(pack: PackStatusInput): ReleaseQuery | undefined {
 
 /** The versions the lockfiles resolve for a dependency, each with the lockfiles that say so. */
 function resolvedVersions(
-  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles'>,
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread'>,
   dependency: DependencyRef
 ): { version: string; lockfiles: string[] }[] {
   const lookup = findDependencyVersion(scan, dependency);
@@ -332,6 +345,7 @@ function resolvedVersions(
     case 'found':
       return [{ version: lookup.version, lockfiles: lookup.lockfiles }];
     case 'missing':
+    case 'unread':
       return [];
     case 'conflict': {
       const byVersion = new Map<string, string[]>();
@@ -352,7 +366,7 @@ function resolvedVersions(
  */
 export function computeStatus(input: ComputeStatusInput): StatusReport {
   const lockfiles = [...new Set(input.dependencies.map((dependency) => dependency.lockfile))];
-  const scan = { dependencies: input.dependencies, lockfiles };
+  const scan = { dependencies: input.dependencies, lockfiles, unread: input.unread ?? [] };
   const recentDays = input.recentDays ?? DEFAULT_RECENT_DAYS;
   const end = input.cutoff === undefined ? undefined : cutoffEnd(input.cutoff.cutoff);
 
@@ -776,6 +790,8 @@ function lockfileSummary(pack: PackStatus): string {
         .join(', ');
     case 'missing':
       return 'not in any lockfile';
+    case 'unread':
+      return 'lockfile not read';
     default:
       return '-';
   }
@@ -943,6 +959,8 @@ export interface GatherStatusOptions {
   signal?: AbortSignal;
   /** Tests point the registries at a local server. */
   endpoints?: Partial<RegistryEndpoints>;
+  /** Largest lockfile the scan reads (the hook's is small enough for its deadline). */
+  maxLockfileBytes?: number;
 }
 
 export interface ProjectStatus {
@@ -956,8 +974,10 @@ export interface ProjectStatus {
   cutoff: ModelCutoff | null;
   /**
    * Release dates this run could not get only because it ran out of time or
-   * hit a transport error (not because the registry has none). Above zero, a
-   * background warm-up helps the next session.
+   * hit a transport error (not because the registry has none), plus one per
+   * lockfile it left unread (over its size cap, or past the deadline), whose
+   * dependencies' dates it never asked for. Above zero, a background
+   * warm-up, a `status` run without the hook's limits, helps the next session.
    */
   pendingReleaseDates: number;
   /** Scan, cache, and lookup warnings, sorted. */
@@ -1020,6 +1040,9 @@ export async function gatherProjectStatus(
   const dependencies = projectDependencies(projectRoot, {
     ...(loaded === null ? {} : { skipDirectories: [loaded.packsDirRelative] }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.maxLockfileBytes === undefined
+      ? {}
+      : { maxLockfileBytes: options.maxLockfileBytes }),
   });
   const model =
     resolveModelIdFromEnvironment({
@@ -1080,10 +1103,11 @@ export async function gatherProjectStatus(
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.endpoints === undefined ? {} : { endpoints: options.endpoints }),
   });
-  const pendingReleaseDates = [...queries.keys()].filter((key) => {
-    const source = lookup.releases.get(key)?.source;
-    return source === 'budget' || source === 'error';
-  }).length;
+  const pendingReleaseDates =
+    [...queries.keys()].filter((key) => {
+      const source = lookup.releases.get(key)?.source;
+      return source === 'budget' || source === 'error';
+    }).length + scan.unread.length;
 
   const report = computeStatus({
     dependencies: scan.dependencies,
@@ -1102,6 +1126,7 @@ export async function gatherProjectStatus(
     nearCutoffDays: loaded?.config.hook?.nearCutoffDays ?? DEFAULT_NEAR_CUTOFF_DAYS,
     packs: packInputs,
     now: options.now,
+    unread: scan.unread,
   });
 
   return {

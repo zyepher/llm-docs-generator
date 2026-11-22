@@ -1,5 +1,5 @@
 import type { Dirent } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join, posix, resolve, sep } from 'node:path';
 
 import { FAILSAFE_SCHEMA } from 'js-yaml';
@@ -73,7 +73,22 @@ export interface DependencyScan {
   dependencies: ResolvedDependency[];
   /** Project-relative POSIX paths of every lockfile found (including unsupported ones). */
   lockfiles: string[];
+  /**
+   * Lockfiles found but never read: over `maxLockfileBytes`, or still waiting
+   * when the scan was stopped. What they resolve is unknown, so a lookup in
+   * their ecosystem says so instead of answering from the others.
+   */
+  unread: UnreadLockfile[];
   warnings: string[];
+}
+
+export interface UnreadLockfile {
+  /** The lockfile, or `.` when the scan stopped before it found every lockfile. */
+  lockfile: string;
+  /** The ecosystems it could resolve: its own, or every one for `.`. */
+  ecosystems: readonly Ecosystem[];
+  /** Why, as a clause after the path: "is 70000000 bytes, over the ...". */
+  reason: string;
 }
 
 export interface DependencyRef {
@@ -84,7 +99,11 @@ export interface DependencyRef {
 export type DependencyVersionLookup =
   | { kind: 'found'; version: string; lockfiles: string[] }
   | { kind: 'conflict'; versions: { version: string; lockfile: string }[] }
-  | { kind: 'missing'; searched: string[] };
+  | { kind: 'missing'; searched: string[] }
+  | { kind: 'unread'; lockfiles: UnreadLockfile[] };
+
+/** The lockfile size a command reads; a larger one is skipped with a warning. */
+const DEFAULT_MAX_LOCKFILE_BYTES = 64 * 1024 * 1024;
 
 export interface ScanDependenciesOptions {
   maxDepth?: number;
@@ -95,6 +114,11 @@ export interface ScanDependenciesOptions {
    * warning. The session-start hook passes its deadline.
    */
   signal?: AbortSignal;
+  /**
+   * Largest lockfile read, in bytes (default DEFAULT_MAX_LOCKFILE_BYTES).
+   * Parsing is synchronous, so the hook passes a cap its deadline survives.
+   */
+  maxLockfileBytes?: number;
 }
 
 const SCAN_STOPPED_WARNING =
@@ -205,10 +229,14 @@ export async function scanDependencies(
   const warnings: string[] = [];
   const found: { lockfile: string; parser: LockfileParser | undefined; unsupported?: string }[] =
     [];
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+  const maxLockfileBytes = options.maxLockfileBytes ?? DEFAULT_MAX_LOCKFILE_BYTES;
+  const tooDeep: string[] = [];
+  const unread: UnreadLockfile[] = [];
 
   for await (const event of walkBoundedDirectoryTree({
     root,
-    maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
+    maxDepth,
     maxEntries: MAX_WALK_ENTRIES,
     // The file budget never stops the walk; the entry budget is the real bound.
     maxFiles: MAX_WALK_ENTRIES,
@@ -218,6 +246,11 @@ export async function scanDependencies(
   })) {
     if (options.signal?.aborted === true) {
       warnings.push(SCAN_STOPPED_WARNING);
+      unread.push({
+        lockfile: '.',
+        ecosystems: ECOSYSTEMS,
+        reason: 'was not searched to the end before the time limit',
+      });
       break;
     }
 
@@ -232,6 +265,11 @@ export async function scanDependencies(
       warnings.push(
         `Dependency scan could not read ${toPosixPath(event.relativePath) || '.'}: ${errorMessage(event.error)}`
       );
+      continue;
+    }
+
+    if (event.kind === 'depth-pruned') {
+      tooDeep.push(toPosixPath(event.relativePath));
       continue;
     }
 
@@ -257,13 +295,30 @@ export async function scanDependencies(
 
   found.sort((a, b) => compareStringsByCodeUnit(a.lockfile, b.lockfile));
 
+  if (tooDeep.length > 0) {
+    warnings.push(
+      `Dependency scan did not look more than ${maxDepth} directories deep, so lockfiles below ${tooDeep.slice(0, 3).join(', ')}${tooDeep.length > 3 ? ` and ${tooDeep.length - 3} more directories` : ''} were not read.`
+    );
+  }
+
   const dependencies: ResolvedDependency[] = [];
   const skipped: { lockfile: string; name: string; reason: SkipReason }[] = [];
 
   for (const entry of found) {
+    const ecosystem = lockfileEcosystem(entry.lockfile);
+
     if (options.signal?.aborted === true) {
-      warnings.push(SCAN_STOPPED_WARNING);
-      break;
+      if (entry.parser && ecosystem !== undefined) {
+        unread.push({
+          lockfile: entry.lockfile,
+          ecosystems: [ecosystem],
+          reason: 'was not read before the time limit',
+        });
+      }
+      if (!warnings.includes(SCAN_STOPPED_WARNING)) {
+        warnings.push(SCAN_STOPPED_WARNING);
+      }
+      continue;
     }
 
     if (!entry.parser) {
@@ -274,6 +329,14 @@ export async function scanDependencies(
     const absolutePath = join(root, ...entry.lockfile.split('/'));
 
     try {
+      const bytes = (await stat(absolutePath)).size;
+      if (bytes > maxLockfileBytes) {
+        const reason = `is ${bytes} bytes, over the ${maxLockfileBytes}-byte limit for a lockfile`;
+        unread.push({ lockfile: entry.lockfile, ecosystems: ecosystem ? [ecosystem] : [], reason });
+        warnings.push(`${entry.lockfile}: skipped, it ${reason}.`);
+        continue;
+      }
+
       const result = await entry.parser({
         projectRoot: root,
         lockfile: entry.lockfile,
@@ -312,6 +375,7 @@ export async function scanDependencies(
   return {
     dependencies: mergeDependencies(dependencies),
     lockfiles: found.map((entry) => entry.lockfile),
+    unread,
     warnings: [...new Set(warnings)].sort(compareStringsByCodeUnit),
   };
 }
@@ -346,12 +410,20 @@ export function projectDependencies(
 /**
  * The version a project resolves for one dependency. Direct entries win when
  * any exist, so a transitive copy at another version (common in npm trees)
- * does not turn a clear answer into a conflict.
+ * does not turn a clear answer into a conflict. A lockfile of its ecosystem
+ * that was never read makes the answer unknown (`unread`), since it could
+ * resolve the dependency to anything.
  */
 export function findDependencyVersion(
-  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles'>,
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread'>,
   ref: DependencyRef
 ): DependencyVersionLookup {
+  const unread = scan.unread.filter((entry) => entry.ecosystems.includes(ref.ecosystem));
+
+  if (unread.length > 0) {
+    return { kind: 'unread', lockfiles: unread };
+  }
+
   const wanted = normalizeDependencyName(ref.ecosystem, ref.name);
   const matches = scan.dependencies.filter(
     (dependency) =>

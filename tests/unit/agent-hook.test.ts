@@ -767,6 +767,26 @@ describe('background warm-up', () => {
     expect((await runHook(at(7))).spawned).toEqual([root]);
     expect((await readdir(join(cache, 'hook-warm'))).length).toBe(1);
   });
+
+  it('leaves a lockfile over its size cap to the warm-up and says nothing false about packs bound through it', async () => {
+    const root = await project({ packs: { hono: HONO, zod: ZOD_PINNED }, build: ['hono', 'zod'] });
+    const lock = await readFile(join(root, 'package-lock.json'), 'utf-8');
+    await writeFile(
+      join(root, 'package-lock.json'),
+      `${lock}${' '.repeat(HOOK_LIMITS.maxLockfileBytes)}`
+    );
+
+    const run = await runHook({ payload: { cwd: root, ...OPUS } });
+    const text = injected(run);
+    // zod's stale version lives in the unread lockfile: no row claims anything about it.
+    expect(text).not.toContain('Pinned docs packs to fix:');
+    expect(text).not.toContain('zod: ');
+    expect(text.split('\n').slice(0, 2)).toEqual([
+      PINNED_HEADING,
+      '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+    ]);
+    expect(run.spawned).toEqual([root]);
+  });
 });
 
 describe('background warm-up through links', () => {

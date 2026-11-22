@@ -743,6 +743,33 @@ describe('formatStatusBrief', () => {
     expect(human).toContain('covers npm:covered &lt;!-- END llm-docs --&gt;');
   });
 
+  it('says nothing about a lockfile it did not read, and still lists the pack it pins', () => {
+    const report = computeStatus(
+      baseInput({
+        releases: releases({ 'npm:zod@4.0.0': '2026-09-01T00:00:00.000Z' }),
+        cutoff,
+        unread: [
+          {
+            lockfile: 'pnpm-lock.yaml',
+            ecosystems: ['npm'],
+            reason: 'is 9000000 bytes, over the 4194304-byte limit for a lockfile',
+          },
+        ],
+        packs: [pack('zod', { version: '4.0.0', dependency: { ecosystem: 'npm', name: 'zod' } })],
+      })
+    );
+
+    expect(report.packs[0]).toMatchObject({
+      state: 'lockfile-unread',
+      nextStep:
+        'check by hand that the lockfiles resolve npm:zod to 4.0.0: pnpm-lock.yaml is 9000000 bytes, over the 4194304-byte limit for a lockfile',
+    });
+    expect(formatStatusBrief(report, BRIEF_OPTIONS).split('\n')).toEqual([
+      expect.stringMatching(/^Pinned docs for libraries released after or close to/),
+      '- zod 4.0.0 (released 2026-09-01, after cutoff): `agent-docs/zod/index.md`',
+    ]);
+  });
+
   it('says when no lockfile resolves a bound dependency, with the fix, in the note and the report', () => {
     const report = computeStatus(
       baseInput({

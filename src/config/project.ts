@@ -903,6 +903,12 @@ async function resolvePackVersion(
         `Pack "${id}": lockfiles resolve ${label} to different versions (${versions}); set packs.${id}.version in ${CONFIG_FILE_NAME} to the one these docs describe.`
       );
     }
+    case 'unread': {
+      const unread = lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`);
+      throw new ConfigError(
+        `Pack "${id}": the version of ${label} is unknown because a lockfile was not read (${unread.join('; ')}); set packs.${id}.version in ${CONFIG_FILE_NAME}.`
+      );
+    }
   }
 }
 
