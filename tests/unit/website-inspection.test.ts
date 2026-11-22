@@ -353,6 +353,8 @@ describe('inspectWebsite', () => {
               `- [Again](${origin}/spec/2026-07-28/basic.md)`,
               `- [Intro](${origin}/intro.md)`,
               `- [Proposal](${origin}/seps/1-proposal.md)`,
+              `- [Draft](${origin}/spec/draft/basic/x.md)`,
+              `- [Spec home](${origin}/spec/home.md)`,
               '- [Release](https://elsewhere.example/1.2/notes)',
             ].join('\n')
           );
@@ -376,7 +378,7 @@ describe('inspectWebsite', () => {
 
     expect(inspection.llmsTxt).toEqual({
       url: `${baseUrl}/llms.txt`,
-      listedUrls: 9,
+      listedUrls: 11,
       versionSegments: [
         { segment: 'v8', urls: 3 },
         { segment: '2026-07-28', urls: 2 },
@@ -390,6 +392,8 @@ describe('inspectWebsite', () => {
         { prefix: '/', urls: 1 },
         { prefix: '/docs/v7', urls: 1 },
         { prefix: '/seps', urls: 1 },
+        { prefix: '/spec', urls: 1 },
+        { prefix: '/spec/draft', urls: 1 },
       ],
       morePathPrefixes: 0,
       markdownProbes: [

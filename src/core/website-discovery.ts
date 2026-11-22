@@ -112,8 +112,9 @@ export interface WebsiteVersionSegment {
 /**
  * A leading path prefix of listed same-origin URLs, the form an `--include`
  * glob starts with: the path through the first version segment of the URL's
- * directories (`/specification/2026-07-28`), else its first directory
- * (`/seps`), else `/` for a page at the root.
+ * directories (`/specification/2026-07-28`); for a URL without one, the same
+ * depth its first directory's versioned URLs have (`/specification/draft`),
+ * else its first directory (`/seps`), else `/` for a page at the root.
  */
 export interface WebsitePathPrefix {
   prefix: string;
@@ -368,19 +369,34 @@ function pathPrefixes(
   urls: readonly string[],
   origin: string
 ): { pathPrefixes: WebsitePathPrefix[]; morePathPrefixes: number } {
-  const counts = new Map<string, number>();
-
-  for (const value of urls) {
+  const listed = urls.flatMap((value) => {
     const url = new URL(value);
     if (url.origin !== origin) {
-      continue;
+      return [];
     }
     const directories = url.pathname
       .split('/')
       .filter((segment) => segment !== '')
       .slice(0, -1);
-    const version = directories.findIndex((segment) => VERSION_SEGMENT.test(segment));
-    const prefix = `/${directories.slice(0, version === -1 ? 1 : version + 1).join('/')}`;
+    return [{ directories, version: directories.findIndex((s) => VERSION_SEGMENT.test(s)) }];
+  });
+  // Unversioned URLs under a directory whose other URLs are versioned are cut at the same
+  // depth, so a `draft` or `next` tree stands as its own prefix beside the versions.
+  const versionDepth = new Map<string, number>();
+  for (const { directories, version } of listed) {
+    const [first] = directories;
+    if (first !== undefined && version !== -1) {
+      versionDepth.set(first, Math.min(versionDepth.get(first) ?? version + 1, version + 1));
+    }
+  }
+
+  const counts = new Map<string, number>();
+  for (const { directories, version } of listed) {
+    const depth =
+      version === -1
+        ? Math.min(versionDepth.get(directories[0] ?? '') ?? 1, directories.length)
+        : version + 1;
+    const prefix = `/${directories.slice(0, depth).join('/')}`;
     counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
   }
 
