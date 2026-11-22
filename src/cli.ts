@@ -1401,7 +1401,7 @@ function buildProgram(): Command {
         { projectRoot, loaded: await loadProjectConfigIfPresent(projectRoot) },
         {
           offline: options.offline === true,
-          ...(options.model === undefined ? {} : { modelId: options.model }),
+          ...(options.model === undefined ? {} : { model: { id: options.model, source: 'flag' } }),
           ...(options.cutoff === undefined ? {} : { cutoff: options.cutoff }),
           env: process.env,
           homeDir: homedir(),

@@ -337,7 +337,7 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
         offline: false,
         budgetMs: HOOK_LIMITS.networkMs,
         signal: AbortSignal.timeout(Math.max(0, Math.floor(left() - HOOK_LIMITS.reserveMs))),
-        ...(payload.model === undefined ? {} : { modelId: payload.model }),
+        ...(payload.model === undefined ? {} : { model: { id: payload.model, source: 'payload' } }),
         ...(io.registryEndpoints === undefined ? {} : { endpoints: io.registryEndpoints }),
         env: io.env,
         homeDir: io.homeDir,

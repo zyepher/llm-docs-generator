@@ -173,7 +173,7 @@ Pack states:
 | `missing` | Configured but not built, or its manifest cannot be read. | `llm-docs sync <id>`. |
 | `orphan` | Built but no longer in the config. | `llm-docs sync --prune`, or add it back. |
 
-- `--model <id>` takes a model id or a Claude Code alias. Without it, `status` uses `ANTHROPIC_MODEL`, then the `model` in Claude Code's settings files, as the hook does.
+- `--model <id>` takes a model id or a Claude Code alias. Without it, `status` uses `ANTHROPIC_MODEL`, then the `model` in Claude Code's settings files, as the hook does. The report prints the model and where its id came from. A settings file holds only a default that a session can override, so a cutoff found through one is marked as assumed, and the note words it as an assumption.
 - `--cutoff YYYY-MM` sets the cutoff directly. A malformed cutoff, from the option, `model.cutoff`, or `LLM_DOCS_MODEL_CUTOFF`, exits `2`. (The session-start hook instead logs a malformed `LLM_DOCS_MODEL_CUTOFF` and skips it.)
 - `--offline` uses cached release dates only. Without it, missing dates are fetched from the registries and cached.
 - `--brief` prints only the session-start note on stdout, for the harness detected from the environment, and nothing when there is nothing to say. It takes precedence over `--json`, and it prints even when the hook is turned off.
@@ -189,7 +189,8 @@ Pack states:
 | Field | Meaning |
 |---|---|
 | `packs[]` | `id`, `title`, `version`, `dependency`, `state`, `lockfile` (the lockfile lookup, for packs with a dependency), `indexPath`, `readFirst` (project-relative paths), `publishedAt`, `releaseWindow` (`after-cutoff`, `near-cutoff`, `recent`, or `null`), and `nextStep` (`null` when `ok`). Sorted by id. |
-| `cutoff` | `{ cutoff, label }`, where `label` names the model or the setting the cutoff came from, or `null` when none resolved. |
+| `model` | `{ id, source }`, where `source` is `flag` (`--model`), `env` (`ANTHROPIC_MODEL`), or `settings` (with `file`, the settings file it was read from), or `null` when no model is known. |
+| `cutoff` | `{ cutoff, label, source, assumed }`, or `null` when none resolved. `label` names the model or the setting the cutoff came from. `source` is `flag`, `config`, `env` (`LLM_DOCS_MODEL_CUTOFF`), or `table`. `assumed` is true when the cutoff is the table's for a model read from a settings file. |
 | `afterCutoff[]`, `nearCutoff[]`, `recent[]` | Direct dependencies without a pack: `ecosystem`, `name`, `version`, `publishedAt`, `dev`, `lockfiles`, and `nextStep`. `recent` is used only when no cutoff resolves. |
 | `recentDays` | The window of `recent`, 180. |
 | `directDependencies` | How many direct dependencies were checked. |

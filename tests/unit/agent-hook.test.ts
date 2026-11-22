@@ -339,14 +339,42 @@ describe('which project and model the hook reads', () => {
       cutoffOf('Claude Opus 5', '2026-05')
     );
 
+    // A settings file names only the default model, which the session may have overridden,
+    // so the cutoff it leads to is stated as an assumption.
+    const assumedOf = (label: string, month: string): string =>
+      `Assuming your model is the configured default (${label}, cutoff ${month}): direct dependencies released after or close to that cutoff with no pinned docs. If you are a different model, judge by the release dates shown. Newest first:`;
     await writeFiles(home, {
       '.claude/settings.json': JSON.stringify({ model: 'claude-sonnet-5' }),
     });
-    expect(await heading({ payload: { cwd: root } })).toBe(cutoffOf('Claude Sonnet 5', '2026-01'));
+    expect(await heading({ payload: { cwd: root } })).toBe(assumedOf('Claude Sonnet 5', '2026-01'));
 
     await writeFiles(root, { '.claude/settings.json': JSON.stringify({ model: 'opus' }) });
     expect(await heading({ payload: { cwd: root } })).toBe(
-      cutoffOf('Claude Opus 5.5 (alias opus)', '2026-06')
+      assumedOf('Claude Opus 5.5 (alias opus)', '2026-06')
+    );
+    expect(await heading({ payload: { cwd: root }, env })).toBe(
+      cutoffOf('Claude Opus 5', '2026-05')
+    );
+  });
+
+  it('states the cutoff as an assumption in each heading that names it when only a settings default names the model', async () => {
+    const root = await project({
+      lock: npmLock({ hono: '4.13.16', next: '16.1.0' }),
+      packs: { hono: HONO },
+      config: { agentFiles: 'auto' },
+      build: ['hono'],
+      files: { '.claude/settings.local.json': JSON.stringify({ model: 'claude-opus-5-5' }) },
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root } }))).toBe(
+      [
+        'Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): pinned docs for libraries released after or close to that cutoff. If you are a different model, judge by the release dates shown. Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:',
+        '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+        '',
+        'Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): direct dependencies released after or close to that cutoff with no pinned docs, newest first:',
+        '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+        DEPENDENCIES_FOOTER,
+      ].join('\n')
     );
   });
 

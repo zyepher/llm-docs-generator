@@ -789,6 +789,7 @@ describe('llm-docs v3 CLI', () => {
         '  ID    VERSION  DEPENDENCY  LOCKFILE  STATE  RELEASED                   READ FIRST  NEXT',
         '  hono  4.13.16  npm:hono    4.13.16   ok     2026-09-02 (after cutoff)  -           -',
         '',
+        'Model: claude-opus-5-5 (--model).',
         'Model training data cutoff: 2026-06 (Claude Opus 5.5).',
         '',
         'Direct dependencies released after the cutoff without a pack:',
@@ -804,7 +805,8 @@ describe('llm-docs v3 CLI', () => {
     expect(json.code).toBe(0);
     expect(json.stderr).toBe(human.stderr);
     expect(JSON.parse(json.stdout)).toMatchObject({
-      cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5' },
+      model: { id: 'claude-opus-5-5', source: 'flag' },
+      cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5', source: 'table', assumed: false },
       packs: [
         {
           id: 'hono',

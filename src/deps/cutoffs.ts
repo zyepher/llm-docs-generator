@@ -200,9 +200,19 @@ export function resolveModelCutoff(input: ResolveModelCutoffInput): ModelCutoff 
   return match ? { ...match, source: 'table' } : undefined;
 }
 
+/**
+ * A model id and where it came from. `payload` (the harness reported it),
+ * `flag` (`status --model`), and `env` (ANTHROPIC_MODEL) name the session's
+ * model. `settings` is only the default in a Claude Code settings file, which
+ * a session started with `--model` overrides without telling the hook.
+ */
+export type ModelIdentity =
+  | { id: string; source: 'payload' | 'flag' | 'env' }
+  | { id: string; source: 'settings'; file: string };
+
 export interface ResolveModelIdInput {
-  /** `model` from the hook payload, when the harness sent one. */
-  payloadModel?: string;
+  /** The model the hook payload or `--model` names, when there is one. */
+  stated?: { id: string; source: 'payload' | 'flag' };
   env: NodeJS.ProcessEnv;
   projectRoot: string;
   homeDir: string;
@@ -210,21 +220,26 @@ export interface ResolveModelIdInput {
 
 /**
  * The model a Claude Code session most likely runs, for when the hook
- * payload omits it (headless runs) or carries only an alias. Precedence:
- * payload, ANTHROPIC_MODEL, then `model` in the first readable settings file
- * among project `.claude/settings.local.json`, project `.claude/settings.json`,
- * and user `~/.claude/settings.json`. Unreadable or invalid files are skipped
- * silently: the hook must never fail on someone else's config.
+ * payload omits it (headless runs) or carries only an alias. Precedence: the
+ * stated model, ANTHROPIC_MODEL, then `model` in the first readable settings
+ * file among project `.claude/settings.local.json`, project
+ * `.claude/settings.json`, and user `~/.claude/settings.json`. Unreadable or
+ * invalid files are skipped silently: the hook must never fail on someone
+ * else's config.
  */
-export function resolveModelIdFromEnvironment(input: ResolveModelIdInput): string | undefined {
-  if (isNonEmptyString(input.payloadModel?.trim())) {
-    return input.payloadModel?.trim();
+export function resolveModelIdFromEnvironment(
+  input: ResolveModelIdInput
+): ModelIdentity | undefined {
+  const stated = input.stated?.id.trim();
+
+  if (input.stated !== undefined && isNonEmptyString(stated)) {
+    return { id: stated, source: input.stated.source };
   }
 
   const fromEnv = input.env.ANTHROPIC_MODEL?.trim();
 
   if (isNonEmptyString(fromEnv)) {
-    return fromEnv;
+    return { id: fromEnv, source: 'env' };
   }
 
   const settingsFiles = [
@@ -233,11 +248,11 @@ export function resolveModelIdFromEnvironment(input: ResolveModelIdInput): strin
     join(input.homeDir, '.claude', 'settings.json'),
   ];
 
-  for (const path of settingsFiles) {
-    const model = readSettingsModel(path);
+  for (const file of settingsFiles) {
+    const id = readSettingsModel(file);
 
-    if (model !== undefined) {
-      return model;
+    if (id !== undefined) {
+      return { id, source: 'settings', file };
     }
   }
 

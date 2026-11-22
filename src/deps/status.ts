@@ -15,7 +15,12 @@ import {
 } from '../config/project.js';
 import { readProjectPacks, type ProjectPack } from '../pack/manifest.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
-import { resolveModelCutoff, resolveModelIdFromEnvironment, type ModelCutoff } from './cutoffs.js';
+import {
+  resolveModelCutoff,
+  resolveModelIdFromEnvironment,
+  type ModelCutoff,
+  type ModelIdentity,
+} from './cutoffs.js';
 import {
   findDependencyVersion,
   normalizeDependencyName,
@@ -93,10 +98,24 @@ export interface DependencyRelease {
   nextStep: string;
 }
 
+/** The cutoff release dates are compared against, and how sure status is of it. */
+export interface StatusCutoff {
+  cutoff: string;
+  label: string;
+  source: ModelCutoff['source'];
+  /**
+   * The cutoff is the table's for a model read from a settings-file default,
+   * which a session can override unseen: the note states it as an assumption.
+   */
+  assumed: boolean;
+}
+
 export interface StatusReport {
   /** Sorted by id. */
   packs: PackStatus[];
-  cutoff: { cutoff: string; label: string } | null;
+  /** The model compared against and where its id came from, or null when none is known. */
+  model: ModelIdentity | null;
+  cutoff: StatusCutoff | null;
   /** Direct dependencies without a pack, released after the cutoff month, newest first. */
   afterCutoff: DependencyRelease[];
   /** Released within `nearCutoffDays` before the end of the cutoff month, newest first. */
@@ -117,7 +136,8 @@ export interface StatusReport {
 export interface ComputeStatusInput {
   dependencies: ResolvedDependency[];
   releases: Map<string, ReleaseInfo>;
-  cutoff?: { cutoff: string; label: string };
+  model?: ModelIdentity;
+  cutoff?: StatusCutoff;
   nearCutoffDays: number;
   packs: PackStatusInput[];
   now: Date;
@@ -350,7 +370,8 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
 
   return {
     packs,
-    cutoff: input.cutoff ? { cutoff: input.cutoff.cutoff, label: input.cutoff.label } : null,
+    model: input.model ?? null,
+    cutoff: input.cutoff ?? null,
     afterCutoff: inWindow('after-cutoff'),
     nearCutoff: inWindow('near-cutoff'),
     recent: inWindow('recent'),
@@ -508,11 +529,24 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
     )
     .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt));
 
+  const cutoff = report.cutoff;
+  // A cutoff reached through a settings-file default is an assumption: each heading that
+  // names it says so, and the first one says what to do when the assumption is wrong.
+  const assumption =
+    cutoff?.assumed === true
+      ? `Assuming your model is the configured default (${cutoff.label}, cutoff ${cutoff.cutoff})`
+      : undefined;
+  const judge = 'If you are a different model, judge by the release dates shown.';
+
   if (pinned.length > 0) {
+    const lead =
+      cutoff === null
+        ? `Pinned docs for libraries released in the last ${report.recentDays} days. Your training data may predate these versions:`
+        : assumption === undefined
+          ? `Pinned docs for libraries released after or close to your training data cutoff (${cutoff.label}, through ${cutoff.cutoff}). Your memory of these libraries predates these versions:`
+          : `${assumption}: pinned docs for libraries released after or close to that cutoff. ${judge} Your memory of these libraries predates these versions:`;
     sections.push({
-      heading: report.cutoff
-        ? `Pinned docs for libraries released after or close to your training data cutoff (${report.cutoff.label}, through ${report.cutoff.cutoff}). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:`
-        : `Pinned docs for libraries released in the last ${report.recentDays} days. Your training data may predate these versions: read the pinned pages before writing code against them. Newest first:`,
+      heading: `${lead} read the pinned pages before writing code against them. Newest first:`,
       rows: pinned.map(({ pack, version, publishedAt, window }) => {
         const tag = WINDOW_TAG[window];
         const lead = `- ${escapeBlockText(pack.title)} ${escapeBlockText(version)} (released ${releaseDay(publishedAt)}${tag ? `, ${tag}` : ''}): `;
@@ -530,7 +564,7 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
     });
   }
 
-  const flagged = report.cutoff
+  const flagged = cutoff
     ? [
         ...report.afterCutoff.map((release) => ({ release, tag: 'after cutoff' })),
         ...report.nearCutoff.map((release) => ({ release, tag: 'near cutoff' })),
@@ -539,9 +573,12 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
 
   if (flagged.length > 0) {
     sections.push({
-      heading: report.cutoff
-        ? `Direct dependencies released after or close to your training data cutoff (${report.cutoff.label}, through ${report.cutoff.cutoff}) with no pinned docs, newest first:`
-        : `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`,
+      heading:
+        cutoff === null
+          ? `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`
+          : assumption === undefined
+            ? `Direct dependencies released after or close to your training data cutoff (${cutoff.label}, through ${cutoff.cutoff}) with no pinned docs, newest first:`
+            : `${assumption}: direct dependencies released after or close to that cutoff with no pinned docs${pinned.length === 0 ? `. ${judge} Newest first:` : ', newest first:'}`,
       rows: flagged.map(({ release, tag }) => {
         const suffix = tag ? `, ${tag}` : '';
         return sameRow(
@@ -631,6 +668,13 @@ function releaseRows(releases: DependencyRelease[]): string[] {
   ]).map((line) => `  ${line}`);
 }
 
+const MODEL_SOURCE_TEXT: Readonly<Record<ModelIdentity['source'], string>> = {
+  payload: 'reported by the session',
+  flag: '--model',
+  env: 'ANTHROPIC_MODEL',
+  settings: 'assumed from a settings file',
+};
+
 /** The human `llm-docs status` report. */
 export function formatStatusHuman(report: StatusReport): string {
   const lines: string[] = [];
@@ -658,8 +702,19 @@ export function formatStatusHuman(report: StatusReport): string {
 
   lines.push('');
 
+  if (report.model !== null) {
+    lines.push(`Model: ${report.model.id} (${MODEL_SOURCE_TEXT[report.model.source]}).`);
+    if (report.model.source === 'settings') {
+      lines.push(
+        `  This is the default in ${report.model.file}; a session started with another model differs. Pass --model to name it.`
+      );
+    }
+  }
+
   if (report.cutoff) {
-    lines.push(`Model training data cutoff: ${report.cutoff.cutoff} (${report.cutoff.label}).`);
+    lines.push(
+      `Model training data cutoff: ${report.cutoff.cutoff} (${report.cutoff.label})${report.cutoff.assumed ? ', assuming that default' : ''}.`
+    );
     lines.push('');
     lines.push(
       report.afterCutoff.length === 0
@@ -719,7 +774,7 @@ export interface GatherStatusOptions {
   /** Network budget for missing release dates; unbounded when absent (the `status` command). */
   budgetMs?: number;
   /** `--model`, or the hook payload's model. Falls back to resolveModelIdFromEnvironment. */
-  modelId?: string;
+  model?: { id: string; source: 'payload' | 'flag' };
   /** `--cutoff YYYY-MM`. A malformed value is a ConfigError (exit 2). */
   cutoff?: string;
   /**
@@ -744,8 +799,8 @@ export interface ProjectStatus {
   /** The packs read for this report, so the hook renders its pack list without reading them again. */
   packs: readonly ProjectPack[];
   report: StatusReport;
-  /** The model id status compared against, after every fallback, or null. */
-  modelId: string | null;
+  /** The model status compared against, after every fallback, and where its id came from. */
+  model: ModelIdentity | null;
   cutoff: ModelCutoff | null;
   /**
    * Release dates this run could not get only because it ran out of time or
@@ -813,9 +868,9 @@ export async function gatherProjectStatus(
     ...(loaded === null ? {} : { skipDirectories: [loaded.packsDirRelative] }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
-  const modelId =
+  const model =
     resolveModelIdFromEnvironment({
-      ...(options.modelId === undefined ? {} : { payloadModel: options.modelId }),
+      ...(options.model === undefined ? {} : { stated: options.model }),
       env: options.env,
       projectRoot,
       homeDir: options.homeDir,
@@ -823,7 +878,7 @@ export async function gatherProjectStatus(
   const configCutoff = loaded?.config.model?.cutoff;
   const cutoff =
     resolveModelCutoff({
-      ...(modelId === null ? {} : { modelId }),
+      ...(model === null ? {} : { modelId: model.id }),
       ...(options.cutoff === undefined ? {} : { override: options.cutoff }),
       ...(configCutoff === undefined ? {} : { configCutoff }),
       ...(options.ignoreInvalidCutoff === undefined
@@ -872,7 +927,17 @@ export async function gatherProjectStatus(
   const report = computeStatus({
     dependencies: scan.dependencies,
     releases: lookup.releases,
-    ...(cutoff === null ? {} : { cutoff: { cutoff: cutoff.cutoff, label: cutoff.label } }),
+    ...(model === null ? {} : { model }),
+    ...(cutoff === null
+      ? {}
+      : {
+          cutoff: {
+            cutoff: cutoff.cutoff,
+            label: cutoff.label,
+            source: cutoff.source,
+            assumed: cutoff.source === 'table' && model?.source === 'settings',
+          },
+        }),
     nearCutoffDays: loaded?.config.hook?.nearCutoffDays ?? DEFAULT_NEAR_CUTOFF_DAYS,
     packs: packInputs,
     now: options.now,
@@ -883,7 +948,7 @@ export async function gatherProjectStatus(
     loaded,
     packs,
     report,
-    modelId,
+    model,
     cutoff,
     pendingReleaseDates,
     warnings: [...new Set([...scan.warnings, ...lookup.warnings])].sort(compareStringsByCodeUnit),

@@ -17,6 +17,7 @@ import {
   type ComputeStatusInput,
   type GatherStatusOptions,
   type PackStatusInput,
+  type StatusCutoff,
 } from '../../src/deps/status.js';
 import { syncPacks } from '../../src/pack/build.js';
 import { ALLOW_TEMP_SOURCES_ENV } from '../../src/sources/acquire.js';
@@ -156,7 +157,7 @@ describe('computeStatus releases', () => {
       baseInput({
         dependencies,
         releases: dates,
-        cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5' },
+        cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5', source: 'table', assumed: false },
         packs: [pack('vite', { version: '8.2.0', dependency: { ecosystem: 'npm', name: 'vite' } })],
       })
     );
@@ -178,7 +179,12 @@ describe('computeStatus releases', () => {
     expect(report.recent).toEqual([]);
     expect(report.directDependencies).toBe(7);
     expect(report.unknownReleaseDates).toBe(1);
-    expect(report.cutoff).toEqual({ cutoff: '2026-06', label: 'Claude Opus 5.5' });
+    expect(report.cutoff).toEqual({
+      cutoff: '2026-06',
+      label: 'Claude Opus 5.5',
+      source: 'table',
+      assumed: false,
+    });
   });
 
   it('treats the cutoff month as inclusive and the near window as days before its end', () => {
@@ -190,7 +196,7 @@ describe('computeStatus releases', () => {
           'npm:b@1.0.0': '2026-04-02T00:00:00.000Z',
           'npm:c@1.0.0': '2026-04-01T23:59:59.000Z',
         }),
-        cutoff: { cutoff: '2026-06', label: 'x' },
+        cutoff: { cutoff: '2026-06', label: 'x', source: 'table', assumed: false },
         nearCutoffDays: 90,
       })
     );
@@ -231,7 +237,7 @@ describe('computeStatus next steps and pack releases', () => {
           }),
         ],
         releases: releases({ 'swiftpm:swift-nio@2.60.0': '2026-09-01T00:00:00.000Z' }),
-        cutoff: { cutoff: '2026-06', label: 'x' },
+        cutoff: { cutoff: '2026-06', label: 'x', source: 'table', assumed: false },
         packs: [
           pack('ok', { recipeChanged: false }),
           pack('vite', { version: '8.1.0', dependency: { ecosystem: 'npm', name: 'vite' } }),
@@ -274,7 +280,7 @@ describe('computeStatus next steps and pack releases', () => {
           'npm:b@1.0.0': '2026-05-01T00:00:00.000Z',
           'npm:c@1.0.0': '2025-01-01T00:00:00.000Z',
         }),
-        cutoff: { cutoff: '2026-06', label: 'x' },
+        cutoff: { cutoff: '2026-06', label: 'x', source: 'table', assumed: false },
         packs: [
           pack('a', bound('a', '1.0.0')),
           pack('b', bound('b', '1.0.0')),
@@ -298,7 +304,12 @@ describe('computeStatus next steps and pack releases', () => {
 });
 
 describe('formatStatusBrief', () => {
-  const cutoff = { cutoff: '2026-06', label: 'Claude Opus 5.5' };
+  const cutoff: StatusCutoff = {
+    cutoff: '2026-06',
+    label: 'Claude Opus 5.5',
+    source: 'table',
+    assumed: false,
+  };
   const DEPENDENCIES_FOOTER =
     'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.';
 
@@ -596,7 +607,7 @@ describe('formatStatusHuman', () => {
           'npm:next@16.1.0': '2026-10-21T18:00:00.000Z',
           'npm:mystery@1.0.0': null,
         }),
-        cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5' },
+        cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5', source: 'table', assumed: false },
         packs: [
           pack('vite', { version: '8.1.0', dependency: { ecosystem: 'npm', name: 'vite' } }),
           pack('zod', {
@@ -628,6 +639,38 @@ describe('formatStatusHuman', () => {
         '',
       ].join('\n')
     );
+  });
+
+  it('names the model and where it came from, and marks a cutoff from a settings default as assumed', () => {
+    const lines = (input: Partial<ComputeStatusInput>): string[] =>
+      formatStatusHuman(computeStatus(baseInput(input)))
+        .split('\n')
+        .filter((line) => line.includes('Model') || line.includes('default'));
+
+    expect(
+      lines({
+        model: { id: 'opus', source: 'settings', file: '/home/me/.claude/settings.json' },
+        cutoff: {
+          cutoff: '2026-06',
+          label: 'Claude Opus 5.5 (alias opus)',
+          source: 'table',
+          assumed: true,
+        },
+      })
+    ).toEqual([
+      'Model: opus (assumed from a settings file).',
+      '  This is the default in /home/me/.claude/settings.json; a session started with another model differs. Pass --model to name it.',
+      'Model training data cutoff: 2026-06 (Claude Opus 5.5 (alias opus)), assuming that default.',
+    ]);
+    expect(
+      lines({
+        model: { id: 'claude-sonnet-5', source: 'env' },
+        cutoff: { cutoff: '2026-01', label: 'Claude Sonnet 5', source: 'table', assumed: false },
+      })
+    ).toEqual([
+      'Model: claude-sonnet-5 (ANTHROPIC_MODEL).',
+      'Model training data cutoff: 2026-01 (Claude Sonnet 5).',
+    ]);
   });
 
   it('explains how to set a cutoff when none is known', () => {
@@ -803,45 +846,53 @@ describe('gatherProjectStatus', () => {
     const cutoffOf = async (
       at: string,
       options: Partial<GatherStatusOptions>
-    ): Promise<[string | undefined, string | undefined, string | null]> => {
+    ): Promise<[string | undefined, string | undefined, unknown]> => {
       const status = await gather(at, { offline: true, ...options });
-      return [status.cutoff?.source, status.cutoff?.cutoff, status.modelId];
+      expect(status.report.model).toEqual(status.model);
+      return [status.cutoff?.source, status.cutoff?.cutoff, status.model];
     };
     const env = { LLM_DOCS_MODEL_CUTOFF: '2025-03' };
+    const flag = { id: 'claude-opus-5-5', source: 'flag' } as const;
 
-    expect(
-      await cutoffOf(configured, { cutoff: '2026-02', env, modelId: 'claude-opus-5-5' })
-    ).toEqual(['flag', '2026-02', 'claude-opus-5-5']);
-    expect(await cutoffOf(configured, { env, modelId: 'claude-opus-5-5' })).toEqual([
-      'config',
-      '2025-01',
-      'claude-opus-5-5',
+    expect(await cutoffOf(configured, { cutoff: '2026-02', env, model: flag })).toEqual([
+      'flag',
+      '2026-02',
+      flag,
     ]);
-    expect(await cutoffOf(root, { env, modelId: 'claude-opus-5-5' })).toEqual([
-      'env',
-      '2025-03',
-      'claude-opus-5-5',
-    ]);
-    expect(await cutoffOf(root, { modelId: 'claude-opus-5-5' })).toEqual([
-      'table',
-      '2026-06',
-      'claude-opus-5-5',
-    ]);
+    expect(await cutoffOf(configured, { env, model: flag })).toEqual(['config', '2025-01', flag]);
+    expect(await cutoffOf(root, { env, model: flag })).toEqual(['env', '2025-03', flag]);
+    expect(await cutoffOf(root, { model: flag })).toEqual(['table', '2026-06', flag]);
     expect(await cutoffOf(root, { env: { ANTHROPIC_MODEL: 'claude-opus-5' } })).toEqual([
       'table',
       '2026-05',
-      'claude-opus-5',
+      { id: 'claude-opus-5', source: 'env' },
     ]);
-    expect(await cutoffOf(root, { modelId: 'some-unknown-model' })).toEqual([
-      undefined,
-      undefined,
-      'some-unknown-model',
-    ]);
+    expect(
+      await cutoffOf(root, { model: { id: 'some-unknown-model', source: 'payload' } })
+    ).toEqual([undefined, undefined, { id: 'some-unknown-model', source: 'payload' }]);
+    expect((await gather(root, { offline: true, model: flag })).report.cutoff).toEqual({
+      cutoff: '2026-06',
+      label: 'Claude Opus 5.5',
+      source: 'table',
+      assumed: false,
+    });
 
+    // A settings file holds only the default model, so its cutoff is an assumption.
     await writeFiles(root, { '.claude/settings.json': JSON.stringify({ model: 'opus' }) });
     const fromSettings = await gather(root, { offline: true });
-    expect(fromSettings.modelId).toBe('opus');
-    expect(fromSettings.cutoff?.label).toBe('Claude Opus 5.5 (alias opus)');
+    expect(fromSettings.model).toEqual({
+      id: 'opus',
+      source: 'settings',
+      file: join(root, '.claude', 'settings.json'),
+    });
+    expect(fromSettings.report.cutoff).toEqual({
+      cutoff: '2026-06',
+      label: 'Claude Opus 5.5 (alias opus)',
+      source: 'table',
+      assumed: true,
+    });
+    // An explicit cutoff is stated, whatever the model.
+    expect((await gather(root, { offline: true, env })).report.cutoff?.assumed).toBe(false);
 
     await expect(gather(root, { offline: true, cutoff: '2026-6' })).rejects.toThrow(
       new ConfigError('--cutoff must be a YYYY-MM month (for example 2026-06), got "2026-6".')

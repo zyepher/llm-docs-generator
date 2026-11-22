@@ -757,7 +757,10 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
   recipe; for SwiftPM the repository URL is the name). With no cutoff, the direct dependencies
   released in the last 180 days instead, as the hook does.
 - Without `--model`, the model id comes from `ANTHROPIC_MODEL` and the Claude Code settings
-  files, as in the hook (7.2).
+  files, as in the hook (7.2). The report names the model and where its id came from (`--model`,
+  `ANTHROPIC_MODEL`, or a settings file, named by path), and marks a cutoff reached through a
+  settings-file default as assumed, in the human table and in `--json` (`model` and
+  `cutoff.assumed`).
 - Works in a directory with no `llm-docs.json` (dependency analysis only). Without
   `--project`, it finds the project as the hook does from its `cwd` (the nearest ancestor of the
   working directory holding `llm-docs.json`, else the working directory), so `status --brief` run
@@ -843,7 +846,17 @@ context for the agent. Behavior:
   `claudeCodeAliases` to the model the alias currently selects, per provider
   (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` select the
   provider's table); a pin variable such as `ANTHROPIC_DEFAULT_OPUS_MODEL` wins, and `default`
-  is deliberately left unresolved. Cutoff resolution per 6.3. When no cutoff resolves, the hook lists direct dependencies
+  is deliberately left unresolved. The model id carries its provenance as a typed value beside
+  it: reported by the payload, set in the environment (`ANTHROPIC_MODEL`), or read from a
+  settings file. A settings file holds only the user's or project's default, which a session
+  started with `--model` overrides without telling the hook (measured on 2026-11-22: headless
+  `claude -p --model ...` sends no `model` and sets no `ANTHROPIC_MODEL`), so a cutoff reached
+  through it is an assumption, not a fact. Each heading that names such a cutoff states the
+  assumption instead of asserting it ("Assuming your model is the configured default (Claude
+  Opus 5.5, cutoff 2026-06): ..."), and the first one adds that a different model should judge by
+  the release dates shown. A payload or environment model, and a cutoff set by `--cutoff`,
+  `model.cutoff`, or `LLM_DOCS_MODEL_CUTOFF`, keep the assertive wording. Cutoff resolution per
+  6.3. When no cutoff resolves, the hook lists direct dependencies
   without a pack released in the last 180 days under a neutral heading ("Recently released
   dependencies (your training data may predate them)"): a fact from release dates, not a guess
   about the model.
