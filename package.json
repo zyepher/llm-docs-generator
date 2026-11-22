@@ -43,6 +43,8 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsup src/cli.ts src/index.ts --format esm --clean --minify --target node22 && tsc -p tsconfig.build.json",
+    "build:plugin": "tsx scripts/build-plugin.ts",
+    "check:plugin": "tsx scripts/check-plugin.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
