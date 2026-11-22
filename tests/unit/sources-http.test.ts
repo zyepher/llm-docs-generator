@@ -13,6 +13,7 @@ import {
   createHttpClient,
   HttpPolicyError,
   redactUrl,
+  IPV4_TRANSLATION_PREFIXES,
   SPECIAL_ADDRESS_BLOCKS,
   specialAddressReason,
   USER_AGENT,
@@ -123,6 +124,24 @@ describe('specialAddressReason', () => {
     }
   });
 
+  const translations = IPV4_TRANSLATION_PREFIXES.map(([prefix]) => ({ prefix, ...cidr(prefix) }));
+
+  it.each(translations)(
+    'judges an address inside $prefix by the IPv4 address it carries',
+    (block) => {
+      const carrying = (ipv4: bigint) => formatAddress(6, block.first | ipv4);
+      expect(specialAddressReason(carrying(0x8c52_7903n))).toBeUndefined();
+      expect(specialAddressReason(carrying(0x0808_0808n))).toBeUndefined();
+      expect(specialAddressReason(carrying(0x7f00_0001n))).toMatch(/a loopback address/);
+      expect(specialAddressReason(carrying(0xa9fe_a9fen))).toMatch(/a link-local address/);
+      expect(specialAddressReason(carrying(0x0a00_0001n))).toMatch(/a private address/);
+    }
+  );
+
+  it('keeps the local-use NAT64 prefix refused whatever it carries', () => {
+    expect(specialAddressReason('64:ff9b:1:808:8:800::')).toContain('(64:ff9b:1::/48:');
+  });
+
   it.each([
     // Ranges an earlier hand-written list treated as public.
     ['2001:2::1', /benchmarking/],
@@ -159,6 +178,9 @@ describe('specialAddressReason', () => {
     '2a00:1450:4001::200e',
     '::ffff:8.8.8.8',
     '2606:4700::1%en0',
+    // NAT64 through DNS64: github.com (140.82.121.3) on an IPv6-only network.
+    '64:ff9b::8c52:7903',
+    '64:ff9b::140.82.121.3',
   ])('accepts the public address %s', (address) => {
     expect(specialAddressReason(address)).toBeUndefined();
   });

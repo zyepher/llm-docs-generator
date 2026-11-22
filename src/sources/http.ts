@@ -159,8 +159,8 @@ export function redactUrl(value: string | URL): string {
  * whose name cites an RFC are not in those registries: multicast (in IANA's
  * multicast registries), the deprecated site-local range, and the IPv6 forms
  * that carry an IPv4 address, refused whole, as the tunnels and translators
- * they are (NAT64's well-known prefix is "Globally Reachable" in the registry,
- * but a docs host behind one is an IPv4 host, reached by its IPv4 address).
+ * they are. Two IPv4-carrying forms are not refused whole: see
+ * IPV4_TRANSLATION_PREFIXES.
  */
 export const SPECIAL_ADDRESS_BLOCKS: ReadonlyArray<
   readonly [prefix: string, name: string, description: string]
@@ -191,8 +191,7 @@ export const SPECIAL_ADDRESS_BLOCKS: ReadonlyArray<
   ['::1/128', 'Loopback Address', 'a loopback address'],
   ['::/96', 'IPv4-compatible (RFC 4291, deprecated)', 'an IPv4-compatible address'],
   ['::ffff:0:0:0/96', 'IPv4-translated (RFC 2765)', 'an IPv4-translated address'],
-  ['64:ff9b::/96', 'IPv4-IPv6 Translat. (RFC 6052)', 'a NAT64 address'],
-  ['64:ff9b:1::/48', 'IPv4-IPv6 Translat.', 'a NAT64 address'],
+  ['64:ff9b:1::/48', 'IPv4-IPv6 Translat. (RFC 8215, local use)', 'a NAT64 address'],
   ['100::/64', 'Discard-Only Address Block', 'a discard-only address'],
   ['100:0:0:1::/64', 'Dummy IPv6 Prefix', 'a dummy address'],
   ['2001::/23', 'IETF Protocol Assignments', 'an IETF protocol assignment address'],
@@ -208,6 +207,32 @@ export const SPECIAL_ADDRESS_BLOCKS: ReadonlyArray<
   ['fec0::/10', 'Site-Local (RFC 3879, deprecated)', 'a site-local address'],
   ['ff00::/8', 'Multicast (RFC 4291)', 'a multicast address'],
 ];
+
+/**
+ * IPv6 prefixes judged by the IPv4 address in their last 32 bits, which is
+ * what the connection reaches: an IPv4-mapped address is the IPv4 address as
+ * the operating system connects to it, and NAT64's well-known prefix (RFC
+ * 6052 section 2.2, a /96 with the address in bits 96 to 127) is how a DNS64
+ * resolver on an IPv6-only network returns every IPv4-only host, github.com
+ * among them. It is "Globally Reachable" in the IANA registry, and RFC 6052
+ * section 3.1 forbids it for non-global IPv4 addresses, so one carrying a
+ * special IPv4 address is refused, naming that address. The local-use prefix
+ * 64:ff9b:1::/48 (RFC 8215) is not globally reachable, and its layout is the
+ * operator's choice, so it stays refused whole.
+ */
+const IPV4_MAPPED_PREFIX = [
+  '::ffff:0:0/96',
+  'IPv4-mapped Address',
+  'an IPv4-mapped address',
+] as const;
+const NAT64_WELL_KNOWN_PREFIX = [
+  '64:ff9b::/96',
+  'IPv4-IPv6 Translat. (RFC 6052)',
+  'a NAT64 address',
+] as const;
+export const IPV4_TRANSLATION_PREFIXES: ReadonlyArray<
+  readonly [prefix: string, name: string, description: string]
+> = [IPV4_MAPPED_PREFIX, NAT64_WELL_KNOWN_PREFIX];
 
 interface IpAddress {
   family: 4 | 6;
@@ -294,24 +319,28 @@ function blockOf(address: IpAddress): AddressBlock | undefined {
   );
 }
 
-/** `::ffff:a.b.c.d`: the IPv4 address itself, as the operating system connects to it. */
-function ipv4Mapped(address: IpAddress): bigint | undefined {
-  return address.family === 6 && inPrefix(address.value, 0xffffn, 32n)
-    ? address.value & IPV4_MASK
-    : undefined;
+const IPV4_MAPPED_BLOCK = parseBlock(IPV4_MAPPED_PREFIX);
+const TRANSLATION_BLOCKS = [IPV4_MAPPED_BLOCK, parseBlock(NAT64_WELL_KNOWN_PREFIX)];
+
+/** The translation prefix an IPv6 address is in, and the IPv4 address it carries. */
+function translated(address: IpAddress): { block: AddressBlock; ipv4: bigint } | undefined {
+  const block = TRANSLATION_BLOCKS.find(
+    (candidate) =>
+      address.family === 6 && inPrefix(address.value, candidate.network, candidate.hostBits)
+  );
+  return block === undefined ? undefined : { block, ipv4: address.value & IPV4_MASK };
 }
 
 /**
- * The IPv4 addresses an IPv6 address carries: IPv4-compatible and -translated
- * (RFC 4291, 2765), NAT64 (RFC 6052, the /48 form skipping its reserved
- * octet), 6to4 (RFC 3056), and Teredo's server and inverted client (RFC 4380).
+ * The IPv4 addresses a refused IPv6 form carries, to name one that is itself
+ * special: IPv4-compatible and -translated (RFC 4291, 2765), the local-use
+ * NAT64 prefix read as RFC 6052 lays out a /48 (skipping the reserved octet,
+ * the likeliest layout, though RFC 8215 leaves it to the operator), 6to4 (RFC
+ * 3056), and Teredo's server and inverted client (RFC 4380).
  */
 function embeddedIpv4(value: bigint): bigint[] {
   // `::` and `::1` are the unspecified and loopback addresses, not IPv4-compatible ones.
   if ((value > 1n && inPrefix(value, 0n, 32n)) || inPrefix(value, 0xffff_0000n, 32n)) {
-    return [value & IPV4_MASK];
-  }
-  if (inPrefix(value, 0x64_ff9bn << 64n, 32n)) {
     return [value & IPV4_MASK];
   }
   if (inPrefix(value, 0x64_ff9b_0001n, 80n)) {
@@ -328,9 +357,10 @@ function embeddedIpv4(value: bigint): bigint[] {
 
 /**
  * Why an IP address is not a public unicast address, or undefined when it is.
- * An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is judged by its IPv4 part;
- * any other IPv6 form carrying an IPv4 address is refused, and names that
- * address when it is itself special.
+ * An address in IPV4_TRANSLATION_PREFIXES is judged by the IPv4 address it
+ * carries (an IPv4-mapped one by that address alone); any other IPv6 form
+ * carrying an IPv4 address is refused, and names that address when it is
+ * itself special.
  */
 export function specialAddressReason(address: string): string | undefined {
   const parsed = parseIp(address);
@@ -339,9 +369,13 @@ export function specialAddressReason(address: string): string | undefined {
     return 'not an IP address';
   }
 
-  const mapped = ipv4Mapped(parsed);
-  if (mapped !== undefined) {
-    return blockOf({ family: 4, value: mapped })?.reason;
+  const translation = translated(parsed);
+  if (translation !== undefined) {
+    const inner = blockOf({ family: 4, value: translation.ipv4 });
+    if (inner === undefined || translation.block === IPV4_MAPPED_BLOCK) {
+      return inner?.reason;
+    }
+    return `${translation.block.reason} carrying ${formatIpv4(translation.ipv4)}, ${inner.reason}`;
   }
 
   const block = blockOf(parsed);
@@ -364,7 +398,13 @@ function isLoopback(address: string): boolean {
   if (parsed === undefined) {
     return false;
   }
-  const ipv4 = parsed.family === 4 ? parsed.value : ipv4Mapped(parsed);
+  const translation = translated(parsed);
+  const ipv4 =
+    parsed.family === 4
+      ? parsed.value
+      : translation?.block === IPV4_MAPPED_BLOCK
+        ? translation.ipv4
+        : undefined;
   return ipv4 === undefined ? parsed.value === 1n : ipv4 >> 24n === 127n;
 }
 
