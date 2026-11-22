@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { installFakeConverters } from '../helpers/fake-converters.js';
+import { runHookProcess } from '../helpers/hook-process.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cliPath = join(repoRoot, 'dist', 'cli.js');
@@ -837,37 +838,32 @@ describe('llm-docs v3 CLI', () => {
       model: 'claude-opus-5-5',
     });
     const hook = (stdin: string, extra: Record<string, string> = {}, cwd = root) =>
-      new Promise<CliResult>((resolveResult) => {
-        const child = execFile(
-          process.execPath,
-          [cliPath, 'hook', 'session-start'],
-          { cwd, env: { ...process.env, ...env, ...extra } },
-          (error, stdout, stderr) => {
-            const code = error === null ? 0 : typeof error.code === 'number' ? error.code : 1;
-            resolveResult({ code, stdout, stderr });
-          }
-        );
-        child.stdin?.end(stdin);
+      runHookProcess({
+        cli: cliPath,
+        stdin,
+        cwd,
+        env: { ...process.env, ...env, ...extra },
+        cacheDir: cache,
       });
 
     expect(await hook(payload)).toEqual({
       code: 0,
       stdout: `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: brief } })}\n`,
       stderr: '',
+      log: '',
     });
     expect(await hook(payload, { CLAUDECODE: '', CURSOR_VERSION: '2.1.0' })).toEqual({
       code: 0,
       stdout: `${JSON.stringify({ additional_context: brief })}\n`,
       stderr: '',
+      log: '',
     });
     expect(await hook('garbage {', {}, await makeProject({}))).toEqual({
       code: 0,
       stdout: '',
       stderr: '',
+      log: expect.stringMatching(/^\S+ the payload on stdin is not JSON; ignored it\n$/),
     });
-    expect(await readFile(join(cache, 'hook.log'), 'utf-8')).toMatch(
-      /^\S+ the payload on stdin is not JSON; ignored it\n$/
-    );
   });
 
   it('lists the v3 commands, sources, and limits in capabilities', async () => {

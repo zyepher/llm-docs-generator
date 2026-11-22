@@ -16,6 +16,7 @@ import {
 } from '../../scripts/check-plugin.js';
 import { thirdPartyNotices } from '../../scripts/build-plugin.js';
 import { runSessionStartHook } from '../../src/agent/hook.js';
+import { runHookProcess } from '../helpers/hook-process.js';
 import { isRecord } from '../../src/utils/guards.js';
 
 const run = promisify(execFile);
@@ -288,21 +289,14 @@ describe('the bundled CLI', () => {
       model: 'claude-opus-5-5',
     });
 
-    const bundled = await new Promise<string>((resolveOutput, reject) => {
-      const child = execFile(
-        process.execPath,
-        [bundle, 'hook', 'session-start'],
-        { cwd: root, env },
-        (error, stdout, stderr) => {
-          if (error !== null || stderr !== '') {
-            reject(error ?? new Error(stderr));
-            return;
-          }
-          resolveOutput(stdout);
-        }
-      );
-      child.stdin?.end(payload);
+    const bundled = await runHookProcess({
+      cli: bundle,
+      stdin: payload,
+      cwd: root,
+      env,
+      cacheDir: cache,
     });
+    expect(bundled).toMatchObject({ code: 0, stderr: '', log: '' });
 
     let unbundled = '';
     await runSessionStartHook({
@@ -323,7 +317,7 @@ describe('the bundled CLI', () => {
 
     expect(unbundled).toContain('"hookEventName":"SessionStart"');
     expect(unbundled).toContain('hono 4.13.16 (npm, released 2026-09-02, after cutoff)');
-    expect(bundled).toBe(unbundled);
+    expect(bundled.stdout).toBe(unbundled);
   });
 });
 
