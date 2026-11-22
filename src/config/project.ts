@@ -272,7 +272,7 @@ const projectConfigSchema = z.strictObject({
   schemaVersion: z.literal(3),
   packsDir: projectPathSchema.optional(),
   agentFiles: z.union([z.literal('auto'), z.array(projectPathSchema)]).optional(),
-  block: z.strictObject({ maxBytes: z.number().int().min(256).max(65_536).optional() }).optional(),
+  block: z.strictObject({ maxBytes: z.number().int().min(1024).max(65_536).optional() }).optional(),
   hook: z
     .strictObject({
       enabled: z.boolean().optional(),

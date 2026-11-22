@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, posix, sep } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 
 import {
   ConfigError,
@@ -49,9 +49,9 @@ import { sha256Prefixed } from '../utils/hash.js';
 import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
-import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
+import { listGuides } from './guides.js';
 import { createPackLinkRewriter } from './links.js';
 import { resolvePackLicense } from './license.js';
 import {
@@ -65,7 +65,7 @@ import {
   type ManifestSourceEntry,
   type PackManifest,
 } from './manifest.js';
-import { collectHeadings, convertMarkdownPage, type PackFileRef } from './markdown.js';
+import { convertMarkdownPage, type PackFileRef } from './markdown.js';
 import { diffRefresh, type RefreshReport } from './refresh.js';
 import { renderSourcePage } from './render-ir.js';
 import { LOCK_FILE, withPacksLock } from './lock.js';
@@ -297,44 +297,8 @@ async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): 
 }
 
 // ---------------------------------------------------------------------------
-// Guides and the index
+// The index
 // ---------------------------------------------------------------------------
-
-function fileStem(path: string): string {
-  const name = posix.basename(path);
-  const dot = name.lastIndexOf('.');
-  return dot > 0 ? name.slice(0, dot) : name;
-}
-
-/** Markdown guides under `<packDir>/guides`, with their first-H1 titles. */
-async function listGuides(packDir: string): Promise<IndexGuide[]> {
-  const root = join(packDir, 'guides');
-
-  if (!(await exists(root))) {
-    return [];
-  }
-
-  const guides: IndexGuide[] = [];
-
-  for await (const event of walkBoundedDirectoryTree({
-    root,
-    maxDepth: 16,
-    maxEntries: 10_000,
-    maxFiles: 10_000,
-    skipDirectoryNames: false,
-  })) {
-    if (event.kind !== 'file' || !/\.md$/i.test(event.entry.name)) {
-      continue;
-    }
-
-    const path = `guides/${event.relativePath.split(sep).join('/')}`;
-    const text = await readFile(event.absolutePath, 'utf-8');
-    const h1 = collectHeadings(text).find((heading) => heading.level === 1);
-    guides.push({ path, title: h1?.text || fileStem(path) });
-  }
-
-  return guides.sort((a, b) => compareStringsByCodeUnit(a.path, b.path));
-}
 
 function renderIndexFor(
   manifest: Omit<PackManifest, 'outputs'>,
