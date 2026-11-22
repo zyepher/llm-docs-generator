@@ -766,7 +766,7 @@ hooks from the plugin's install directory, but documents no substitution in hook
 the Cursor hook uses a path relative to the plugin root, which also works in shells that do not
 expand `${...}`. In Claude Code the matcher lists every session source because each of them
 starts a context without the earlier note. `npm run build:plugin` regenerates
-`bin/llm-docs.mjs` (tsup, all dependencies bundled, Node 22 target, byte-identical across
+`bin/llm-docs.mjs` (tsdown, all dependencies bundled, Node 22 target, byte-identical across
 builds) and stamps plugin and marketplace versions from `package.json`; `npm run check:plugin`
 fails CI when the committed bundle or versions are out of date, when a skill folder name
 differs from its frontmatter `name`, or when the skills, the agent, or the plugin README name a

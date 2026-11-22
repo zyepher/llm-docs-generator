@@ -10,7 +10,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { build } from 'tsup';
+import { build } from 'tsdown';
 
 import packageJson from '../package.json';
 import { isRecord } from '../src/utils/guards.js';
@@ -26,11 +26,6 @@ const MARKETPLACE_MANIFESTS = [
   '.claude-plugin/marketplace.json',
   '.cursor-plugin/marketplace.json',
 ];
-
-// CommonJS dependencies (commander among them) call require() for Node built-ins,
-// which an ESM bundle does not define.
-const REQUIRE_SHIM =
-  "import { createRequire as __llmDocsCreateRequire } from 'node:module'; const require = __llmDocsCreateRequire(import.meta.url);";
 
 /**
  * Machine paths that must never reach the committed bundle: building twice on
@@ -50,18 +45,21 @@ async function bundleCli(): Promise<Buffer> {
       config: false,
       entry: { [PLUGIN_NAME]: join(REPO_ROOT, 'src', 'cli.ts') },
       outDir,
-      outExtension: () => ({ js: '.mjs' }),
-      format: ['esm'],
+      outExtensions: () => ({ js: '.mjs' }),
+      format: 'esm',
       platform: 'node',
       target: 'node22',
-      noExternal: [/./],
-      splitting: false,
+      deps: { alwaysBundle: [/./] },
       sourcemap: false,
       dts: false,
       minify: true,
       clean: false,
-      silent: true,
-      banner: { js: REQUIRE_SHIM },
+      logLevel: 'warn',
+      report: false,
+      // jsonc-parser's main entry is a UMD build whose require() calls the bundler
+      // cannot follow; its module entry is plain ESM.
+      inputOptions: { resolve: { mainFields: ['module', 'main'] } },
+      outputOptions: { codeSplitting: false },
     });
     const bundle = await readFile(join(outDir, `${PLUGIN_NAME}.mjs`));
     const text = bundle.toString('utf-8');
