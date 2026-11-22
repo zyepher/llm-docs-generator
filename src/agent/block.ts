@@ -11,9 +11,10 @@
  */
 
 import { lstat, mkdir, stat } from 'node:fs/promises';
-import { dirname, join, posix, resolve } from 'node:path';
+import { basename, dirname, join, posix, relative, resolve, sep } from 'node:path';
 
 import { CONFIG_FILE_NAME, ConfigError, type LoadedProjectConfig } from '../config/project.js';
+import { lockfileEcosystem } from '../deps/lockfiles.js';
 import { listGuides } from '../pack/guides.js';
 import { readProjectPacks, type PackManifest, type ProjectPack } from '../pack/manifest.js';
 import { scanMarkdownRegions } from '../pack/markdown.js';
@@ -169,8 +170,41 @@ type AgentFileTarget =
   | { path: string; kind: 'file'; absolutePath: string }
   | { path: string; kind: 'invalid'; error: Error };
 
-/** Where one agent file is written: its real path, which must stay inside the project. */
-async function resolveAgentFile(projectRoot: string, path: string): Promise<AgentFileTarget> {
+/** Directories a version control system owns; a write there can break the repository. */
+const VCS_DIRECTORIES: ReadonlySet<string> = new Set(['.git', '.hg', '.svn']);
+
+/** Which tool-owned or VCS-owned location a real path is in, if any. */
+async function ownedLocation(
+  loaded: LoadedProjectConfig,
+  realRoot: string,
+  absolutePath: string
+): Promise<string | undefined> {
+  const vcsDirectory = relative(realRoot, absolutePath)
+    .split(sep)
+    .find((segment) => VCS_DIRECTORIES.has(segment));
+  if (vcsDirectory !== undefined) {
+    return `inside ${vcsDirectory}`;
+  }
+  if (isSameOrDescendant(await resolveEffectiveOutputPath(loaded.packsDir), absolutePath)) {
+    return `inside the packs directory ${loaded.packsDirRelative}`;
+  }
+  if (absolutePath === (await resolveEffectiveOutputPath(join(realRoot, CONFIG_FILE_NAME)))) {
+    return `the project's ${CONFIG_FILE_NAME}`;
+  }
+  return lockfileEcosystem(basename(absolutePath)) === undefined ? undefined : 'a lockfile';
+}
+
+/**
+ * Where one agent file is written: its real path, which must stay inside the
+ * project and outside tool-owned and VCS-owned locations. A committed
+ * `AGENTS.md -> .git/config` passes the inside-the-project check, and
+ * appending the block there breaks the repository.
+ */
+async function resolveAgentFile(
+  loaded: LoadedProjectConfig,
+  path: string
+): Promise<AgentFileTarget> {
+  const projectRoot = loaded.projectRoot;
   const realRoot = await resolveEffectiveOutputPath(projectRoot);
   const absolutePath = await resolveEffectiveOutputPath(join(projectRoot, ...path.split('/')));
 
@@ -191,6 +225,17 @@ async function resolveAgentFile(projectRoot: string, path: string): Promise<Agen
       kind: 'invalid',
       error: new ConfigError(
         `${path} is a symbolic link to a file that does not exist; create the target, replace the link with a file, or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}.`
+      ),
+    };
+  }
+
+  const owner = await ownedLocation(loaded, realRoot, absolutePath);
+  if (owner !== undefined) {
+    return {
+      path,
+      kind: 'invalid',
+      error: new ConfigError(
+        `${path} resolves to ${absolutePath}, ${owner}. An agent file must be a regular file outside tool-owned and VCS-owned locations (.git, the packs directory, ${CONFIG_FILE_NAME}, lockfiles); replace ${path} with a file of its own, or leave it out of "agentFiles" in ${CONFIG_FILE_NAME}.`
       ),
     };
   }
@@ -226,7 +271,7 @@ async function resolveAgentFiles(loaded: LoadedProjectConfig): Promise<AgentFile
   const targets: AgentFileTarget[] = [];
 
   for (const path of candidates) {
-    const target = await resolveAgentFile(loaded.projectRoot, path).catch(
+    const target = await resolveAgentFile(loaded, path).catch(
       (error: unknown): AgentFileTarget => ({
         path,
         kind: 'invalid',

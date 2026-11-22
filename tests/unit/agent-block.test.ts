@@ -254,6 +254,52 @@ describe('agent files the tool refuses to write', () => {
     },
     5_000
   );
+
+  it.skipIf(!canCreateSymlinks)(
+    'refuses an agent file that resolves into .git, the packs directory, llm-docs.json, or a lockfile',
+    async () => {
+      const root = await makeProject({
+        '.git/config': '[core]\n\tbare = false\n',
+        'agent-docs/notes.md': '# Notes\n',
+        'package-lock.json': '{}\n',
+      });
+      const config = await read(root, 'llm-docs.json');
+      const targets: Record<string, string> = {
+        'AGENTS.md': '.git/config',
+        'CLAUDE.md': 'agent-docs/notes.md',
+        'A.md': 'llm-docs.json',
+        'B.md': 'package-lock.json',
+      };
+      for (const [path, target] of Object.entries(targets)) {
+        await symlink(target, join(root, path));
+      }
+      await writeFile(
+        join(root, 'llm-docs.json'),
+        JSON.stringify({ ...JSON.parse(config), agentFiles: Object.keys(targets) })
+      );
+      const configText = await read(root, 'llm-docs.json');
+
+      const outcomes = await syncBlocks(root);
+
+      expect(outcomes.map(({ path, status, exitCode }) => ({ path, status, exitCode }))).toEqual(
+        Object.keys(targets).map((path) => ({ path, status: 'failed', exitCode: 2 }))
+      );
+      expect(outcomes.map((outcome) => outcome.error)).toEqual([
+        expect.stringMatching(
+          /^AGENTS\.md resolves to .*\.git[\\/]config, inside \.git\. An agent file must be a regular file outside tool-owned and VCS-owned locations/
+        ),
+        expect.stringMatching(
+          /^CLAUDE\.md resolves to .*, inside the packs directory agent-docs\./
+        ),
+        expect.stringMatching(/^A\.md resolves to .*, the project's llm-docs\.json\./),
+        expect.stringMatching(/^B\.md resolves to .*, a lockfile\./),
+      ]);
+      expect(await read(root, '.git/config')).toBe('[core]\n\tbare = false\n');
+      expect(await read(root, 'agent-docs/notes.md')).toBe('# Notes\n');
+      expect(await read(root, 'llm-docs.json')).toBe(configText);
+      expect(await read(root, 'package-lock.json')).toBe('{}\n');
+    }
+  );
 });
 
 describe('which harness sees the block', () => {
