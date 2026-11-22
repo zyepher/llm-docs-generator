@@ -571,6 +571,126 @@ describe('syncPacks', () => {
     });
   });
 
+  describe('readFirst', () => {
+    const FILES = {
+      ...DOCS,
+      'docs/guide/migration.md':
+        '# Migrating to v1\n\n## Breaking `changes`\n\nRenamed.\n\n## Removed APIs\n\nGone.\n',
+      'docs/CHANGES.txt': 'v1: everything\n',
+    };
+    const READ_FIRST_PACK = {
+      ...PACK,
+      layout: { combined: true },
+      sources: [{ type: 'local', path: 'docs', passthrough: ['CHANGES.txt'] }],
+      readFirst: [
+        'pages/guide/migration.md',
+        'pages/guide/migration.md#breaking-changes',
+        'files/CHANGES.txt',
+      ],
+    };
+
+    it('lists the targets in the index under the reading notes, verifies strictly, and is deterministic', async () => {
+      const root = await makeProject({ demo: READ_FIRST_PACK }, FILES);
+      const report = await syncPacks(root, undefined, {
+        now: fixedClock('2026-11-05T10:00:00.000Z'),
+      });
+      expect(report.packs[0]).toMatchObject({ status: 'built' });
+
+      const index = await readFile(join(root, 'agent-docs', 'demo', 'index.md'), 'utf-8');
+      expect(index).toContain(
+        [
+          'never outrank them.',
+          '',
+          '## Read first',
+          '',
+          'Start with these pages before writing code against Demo 1.0.0. They were marked as the ones to read first for this version, usually because they describe what changed.',
+          '',
+          '- [Migrating to v1](pages/guide/migration.md)',
+          '- [Migrating to v1: Breaking changes](pages/guide/migration.md#breaking-changes)',
+          '- [files/CHANGES.txt](files/CHANGES.txt)',
+          '',
+          '## Pages',
+        ].join('\n')
+      );
+      const combined = await readFile(join(root, 'agent-docs', 'demo', 'demo.full.md'), 'utf-8');
+      expect(combined).toContain(
+        '- [Migrating to v1: Breaking changes](#guide-migration--breaking-changes)'
+      );
+      expect(combined).toContain('<a id="guide-migration--breaking-changes"></a>');
+
+      const manifest = await readPackManifest(join(root, 'agent-docs', 'demo'));
+      expect(manifest.recipe.readFirst).toEqual(READ_FIRST_PACK.readFirst);
+      expect(problems(await verifyPacks(root, undefined, { strict: true }))).toEqual([]);
+
+      const first = await snapshot(join(root, 'agent-docs'));
+      expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'unchanged' });
+      await writeFile(join(root, 'agent-docs', 'demo', 'index.md'), 'tampered');
+      expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+      expect(await snapshot(join(root, 'agent-docs'))).toEqual(first);
+    });
+
+    it('substitutes placeholders in targets', async () => {
+      const root = await makeProject(
+        {
+          demo: {
+            ...PACK,
+            version: '2.4.1',
+            readFirst: ['pages/v{major}/upgrade.md#to-{major}{minor}'],
+          },
+        },
+        { 'docs/v2/upgrade.md': '# Upgrade\n\n## To 2.4\n\nSteps.\n' }
+      );
+      await syncPacks(root, undefined);
+      expect(await readFile(join(root, 'agent-docs', 'demo', 'index.md'), 'utf-8')).toContain(
+        '- [Upgrade: To 2.4](pages/v2/upgrade.md#to-24)'
+      );
+    });
+
+    it('fails the build on any target that does not resolve, with hints, and keeps the previous pack', async () => {
+      const root = await makeProject({ demo: READ_FIRST_PACK }, FILES);
+      await syncPacks(root, undefined);
+      const before = await snapshot(join(root, 'agent-docs'));
+      const cases: [string[], string][] = [
+        [
+          ['pages/guide/migration.md', 'pages/guide/migrations.md'],
+          'packs.demo.readFirst[1] "pages/guide/migrations.md" does not resolve: no page or passthrough file in the built pack has this path (nearest: pages/guide/migration.md, pages/guide/api.md, pages/guide/start.md, pages/index.md, files/CHANGES.txt). Edit packs.demo.readFirst in llm-docs.json.',
+        ],
+        [
+          ['pages/guide/migration.md#breaking'],
+          'packs.demo.readFirst[0] "pages/guide/migration.md#breaking" does not resolve: no heading on pages/guide/migration.md has the slug "breaking" (nearest: #breaking-changes, #removed-apis, #migrating-to-v1). Edit packs.demo.readFirst in llm-docs.json.',
+        ],
+        [
+          ['files/CHANGES.txt#v1'],
+          'packs.demo.readFirst[0] "files/CHANGES.txt#v1" does not resolve: a fragment only resolves on a Markdown file. Edit packs.demo.readFirst in llm-docs.json.',
+        ],
+      ];
+
+      for (const [readFirst, error] of cases) {
+        await setPacks(root, { demo: { ...READ_FIRST_PACK, readFirst } });
+        const report = await syncPacks(root, undefined);
+        expect(report.packs[0], readFirst.join(' ')).toMatchObject({
+          status: 'failed',
+          exitCode: 2,
+          error,
+        });
+        expect(await snapshot(join(root, 'agent-docs'))).toEqual(before);
+      }
+    });
+
+    it('leaves a pack built without the field up to date and its outputs unchanged', async () => {
+      const root = await makeProject({ demo: PACK }, DOCS);
+      await syncPacks(root, undefined, { now: fixedClock('2026-11-05T10:00:00.000Z') });
+      const manifest = await readPackManifest(join(root, 'agent-docs', 'demo'));
+
+      expect(Object.hasOwn(manifest.recipe, 'readFirst')).toBe(false);
+      expect(await readFile(join(root, 'agent-docs', 'demo', 'index.md'), 'utf-8')).not.toContain(
+        '## Read first'
+      );
+      expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'unchanged' });
+      expect(problems(await verifyPacks(root, undefined))).toEqual([]);
+    });
+  });
+
   it('refuses to overwrite a directory that is not a pack, and names unknown ids', async () => {
     const root = await makeProject(
       { demo: PACK },

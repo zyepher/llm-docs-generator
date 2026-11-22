@@ -102,6 +102,13 @@ describe('llm-docs.json validation', () => {
           layout: { combined: false },
           license: 'MIT',
           limits: { maxFileBytes: 1024 },
+          readFirst: [
+            'pages/guide/migration.md',
+            'pages/guide/api.md#breaking-changes',
+            'files/CHANGELOG.md',
+            'pages/v{major}/upgrade.md#to-{major}',
+            'pages/guide/überblick.md#änderungen',
+          ],
         },
       },
     });
@@ -204,6 +211,47 @@ describe('llm-docs.json validation', () => {
       'maxFileBytes',
     ],
     [{ schemaVersion: 3, model: { cutoff: '2026-13' }, packs: {} }, 'YYYY-MM'],
+    ...[
+      'guide/migration.md',
+      '/pages/a.md',
+      'pages/../index.md',
+      'pages/a/../b.md',
+      'pages\\a.md',
+      'pages/./a.md',
+      'pages//a.md',
+      'pages/',
+      'index.md',
+      'guides/a.md',
+      'pages/a.md#',
+      'pages/a.md#two words',
+    ].map((target): [unknown, string] => [
+      { schemaVersion: 3, packs: { x: { ...localPack, readFirst: [target] } } },
+      'packs.x.readFirst[0]: must be a pack-relative POSIX path under pages/ or files/',
+    ]),
+    [{ schemaVersion: 3, packs: { x: { ...localPack, readFirst: [] } } }, 'packs.x.readFirst'],
+    [
+      {
+        schemaVersion: 3,
+        packs: {
+          x: {
+            ...localPack,
+            readFirst: [
+              'pages/1.md',
+              'pages/2.md',
+              'pages/3.md',
+              'pages/4.md',
+              'pages/5.md',
+              'pages/6.md',
+            ],
+          },
+        },
+      },
+      'packs.x.readFirst',
+    ],
+    [
+      { schemaVersion: 3, packs: { x: { ...localPack, readFirst: ['pages/a.md', 'pages/a.md'] } } },
+      'packs.x.readFirst: must not repeat a target',
+    ],
   ])('rejects %j', (config, message) => {
     expect(parseError(config)).toContain(message);
   });
@@ -309,7 +357,7 @@ describe('resolvePackRecipe', () => {
         PINNED
       )
     ).rejects.toThrow(
-      /placeholders are only allowed in ref, paths, url, urls, include, and exclude/
+      /placeholders are only allowed in ref, paths, url, urls, include, exclude, and readFirst/
     );
   });
 
@@ -424,6 +472,68 @@ describe('resolvePackRecipe', () => {
     expect(recipeHash(a.recipe)).toBe(a.recipeHash);
     // Pinned so an accidental change to canonical hashing fails loudly.
     expect(a.recipeHash).toBe(recipeHash(JSON.parse(JSON.stringify(a.recipe))));
+  });
+
+  // Recorded from the code before readFirst existed (commit 82878fb on v3/redesign), for
+  // `localPack` resolved with every default. Packs built then hold this recipeHash, so a
+  // change here would report every existing pack as recipe-changed.
+  const LOCAL_PACK_HASH_BEFORE_READ_FIRST =
+    'sha256:3b753a53f683da7844197fdd72fa481be5f4316afbaa906d200147f65dab17ea';
+
+  it('keeps the recipe hash of a pack without readFirst, and changes it with the field', async () => {
+    const without = await resolvePackRecipe(config(localPack), 'vite', PINNED);
+    const one = await resolvePackRecipe(
+      config({ ...localPack, readFirst: ['pages/migration.md'] }),
+      'vite',
+      PINNED
+    );
+    const other = await resolvePackRecipe(
+      config({ ...localPack, readFirst: ['pages/migration.md#breaking'] }),
+      'vite',
+      PINNED
+    );
+
+    expect(without.recipeHash).toBe(LOCAL_PACK_HASH_BEFORE_READ_FIRST);
+    expect(Object.hasOwn(without.recipe, 'readFirst')).toBe(false);
+    expect(one.recipe.readFirst).toEqual(['pages/migration.md']);
+    expect(new Set([without.recipeHash, one.recipeHash, other.recipeHash]).size).toBe(3);
+  });
+
+  it('substitutes placeholders in readFirst and re-checks the result', async () => {
+    const resolved = await resolvePackRecipe(
+      config({
+        ...localPack,
+        version: 'v8.2.1',
+        readFirst: ['pages/v{major}/migration-{version}.md#to-{major}{minor}', 'files/{patch}.md'],
+      }),
+      'vite',
+      PINNED
+    );
+    expect(resolved.recipe.readFirst).toEqual(['pages/v8/migration-v8.2.1.md#to-82', 'files/1.md']);
+
+    await expect(
+      resolvePackRecipe(
+        config({ ...localPack, version: '2026-07-28', readFirst: ['pages/v{minor}.md'] }),
+        'vite',
+        PINNED
+      )
+    ).rejects.toThrow(/packs\.vite\.readFirst\[0\]: placeholder \{minor\} has no value/);
+    await expect(
+      resolvePackRecipe(
+        config({ ...localPack, version: 'a/../../b', readFirst: ['pages/{version}.md'] }),
+        'vite',
+        PINNED
+      )
+    ).rejects.toThrow(
+      /"pages\/a\/\.\.\/\.\.\/b\.md" \(from "pages\/\{version\}\.md"\) is not a path under pages\/ or files\//
+    );
+    await expect(
+      resolvePackRecipe(
+        config({ ...localPack, version: '1.0', readFirst: ['pages/{version}.md', 'pages/1.0.md'] }),
+        'vite',
+        PINNED
+      )
+    ).rejects.toThrow(/"pages\/1\.0\.md" is listed twice once placeholders are substituted/);
   });
 
   it('names an unknown pack', async () => {

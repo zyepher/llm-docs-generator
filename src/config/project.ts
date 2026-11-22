@@ -236,6 +236,42 @@ const dependencySchema = z.strictObject({
   name: z.string().min(1),
 });
 
+const READ_FIRST_MAX = 5;
+
+/**
+ * A read-first target (spec 4.8): a normalized pack-relative POSIX path under
+ * `pages/` or `files/`, optionally with `#<heading slug>`, the form guide
+ * citations use. Checked on the config text and again after placeholders are
+ * substituted, since a version could carry a `/` or `..` into the path.
+ */
+function isReadFirstTarget(value: string): boolean {
+  const hash = value.indexOf('#');
+  const path = hash === -1 ? value : value.slice(0, hash);
+  const fragment = hash === -1 ? undefined : value.slice(hash + 1);
+
+  return (
+    /^(?:pages|files)\/[^/]/.test(path) &&
+    !path.includes('\\') &&
+    !path.endsWith('/') &&
+    posix.normalize(path) === path &&
+    !path.split('/').includes('..') &&
+    (fragment === undefined || /^[^\s#]+$/u.test(fragment))
+  );
+}
+
+const readFirstSchema = z
+  .array(
+    z.string().refine(isReadFirstTarget, {
+      error:
+        'must be a pack-relative POSIX path under pages/ or files/ (no "..", no backslashes), optionally with #<heading slug>',
+    })
+  )
+  .min(1)
+  .max(READ_FIRST_MAX)
+  .refine((targets) => new Set(targets).size === targets.length, {
+    error: 'must not repeat a target',
+  });
+
 export const packConfigSchema = z
   .strictObject({
     title: z.string().min(1).optional(),
@@ -256,6 +292,7 @@ export const packConfigSchema = z
         maxFileBytes: z.number().int().min(1).max(PACK_LIMITS.maxMaxFileBytes).optional(),
       })
       .optional(),
+    readFirst: readFirstSchema.optional(),
   })
   .superRefine((pack, context) => {
     if (pack.version === undefined && pack.dependency === undefined) {
@@ -352,6 +389,12 @@ export const resolvedPackRecipeSchema = z.strictObject({
   layout: z.strictObject({ combined: z.boolean() }),
   license: z.string().nullable(),
   limits: z.strictObject({ maxFileBytes: z.number().int() }),
+  /**
+   * Absent, never empty, when the pack marks no pages: the canonical JSON of
+   * a recipe without it, and so its recipeHash, is what it was before the
+   * field existed, and packs built then stay up to date.
+   */
+  readFirst: z.array(z.string()).min(1).optional(),
 });
 
 export type ResolvedSource = z.infer<typeof resolvedSourceSchema>;
@@ -688,7 +731,7 @@ export async function resolvePackRecipe(
   const forbid = (value: string, path: string): string => {
     if (new RegExp(PLACEHOLDER_PATTERN.source).test(value)) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${where(path)}: placeholders are only allowed in ref, paths, url, urls, include, and exclude.`
+        `${CONFIG_FILE_NAME} ${where(path)}: placeholders are only allowed in ref, paths, url, urls, include, exclude, and readFirst.`
       );
     }
     return value;
@@ -697,6 +740,21 @@ export async function resolvePackRecipe(
   const sources = pack.sources.map((source, index) =>
     resolveSource(source, `sources[${index}]`, substitute, forbid)
   );
+  const readFirst = (pack.readFirst ?? []).map((target, index) => {
+    const resolved = substitute(target, `readFirst[${index}]`);
+    if (!isReadFirstTarget(resolved)) {
+      throw new ConfigError(
+        `${CONFIG_FILE_NAME} ${where(`readFirst[${index}]`)}: "${resolved}" (from "${target}") is not a path under pages/ or files/ inside the pack; edit packs.${id}.readFirst.`
+      );
+    }
+    return resolved;
+  });
+  const repeated = readFirst.find((target, index) => readFirst.indexOf(target) !== index);
+  if (repeated !== undefined) {
+    throw new ConfigError(
+      `${CONFIG_FILE_NAME} ${where('readFirst')}: "${repeated}" is listed twice once placeholders are substituted; edit packs.${id}.readFirst.`
+    );
+  }
 
   const recipe: ResolvedPackRecipe = {
     title: pack.title ?? id,
@@ -711,6 +769,7 @@ export async function resolvePackRecipe(
     layout: { combined: pack.layout?.combined ?? false },
     license: pack.license ?? null,
     limits: { maxFileBytes: pack.limits?.maxFileBytes ?? PACK_LIMITS.defaultMaxFileBytes },
+    ...(readFirst.length === 0 ? {} : { readFirst }),
   };
 
   return { id, recipe, recipeHash: recipeHash(recipe) };

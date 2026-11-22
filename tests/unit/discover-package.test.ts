@@ -18,7 +18,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ConfigError } from '../../src/config/project.js';
 import {
+  changeDocumentPattern,
+  describePackageDiscovery,
   discoverPackage,
+  findChangeDocuments,
   latestSemverTag,
   matchVersionTags,
   normalizeRepositoryUrl,
@@ -145,6 +148,7 @@ async function makeUpstream(): Promise<{ url: string; v1: string; v11: string }>
     'site/content/en/intro/b.md': '# B\n',
     '.github/ISSUE_TEMPLATE.md': '# Issue\n',
     'src/index.ts': 'export {};\n',
+    'CHANGELOG.md': '# Changelog\n',
   };
   for (const [path, content] of Object.entries(files)) {
     const target = join(dir, ...path.split('/'));
@@ -320,6 +324,81 @@ describe('rankMarkdownDirectories', () => {
         { path: 'site/content/en', markdownFiles: 2 },
       ],
     });
+  });
+});
+
+describe('changeDocuments', () => {
+  const blob = (path: string) => ({ mode: '100644', type: 'blob', path });
+
+  it.each([
+    ['CHANGELOG.md', 'changelog'],
+    ['packages/core/CHANGES.rst', 'changes'],
+    ['HISTORY.txt', 'history'],
+    ['docs/releases.mdx', 'releases'],
+    ['RELEASE_NOTES.md', 'release-notes'],
+    ['docs/release-notes/v4.md', 'release-notes'],
+    ['docs/ReleaseNotes.md', 'release-notes'],
+    ['docs/guide/migration.md', 'migration'],
+    ['docs/migrating-to-v4.md', 'migrating'],
+    ['docs/migrate/index.md', 'migrate'],
+    ['UPGRADE.md', 'upgrade'],
+    ['docs/upgrading.md', 'upgrading'],
+    ['docs/breaking-changes.md', 'changes'],
+    ['docs/v4/breaking.md', 'breaking'],
+    ['docs/whats-new.md', 'whats-new'],
+    ["docs/what's-new/index.md", 'whats-new'],
+    ['docs/upgrade-guide/changelog.md', 'changelog'],
+  ])('accepts %s as %s', (path, pattern) => {
+    expect(changeDocumentPattern(path)).toBe(pattern);
+  });
+
+  it.each([
+    'src/changes.ts',
+    'CHANGELOG',
+    'docs/changelog.html',
+    'docs/exchanges.md',
+    'docs/changelogs.md',
+    'docs/release.md',
+    'docs/guide/start.md',
+    'docs/new.md',
+  ])('rejects %s', (path) => {
+    expect(changeDocumentPattern(path)).toBeUndefined();
+  });
+
+  it('skips hidden paths, vendored trees, symlinks, and trees, ordered by depth then path', () => {
+    const found = findChangeDocuments([
+      blob('docs/guide/migration.md'),
+      blob('docs/CHANGELOG.md'),
+      blob('CHANGELOG.md'),
+      blob('.changeset/history.md'),
+      blob('docs/.vitepress/changelog.md'),
+      blob('node_modules/x/CHANGELOG.md'),
+      blob('packages/a/node_modules/y/HISTORY.md'),
+      { mode: '120000', type: 'blob', path: 'UPGRADE.md' },
+      { mode: '040000', type: 'tree', path: 'docs/migration.md' },
+      blob('Changes.md'),
+    ]);
+
+    expect(found).toEqual({
+      documents: [
+        { path: 'CHANGELOG.md', pattern: 'changelog' },
+        { path: 'Changes.md', pattern: 'changes' },
+        { path: 'docs/CHANGELOG.md', pattern: 'changelog' },
+        { path: 'docs/guide/migration.md', pattern: 'migration' },
+      ],
+      more: 0,
+    });
+  });
+
+  it('lists at most 20 and counts the rest', () => {
+    const paths = Array.from(
+      { length: 23 },
+      (_, index) => `packages/p${String(index).padStart(2, '0')}/CHANGELOG.md`
+    );
+    const found = findChangeDocuments([...paths].reverse().map(blob));
+
+    expect(found.documents.map((document) => document.path)).toEqual(paths.slice(0, 20));
+    expect(found.more).toBe(3);
   });
 });
 
@@ -588,7 +667,7 @@ describe('discoverPackage', () => {
       status: 'listed',
       tag: 'v1.0.0',
       commit: upstream.v1,
-      markdownFiles: 7,
+      markdownFiles: 8,
       directories: [
         { path: 'docs', markdownFiles: 4 },
         { path: 'docs/guide', markdownFiles: 2 },
@@ -596,16 +675,33 @@ describe('discoverPackage', () => {
         { path: 'docs/api', markdownFiles: 1 },
       ],
     });
+    expect(discovery.changeDocuments).toEqual({
+      status: 'listed',
+      tag: 'v1.0.0',
+      commit: upstream.v1,
+      documents: [{ path: 'CHANGELOG.md', pattern: 'changelog' }],
+      more: 0,
+    });
     expect(discovery.warnings).toEqual([
       '2 tags match 1.0.0; the directory listing uses v1.0.0, the first exact form.',
     ]);
+    expect(describePackageDiscovery(discovery)).toContain(
+      '  change documents at v1.0.0: CHANGELOG.md (changelog)'
+    );
 
     const latest = await discoverPackage(parsePackageSpec(`swiftpm:${upstream.url}`));
     expect(latest.package).toMatchObject({ version: '1.1.0', versionSource: 'latest-tag' });
     expect(latest.docDirectories).toMatchObject({
       tag: 'v1.1.0',
       commit: upstream.v11,
-      markdownFiles: 8,
+      markdownFiles: 9,
+    });
+    expect(latest.changeDocuments).toMatchObject({
+      documents: [
+        { path: 'CHANGELOG.md', pattern: 'changelog' },
+        { path: 'docs/changes.md', pattern: 'changes' },
+      ],
+      more: 0,
     });
   });
 
@@ -678,6 +774,11 @@ describe('discoverPackage', () => {
     const untagged = await discoverPackage(parsePackageSpec(`swiftpm:${upstream.url}@3.0.0`));
     expect(untagged.tags).toEqual({ status: 'no-match', tagCount: 3 });
     expect(untagged.docDirectories).toEqual({ status: 'skipped', reason: 'No tag names 3.0.0.' });
+    expect(untagged.changeDocuments).toEqual({
+      status: 'skipped',
+      reason: 'No tree was listed at a matched tag; see docDirectories.',
+    });
+    expect(describePackageDiscovery(untagged).join('\n')).not.toContain('change documents');
   });
 
   it('throws when the registry itself cannot be reached', async () => {

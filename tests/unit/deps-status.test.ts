@@ -58,6 +58,7 @@ function pack(id: string, overrides: Partial<PackStatusInput> = {}): PackStatusI
     versionPinned: false,
     recipeChanged: false,
     indexPath: `agent-docs/${id}/index.md`,
+    readFirst: [],
     inConfig: true,
     ...overrides,
   };
@@ -474,6 +475,96 @@ describe('formatStatusBrief', () => {
     }
   });
 
+  describe('read-first pages on pinned rows', () => {
+    const readFirstReport = (extraDependencies: ResolvedDependency[] = []) =>
+      computeStatus(
+        baseInput({
+          dependencies: [
+            dep('one', '1.0.0'),
+            dep('two', '1.0.0'),
+            dep('three', '1.0.0'),
+            dep('none', '1.0.0'),
+            ...extraDependencies,
+          ],
+          releases: releases({
+            'npm:one@1.0.0': '2026-10-04T00:00:00.000Z',
+            'npm:two@1.0.0': '2026-10-03T00:00:00.000Z',
+            'npm:three@1.0.0': '2026-10-02T00:00:00.000Z',
+            'npm:none@1.0.0': '2026-10-01T00:00:00.000Z',
+            'npm:next@16.1.0': '2026-10-21T00:00:00.000Z',
+          }),
+          cutoff,
+          packs: [
+            pack('one', {
+              title: 'One',
+              dependency: { ecosystem: 'npm', name: 'one' },
+              readFirst: ['agent-docs/one/pages/guide/migration.md'],
+            }),
+            pack('two', {
+              title: 'Two',
+              dependency: { ecosystem: 'npm', name: 'two' },
+              readFirst: ['agent-docs/two/pages/upgrade.md', 'agent-docs/two/files/CHANGELOG.md'],
+            }),
+            pack('three', {
+              title: 'Three',
+              dependency: { ecosystem: 'npm', name: 'three' },
+              readFirst: [
+                'agent-docs/three/pages/api.md#breaking-changes',
+                'agent-docs/three/pages/api.md#removed',
+                'agent-docs/three/pages/b`ad.md',
+                'agent-docs/three/pages/whats-new.md',
+                'agent-docs/three/pages/migrate.md',
+              ],
+            }),
+            pack('none', { title: 'None', dependency: { ecosystem: 'npm', name: 'none' } }),
+          ],
+        })
+      );
+    const NONE_ROW = '- None 1.0.0 (released 2026-10-01, after cutoff): `agent-docs/none/index.md`';
+    const ROWS = [
+      '- One 1.0.0 (released 2026-10-04, after cutoff): read `agent-docs/one/pages/guide/migration.md` first, then `agent-docs/one/index.md`',
+      '- Two 1.0.0 (released 2026-10-03, after cutoff): read `agent-docs/two/pages/upgrade.md` and `agent-docs/two/files/CHANGELOG.md` first, then `agent-docs/two/index.md`',
+      '- Three 1.0.0 (released 2026-10-02, after cutoff): read `agent-docs/three/pages/api.md` and `agent-docs/three/pages/whats-new.md` first, then `agent-docs/three/index.md`',
+      NONE_ROW,
+    ];
+    const SHORT = [
+      '- One 1.0.0 (released 2026-10-04, after cutoff): `agent-docs/one/index.md`',
+      '- Two 1.0.0 (released 2026-10-03, after cutoff): `agent-docs/two/index.md`',
+      '- Three 1.0.0 (released 2026-10-02, after cutoff): `agent-docs/three/index.md`',
+      NONE_ROW,
+    ];
+
+    it('names at most two read-first paths per row, fragments dropped, repeats merged, unsafe paths left out', () => {
+      const report = readFirstReport();
+      const lines = formatStatusBrief(report, BRIEF_OPTIONS).split('\n');
+
+      expect(lines.slice(1)).toEqual(ROWS);
+      expect(report.packs.find((entry) => entry.id === 'three')?.readFirst).toHaveLength(5);
+    });
+
+    it('drops read-first paths from the last row up before dropping any row, and only after the items below', () => {
+      const full = formatStatusBrief(readFirstReport([dep('next', '16.1.0')]), {
+        maxChars: 10_000,
+      });
+      const brief = (maxChars: number): string =>
+        formatStatusBrief(readFirstReport([dep('next', '16.1.0')]), { maxChars });
+      const [heading = '', ...rest] = full.split('\n');
+      const pinned = (rows: string[]): string => [heading, ...rows].join('\n');
+
+      expect(rest.slice(0, 4)).toEqual(ROWS);
+      expect(brief(pinned(ROWS).length)).toBe(pinned(ROWS));
+
+      const lastShort = pinned([...ROWS.slice(0, 2), ...SHORT.slice(2)]);
+      expect(brief(pinned(ROWS).length - 1)).toBe(lastShort);
+
+      const allShort = pinned(SHORT);
+      expect(brief(allShort.length)).toBe(allShort);
+      expect(brief(allShort.length - 1)).toBe(
+        pinned([...SHORT.slice(0, 3), '- and 1 more (run `llm-docs status`)'])
+      );
+    });
+  });
+
   it('escapes lockfile names and versions before they reach an agent', () => {
     const report = computeStatus(
       baseInput({
@@ -493,22 +584,39 @@ describe('formatStatusHuman', () => {
   it('renders the pack table and dependency lists, each row with its next step', () => {
     const report = computeStatus(
       baseInput({
-        dependencies: [dep('vite', '8.2.0'), dep('next', '16.1.0'), dep('mystery', '1.0.0')],
+        dependencies: [
+          dep('vite', '8.2.0'),
+          dep('zod', '4.1.0'),
+          dep('next', '16.1.0'),
+          dep('mystery', '1.0.0'),
+        ],
         releases: releases({
           'npm:vite@8.1.0': '2026-06-20T00:00:00.000Z',
+          'npm:zod@4.1.0': '2026-09-30T00:00:00.000Z',
           'npm:next@16.1.0': '2026-10-21T18:00:00.000Z',
           'npm:mystery@1.0.0': null,
         }),
         cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5' },
-        packs: [pack('vite', { version: '8.1.0', dependency: { ecosystem: 'npm', name: 'vite' } })],
+        packs: [
+          pack('vite', { version: '8.1.0', dependency: { ecosystem: 'npm', name: 'vite' } }),
+          pack('zod', {
+            version: '4.1.0',
+            dependency: { ecosystem: 'npm', name: 'zod' },
+            readFirst: [
+              'agent-docs/zod/pages/v4/changelog.md',
+              'agent-docs/zod/pages/api.md#errors',
+            ],
+          }),
+        ],
       })
     );
 
     expect(formatStatusHuman(report)).toBe(
       [
         'Packs:',
-        '  ID    VERSION  DEPENDENCY  LOCKFILE  STATE       RELEASED                  NEXT',
-        '  vite  8.1.0    npm:vite    8.2.0     stale-pack  2026-06-20 (near cutoff)  llm-docs sync vite',
+        '  ID    VERSION  DEPENDENCY  LOCKFILE  STATE       RELEASED                   READ FIRST  NEXT',
+        '  vite  8.1.0    npm:vite    8.2.0     stale-pack  2026-06-20 (near cutoff)   -           llm-docs sync vite',
+        '  zod   4.1.0    npm:zod     4.1.0     ok          2026-09-30 (after cutoff)  2           -',
         '',
         'Model training data cutoff: 2026-06 (Claude Opus 5.5).',
         '',
@@ -516,7 +624,7 @@ describe('formatStatusHuman', () => {
         '  NAME  VERSION  ECOSYSTEM  RELEASED    NEXT',
         '  next  16.1.0   npm        2026-10-21  llm-docs discover --package npm:next@16.1.0',
         '',
-        '3 direct dependencies checked; 2 with an unknown release date.',
+        '4 direct dependencies checked; 2 with an unknown release date.',
         '',
       ].join('\n')
     );

@@ -1,8 +1,9 @@
 /**
  * `discover --package` (spec 10): read-only evidence about where a package's
- * docs live. Registry metadata, the git tags that match the version, and the
- * directories holding Markdown at the first exact tag. The planner reads the
- * evidence and writes the recipe; nothing here chooses a source.
+ * docs live. Registry metadata, the git tags that match the version, and, at
+ * the first exact tag, the directories holding Markdown and the files that
+ * describe change. The planner reads the evidence and writes the recipe;
+ * nothing here chooses a source or a page to read first.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -28,8 +29,10 @@ import {
 import { createHttpClient, redactUrl } from '../sources/http.js';
 import { errorMessage } from '../utils/guards.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
+import { isSkippedTraversalDirectory } from '../utils/traversal.js';
 
 const DOC_DIRECTORY_LIMIT = 10;
+const CHANGE_DOCUMENT_LIMIT = 20;
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/;
 const NAME_PATTERN = /^@?[A-Za-z0-9][A-Za-z0-9._~/-]*$/;
 
@@ -54,6 +57,23 @@ export interface MarkdownDirectory {
   /** `.md` and `.mdx` files anywhere under the directory. */
   markdownFiles: number;
 }
+
+export interface ChangeDocument {
+  path: string;
+  /** The name pattern its file name or a directory matched, such as `changelog` or `migration`. */
+  pattern: ChangeDocumentPattern;
+}
+
+export type ChangeDocumentEvidence =
+  | {
+      status: 'listed';
+      tag: string;
+      commit: string;
+      documents: ChangeDocument[];
+      /** Matches past the first CHANGE_DOCUMENT_LIMIT, which are not listed. */
+      more: number;
+    }
+  | { status: 'skipped'; reason: string };
 
 export type RegistryEvidence = PackageMetadataLookup | { status: 'not-applicable'; reason: string };
 
@@ -92,6 +112,7 @@ export interface PackageDiscovery {
   repository: RepositoryEvidence;
   tags: TagEvidence;
   docDirectories: DocDirectoryEvidence;
+  changeDocuments: ChangeDocumentEvidence;
   warnings: string[];
 }
 
@@ -354,6 +375,109 @@ export function rankMarkdownDirectories(entries: readonly TreeEntry[]): {
 }
 
 // ---------------------------------------------------------------------------
+// Change documents
+// ---------------------------------------------------------------------------
+
+/**
+ * Names of files that describe change, as word sequences: a file name or a
+ * directory matches when its words (split at punctuation and camelCase,
+ * lowercased) contain the sequence. Each reports its pattern name.
+ */
+const CHANGE_DOCUMENT_PATTERNS = [
+  { pattern: 'changelog', words: ['changelog'] },
+  { pattern: 'changes', words: ['changes'] },
+  { pattern: 'history', words: ['history'] },
+  { pattern: 'releases', words: ['releases'] },
+  { pattern: 'release-notes', words: ['release', 'notes'] },
+  { pattern: 'migration', words: ['migration'] },
+  { pattern: 'migrating', words: ['migrating'] },
+  { pattern: 'migrate', words: ['migrate'] },
+  { pattern: 'upgrade', words: ['upgrade'] },
+  { pattern: 'upgrading', words: ['upgrading'] },
+  { pattern: 'breaking', words: ['breaking'] },
+  { pattern: 'whats-new', words: ['whats', 'new'] },
+  { pattern: 'whats-new', words: ['what', 's', 'new'] },
+] as const;
+
+export type ChangeDocumentPattern = (typeof CHANGE_DOCUMENT_PATTERNS)[number]['pattern'];
+
+const CHANGE_DOCUMENT_EXTENSION = /\.(?:md|mdx|rst|txt)$/i;
+
+function nameWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word !== '');
+}
+
+function containsWords(words: readonly string[], sequence: readonly string[]): boolean {
+  return words.some((_, start) => sequence.every((word, offset) => words[start + offset] === word));
+}
+
+/** The pattern a file's name, else its nearest matching directory, matches; undefined for none. */
+export function changeDocumentPattern(path: string): ChangeDocumentPattern | undefined {
+  const segments = path.split('/');
+  const name = segments.at(-1) ?? '';
+
+  if (!CHANGE_DOCUMENT_EXTENSION.test(name)) {
+    return undefined;
+  }
+
+  const names = [name.replace(CHANGE_DOCUMENT_EXTENSION, ''), ...segments.slice(0, -1).reverse()];
+  for (const candidate of names) {
+    const words = nameWords(candidate);
+    const match = CHANGE_DOCUMENT_PATTERNS.find((entry) => containsWords(words, entry.words));
+    if (match !== undefined) {
+      return match.pattern;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Files whose name or directory says they describe change (changelogs,
+ * release notes, migration and upgrade guides), shallowest first, then by
+ * path; at most CHANGE_DOCUMENT_LIMIT, with a count of the rest. Hidden
+ * paths, vendored and build directories, and symlinks are skipped. Evidence
+ * only: which one an agent should read first is the planner's call.
+ */
+export function findChangeDocuments(entries: readonly TreeEntry[]): {
+  documents: ChangeDocument[];
+  more: number;
+} {
+  const documents: ChangeDocument[] = [];
+
+  for (const entry of entries) {
+    const segments = entry.path.split('/');
+    if (
+      entry.type !== 'blob' ||
+      entry.mode === '120000' ||
+      segments.some((segment) => segment.startsWith('.')) ||
+      segments.slice(0, -1).some(isSkippedTraversalDirectory)
+    ) {
+      continue;
+    }
+    const pattern = changeDocumentPattern(entry.path);
+    if (pattern !== undefined) {
+      documents.push({ path: entry.path, pattern });
+    }
+  }
+
+  documents.sort(
+    (a, b) =>
+      a.path.split('/').length - b.path.split('/').length ||
+      compareStringsByCodeUnit(a.path, b.path)
+  );
+
+  return {
+    documents: documents.slice(0, CHANGE_DOCUMENT_LIMIT),
+    more: Math.max(0, documents.length - CHANGE_DOCUMENT_LIMIT),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
 
@@ -391,6 +515,8 @@ export async function discoverPackage(
     repository: { status: 'missing', reason: 'The registry metadata names no repository.' },
     tags: skipped('There is no repository to read tags from.'),
     docDirectories: skipped('No tag was matched.'),
+    // Listed only from the same tree as docDirectories; its reason says why there is none.
+    changeDocuments: skipped('No tree was listed at a matched tag; see docDirectories.'),
     warnings,
   };
   let declared: { url: string; directory: string | null };
@@ -513,30 +639,35 @@ export async function discoverPackage(
       );
     }
 
-    result.docDirectories = await listMarkdownDirectories(
-      git,
-      join(workDir, 'repository'),
-      normalized.url,
-      listed.tag
-    );
+    const listing = await listTagTree(git, join(workDir, 'repository'), normalized.url, listed.tag);
+    if (listing.status === 'failed') {
+      result.docDirectories = listing;
+      return result;
+    }
+    const { tag, commit, tree } = listing;
+    result.docDirectories = { status: 'listed', tag, commit, ...rankMarkdownDirectories(tree) };
+    result.changeDocuments = { status: 'listed', tag, commit, ...findChangeDocuments(tree) };
     return result;
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
 }
 
-async function listMarkdownDirectories(
+async function listTagTree(
   git: GitRunner,
   checkout: string,
   repo: string,
   tag: string
-): Promise<DocDirectoryEvidence> {
+): Promise<
+  | { status: 'listed'; tag: string; commit: string; tree: TreeEntry[] }
+  | { status: 'failed'; tag: string; error: string }
+> {
   try {
     const commit = await fetchCommit(git, checkout, repo, `refs/tags/${tag}`);
     const tree = parseTree(
       await git(['ls-tree', '-r', '-z', '--full-tree', commit], { cwd: checkout })
     );
-    return { status: 'listed', tag, commit, ...rankMarkdownDirectories(tree) };
+    return { status: 'listed', tag, commit, tree };
   } catch (error) {
     if (!(error instanceof GitError)) {
       throw error;
@@ -547,7 +678,7 @@ async function listMarkdownDirectories(
 
 /** The stderr summary: one line per piece of evidence. */
 export function describePackageDiscovery(result: PackageDiscovery): string[] {
-  const { package: pkg, registry, repository, tags, docDirectories } = result;
+  const { package: pkg, registry, repository, tags, docDirectories, changeDocuments } = result;
   const lines = [
     `${pkg.ecosystem}:${pkg.name}@${pkg.version ?? '(no version)'}${pkg.versionSource === null ? '' : ` (${pkg.versionSource})`}`,
   ];
@@ -623,6 +754,20 @@ export function describePackageDiscovery(result: PackageDiscovery): string[] {
         lines.push(`  Markdown directories: ${docDirectories.reason}`);
       }
       break;
+  }
+
+  if (changeDocuments.status === 'listed') {
+    const { documents, more } = changeDocuments;
+    const shown = documents
+      .slice(0, 5)
+      .map((document) => `${document.path} (${document.pattern})`)
+      .join(', ');
+    const rest = documents.length + more - Math.min(documents.length, 5);
+    lines.push(
+      `  change documents at ${changeDocuments.tag}: ${
+        documents.length === 0 ? 'none' : `${shown}${rest > 0 ? `, and ${rest} more` : ''}`
+      }`
+    );
   }
 
   for (const warning of result.warnings) {

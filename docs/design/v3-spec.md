@@ -111,7 +111,8 @@ never silently disable behavior.
         "aliases": { "/guide/latest": "/guide" }
       },
       "layout": { "combined": false },
-      "license": null                      // optional declared SPDX id, "proprietary", or null
+      "license": null,                     // optional declared SPDX id, "proprietary", or null
+      "readFirst": ["pages/guide/migration.md"]  // optional, 1 to 5 targets: see 4.8
     }
   }
 }
@@ -121,8 +122,13 @@ Rules:
 
 - Pack ids match `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - `{version}`, `{major}`, `{minor}`, `{patch}` placeholders are allowed in `ref`, `paths`,
-  `url`, `urls`, `include`, and `exclude`, substituted from the resolved version. A
+  `url`, `urls`, `include`, `exclude`, and `readFirst`, substituted from the resolved version. A
   placeholder with no resolvable value is an error, never an empty string.
+- `readFirst` entries are pack-relative POSIX paths starting with `pages/` or `files/` (no
+  absolute paths, no `..` segments, no backslashes, normalized), each optionally followed by
+  `#<heading slug>`, the target form guide citations use (section 8). Duplicates are an error,
+  checked again after placeholder substitution. The planner decides which pages these are; the
+  engine records, validates, and shows them, and never guesses which page describes a change.
 - `version` must be a non-empty string without whitespace. It need not be semver (`2026-07-28`
   is a valid version for a protocol revision).
 - `dependency.ecosystem` is one of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`.
@@ -204,6 +210,9 @@ with a clear message instead of waiting.
   "dependency": { "ecosystem": "npm", "name": "vite" },          // or null
   "recipe": { /* the resolved pack recipe: placeholders substituted, defaults filled */ },
   "recipeHash": "sha256:...",          // hash of the canonical JSON of `recipe`
+                                       // (`recipe.readFirst` is absent, never [], when the
+                                       // pack marks no pages, so packs built before the field
+                                       // existed keep their recipeHash)
   "acquiredAt": "2026-11-05T10:00:00.000Z",
   "origins": [                          // one per source, same order as recipe.sources
     { "type": "git", "repo": "https://github.com/vitejs/vite", "ref": "v8.2.0",
@@ -423,10 +432,24 @@ Generated, deterministic, verified. Contents:
 2. A short "How to read this pack" paragraph: open the page for the API you need; grep
    `pages/` for exact symbol names; pages are upstream text; guides, when the pack has any,
    are the digests in `guides/` and never outrank pages.
-3. "Pages": grouped by top-level directory under `pages/` (in sorted order), one table per
+3. "Read first", only when `recipe.readFirst` is non-empty: one sentence ("Start with these
+   pages before writing code against <Title> <version>. They were marked as the ones to read
+   first for this version, usually because they describe what changed.") and one link per
+   target in recipe order, labeled with the page title (the path for a passthrough file) and,
+   for a target with a fragment, `: <heading text>`. Labels are escaped like page titles.
+   When a library is newer than the model's training data, the page that says what changed is
+   what keeps the agent from writing the API it remembers.
+4. "Pages": grouped by top-level directory under `pages/` (in sorted order), one table per
    group with columns page link, title, approximate tokens.
 
-The index never enumerates guides. It is a function of the manifest alone, so adding,
+At sync every `readFirst` target must name a page or passthrough output of the pack being
+built, and a fragment must be the slug of a heading on that Markdown file. An unresolved target
+fails that pack's build as a config error (exit 2) naming the target, why it did not resolve,
+up to five nearest output paths or heading slugs, and the fix (edit `packs.<id>.readFirst`);
+the previous pack stays in place. The links verify under `--strict`, fragments included.
+
+The index never enumerates guides. It is a function of the manifest and, for read-first
+headings, the pages the manifest lists, so adding,
 editing, removing, or stamping a guide changes neither `index.md`, the combined file, nor
 `manifest.json`, and `sync` never re-acquires a source for one. What a guide change does
 change is the managed block's `guides` topic (7.1), which `sync` rewrites without acquiring
@@ -467,9 +490,13 @@ TTY and never when `NO_COLOR` is set.
 - `llm-docs add <id> (--git <repo> --ref <ref> [--path <p>]... | --url <u>... | --urls-file
   <f> | --llms-txt <u> --include <glob>... | --local <path>) [--dependency <eco>:<name>]
   [--version <v>] [--mount <m>] [--title <t>] [--convert <tool>] [--site <baseUrl>]
-  [--recipe <json>] [--dry-run]`: write the recipe into config (creating config if absent),
-  then `sync <id>`. Refuses to overwrite an existing id unless `--replace`. `--dry-run` prints
-  the recipe and the file list that would be acquired, writing nothing.
+  [--recipe <json>] [--read-first <target>]... [--dry-run]`: write the recipe into config
+  (creating config if absent), then `sync <id>`. Refuses to overwrite an existing id unless
+  `--replace`. When the build rejects the recipe as a config error (exit 2, an unresolved
+  read-first target among them), `llm-docs.json` is put back as it was. `--dry-run` prints the
+  recipe and the file list that would be acquired, writing nothing, and says for each
+  `--read-first` target whether a file the recipe takes lands at its path; a heading fragment
+  can only be checked once pages are built, and the output says so.
 - `llm-docs sync [ids...] [--check] [--offline] [--prune]`: bring packs in line with config
   and lockfiles. Skips a pack when its manifest's `recipeHash` matches and its outputs verify.
   `--check`: write nothing, exit 1 if any pack or managed block would change (CI gate).
@@ -592,9 +619,10 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
 - Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved,
   `recipe-changed`, `missing` when configured but never synced, `orphan`), the release date of
   the pack's version of its bound dependency and whether it falls after or near the cutoff,
-  and the step that brings the pack back to `ok` (`llm-docs sync <id>`; for a stale pack whose
-  config pins `version`, editing that version first; for an orphan, `sync --prune` or adding
-  it back to config).
+  the built pack's read-first targets (4.8) as project-relative paths (the full list in
+  `--json`, a count in the human table), and the step that brings the pack back to `ok`
+  (`llm-docs sync <id>`; for a stale pack whose config pins `version`, editing that version
+  first; for an orphan, `sync --prune` or adding it back to config).
 - Direct dependencies released after the cutoff, or within `nearCutoffDays` before it, that
   have no pack: name, version, release date, and a suggested next step
   (`llm-docs discover --package <eco>:<name>@<version>`, the evidence for writing a recipe).
@@ -680,6 +708,11 @@ context for the agent. Behavior:
      the cutoff, and the index path, under a heading that tells the agent its memory of these
      libraries predates these versions and that it must read the pinned pages before writing
      code against them. This is what a fully adopted project is told at every session start.
+     When the pack has read-first pages (4.8) the line names them before the index:
+     ``- Hono 4.13.16 (released 2026-11-01, after cutoff): read `agent-docs/hono/pages/guide/migration.md` first, then `agent-docs/hono/index.md` ``.
+     At most two paths, the first two in recipe order with fragments dropped and repeats
+     merged; the index links the rest. A path that the 7.1 escaping would alter is left out
+     rather than shown altered.
   3. Direct dependencies newer than the model's training cutoff (or within the near-cutoff
      window) without a pack, most recent first, at most 8, with their release dates, and the
      suggestion to read their docs or create a pack with the `add-docs` skill.
@@ -694,7 +727,8 @@ context for the agent. Behavior:
 
   Over the budget, text goes from the bottom up: item 4 first, then the rows of the lowest
   remaining item from its last row, and a cut list ends with how many more there are and
-  `llm-docs status`. Items 2 and 3 use the neutral wording and the 180-day window when no
+  `llm-docs status`. In item 2 the read-first paths go before any row does, from the last row
+  up. Items 2 and 3 use the neutral wording and the 180-day window when no
   cutoff resolves. `llm-docs status --brief` prints the same text.
 - Performance: total wall time under 1.5 s, counted from process start. Release dates come from
   the cache; missing entries get at most a 1,000 ms network budget, and anything still missing
@@ -788,6 +822,14 @@ writes files.
   version (via `git ls-remote`), and, when a tag matches, the top documentation-looking
   directories at that tag (blobless shallow fetch and `git ls-tree`, ranked by Markdown file
   count). Ecosystems: npm, pypi, cargo, pub, go (swiftpm: repository URL is the identity).
+  From the same tree, `changeDocuments`: files whose name or a directory on their path names a
+  description of change (case-insensitive, by words: `CHANGELOG`, `CHANGES`, `HISTORY`,
+  `RELEASES`, `RELEASE_NOTES`/`release-notes`, `MIGRATION`/`migrating`/`migrate`,
+  `UPGRADE`/`upgrading`, `breaking`, `whats-new`/`what's-new`) with extension `.md`, `.mdx`,
+  `.rst`, or `.txt`; hidden paths, vendored and build directories, and symlinks skipped; sorted
+  by path depth then path; at most 20 with a count of the rest. Each entry is the path and the
+  pattern that matched. This is evidence for choosing `readFirst` targets; the output never
+  says which one to use.
 
 ## 11. Security summary
 

@@ -28,7 +28,7 @@ const SKIPPED_DIRECTORY_NAMES = [
 
 const SKIPPED_DIRECTORY_NAME_SET: ReadonlySet<string> = new Set(SKIPPED_DIRECTORY_NAMES);
 
-function isSkippedTraversalDirectory(name: string): boolean {
+export function isSkippedTraversalDirectory(name: string): boolean {
   return SKIPPED_DIRECTORY_NAME_SET.has(name);
 }
 

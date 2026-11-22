@@ -396,6 +396,42 @@ describe('what the hook says', () => {
     );
   });
 
+  it('names the read-first pages of pinned packs, at most two each, before the index', async () => {
+    const root = await project({
+      lock: npmLock({ hono: '4.13.16', next: '16.1.0', zod: '4.1.0' }),
+      files: {
+        'docs/upgrade.md': '# Upgrade\n\n## Breaking\n\nRenamed.\n',
+        'docs/changes.md': '# Changes\n',
+      },
+      packs: {
+        hono: { ...HONO, readFirst: ['pages/upgrade.md'] },
+        zod: {
+          title: 'Zod',
+          dependency: { ecosystem: 'npm', name: 'zod' },
+          sources: LOCAL_DOCS,
+          readFirst: ['pages/changes.md', 'pages/upgrade.md#breaking'],
+        },
+        next: {
+          title: 'Next.js',
+          dependency: { ecosystem: 'npm', name: 'next' },
+          sources: LOCAL_DOCS,
+          readFirst: ['pages/upgrade.md#breaking', 'pages/upgrade.md', 'pages/index.md'],
+        },
+      },
+      config: { agentFiles: 'auto' },
+      build: ['hono', 'zod', 'next'],
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
+      [
+        PINNED_HEADING,
+        '- Next.js 16.1.0 (released 2026-10-21, after cutoff): read `agent-docs/next/pages/upgrade.md` and `agent-docs/next/pages/index.md` first, then `agent-docs/next/index.md`',
+        '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/upgrade.md` first, then `agent-docs/hono/index.md`',
+        '- Zod 4.1.0 (released 2026-06-25, near cutoff): read `agent-docs/zod/pages/changes.md` and `agent-docs/zod/pages/upgrade.md` first, then `agent-docs/zod/index.md`',
+      ].join('\n')
+    );
+  });
+
   it('lists the packs when the harness does not see the managed block, alone', async () => {
     const root = await project({
       lock: npmLock({ 'date-fns': '2.30.0' }),
@@ -453,6 +489,38 @@ describe('what the hook says', () => {
     expect(lines.at(-1)).toMatch(/^- and \d+ more \(run `llm-docs status`\)$/);
     expect(cut).not.toContain(PINNED_HEADING);
     expect(cut).not.toContain(DEPENDENCIES_HEADING);
+  });
+
+  it('drops the items below before read-first paths, and read-first paths before rows', async () => {
+    const pinnedRow = async (rebuilds: number): Promise<string[]> => {
+      const root = await project({
+        files: { 'docs/upgrade.md': '# Upgrade\n' },
+        packs: {
+          hono: { ...HONO, readFirst: ['pages/upgrade.md'] },
+          ...Object.fromEntries(
+            Array.from({ length: rebuilds }, (_, index) => [
+              `p${String(index).padStart(2, '0')}`,
+              { version: '1.0.0', sources: LOCAL_DOCS },
+            ])
+          ),
+        },
+        build: ['hono'],
+      });
+      const text = injected(await runHook({ payload: { cwd: root, ...OPUS } }));
+      expect(text.length).toBeLessThanOrEqual(HOOK_LIMITS.maxChars);
+      expect(text).not.toContain(DEPENDENCIES_HEADING);
+      return text.split('\n').slice(rebuilds + 2);
+    };
+
+    expect(await pinnedRow(26)).toEqual([
+      PINNED_HEADING,
+      '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/upgrade.md` first, then `agent-docs/hono/index.md`',
+    ]);
+    expect(await pinnedRow(27)).toEqual([
+      PINNED_HEADING,
+      '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+    ]);
+    expect(await pinnedRow(28)).toEqual([PINNED_HEADING, '- and 1 more (run `llm-docs status`)']);
   });
 });
 

@@ -50,7 +50,7 @@ import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { renderCombinedPack } from './combined.js';
-import { renderIndexPage } from './index-page.js';
+import { renderIndexPage, type ReadFirstLink } from './index-page.js';
 import {
   listGuides,
   reviewGuidesAfterBuild,
@@ -70,7 +70,7 @@ import {
   type ManifestSourceEntry,
   type PackManifest,
 } from './manifest.js';
-import { convertMarkdownPage, type PackFileRef } from './markdown.js';
+import { convertMarkdownPage, headingSlugs, type PackFileRef } from './markdown.js';
 import { diffRefresh, type ConverterIdentity, type RefreshReport } from './refresh.js';
 import { renderSourcePage } from './render-ir.js';
 import { LOCK_FILE, withPacksLock } from './lock.js';
@@ -298,7 +298,8 @@ async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): 
 
 function renderIndexFor(
   manifest: Omit<PackManifest, 'outputs'>,
-  outputs: readonly ManifestOutputEntry[]
+  outputs: readonly ManifestOutputEntry[],
+  readFirst: readonly ReadFirstLink[]
 ): string {
   return renderIndexPage({
     pack: manifest.pack,
@@ -308,7 +309,131 @@ function renderIndexFor(
     license: manifest.license,
     sources: manifest.sources,
     pages: outputs.filter((output) => output.kind === 'page'),
+    readFirst,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Read-first targets
+// ---------------------------------------------------------------------------
+
+const READ_FIRST_HINTS = 5;
+
+function splitReadFirstTarget(target: string): { path: string; fragment: string | null } {
+  const hash = target.indexOf('#');
+  return hash === -1
+    ? { path: target, fragment: null }
+    : { path: target.slice(0, hash), fragment: target.slice(hash + 1) };
+}
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const substitution = (previous[j - 1] ?? 0) + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current.push(Math.min((previous[j] ?? 0) + 1, (current[j - 1] ?? 0) + 1, substitution));
+    }
+    previous = current;
+  }
+
+  return previous[b.length] ?? 0;
+}
+
+/**
+ * The candidates closest to `wanted`: those containing it (or contained in
+ * it) first, since a truncated slug or path is the usual typo, then by edit
+ * distance, ties in code-unit order.
+ */
+function nearest(wanted: string, candidates: readonly string[]): string[] {
+  return [...new Set(candidates)]
+    .map((candidate) => ({
+      candidate,
+      overlap: candidate.includes(wanted) || wanted.includes(candidate) ? 0 : 1,
+      distance: editDistance(wanted, candidate),
+    }))
+    .sort(
+      (a, b) =>
+        a.overlap - b.overlap ||
+        a.distance - b.distance ||
+        compareStringsByCodeUnit(a.candidate, b.candidate)
+    )
+    .slice(0, READ_FIRST_HINTS)
+    .map((entry) => entry.candidate);
+}
+
+function readFirstError(id: string, index: number, target: string, why: string): ConfigError {
+  return new ConfigError(
+    `packs.${id}.readFirst[${index}] "${target}" does not resolve: ${why}. Edit packs.${id}.readFirst in llm-docs.json.`
+  );
+}
+
+/**
+ * Resolve `recipe.readFirst` against the staged pack (spec 4.8): each target
+ * must name a page or passthrough output, and a fragment must be the GitHub
+ * slug of a heading on that Markdown file. Any miss fails the build as a
+ * config error naming the nearest paths or slugs; nothing is partly accepted.
+ */
+async function resolveReadFirst(
+  id: string,
+  targets: readonly string[],
+  outputs: readonly ManifestOutputEntry[],
+  stagingDir: string
+): Promise<ReadFirstLink[]> {
+  const files = outputs.filter((output) => output.kind === 'page' || output.kind === 'passthrough');
+  const links: ReadFirstLink[] = [];
+
+  for (const [index, target] of targets.entries()) {
+    const { path, fragment } = splitReadFirstTarget(target);
+    const output = files.find((entry) => entry.path === path);
+
+    if (output === undefined) {
+      const hints = nearest(
+        path,
+        files.map((entry) => entry.path)
+      );
+      throw readFirstError(
+        id,
+        index,
+        target,
+        `no page or passthrough file in the built pack has this path${hints.length === 0 ? '' : ` (nearest: ${hints.join(', ')})`}`
+      );
+    }
+
+    const title = output.title === undefined || output.title === '' ? path : output.title;
+
+    if (fragment === null) {
+      links.push({ path, fragment, title, heading: null });
+      continue;
+    }
+
+    if (!/\.md$/i.test(path)) {
+      throw readFirstError(id, index, target, 'a fragment only resolves on a Markdown file');
+    }
+
+    const headings = headingSlugs(await readFile(join(stagingDir, ...path.split('/')), 'utf-8'));
+    const heading = headings.find((entry) => entry.slug === fragment);
+
+    if (heading === undefined) {
+      const hints = nearest(
+        fragment,
+        headings.map((entry) => entry.slug)
+      );
+      throw readFirstError(
+        id,
+        index,
+        target,
+        hints.length === 0
+          ? `${path} has no headings`
+          : `no heading on ${path} has the slug "${fragment}" (nearest: ${hints.map((slug) => `#${slug}`).join(', ')})`
+      );
+    }
+
+    links.push({ path, fragment, title, heading: heading.text });
+  }
+
+  return links;
 }
 
 // ---------------------------------------------------------------------------
@@ -788,7 +913,13 @@ async function buildPack(
       warnings,
     };
 
-    const indexText = renderIndexFor(manifestWithoutOutputs, outputs);
+    const readFirst = await resolveReadFirst(
+      resolved.id,
+      recipe.readFirst ?? [],
+      outputs,
+      stagingDir
+    );
+    const indexText = renderIndexFor(manifestWithoutOutputs, outputs, readFirst);
     await writeStagedFile(stagingDir, INDEX_FILE, (target) =>
       writeTextFileSafely(target, indexText)
     );
@@ -1134,8 +1265,24 @@ export async function syncPacks(
   return withPacksLock(loaded.packsDir, options.command ?? 'llm-docs sync', run);
 }
 
+/**
+ * A read-first target checked against the file list a recipe would take. A
+ * heading fragment cannot be checked before the pages are built, so a found
+ * target with a fragment is only known to name an existing file.
+ */
+export interface ReadFirstPreview {
+  target: string;
+  /** Some file the recipe takes lands at the target's path. */
+  found: boolean;
+  /** Up to five output paths nearest the target's path, when it is not found. */
+  nearest: string[];
+  /** The heading slug, checked only when the pack is built. */
+  fragment: string | null;
+}
+
 export interface PackPreview {
   files: { outputPath: string; kind: SelectedFile['kind']; source: string }[];
+  readFirst: ReadFirstPreview[];
   warnings: string[];
 }
 
@@ -1157,12 +1304,18 @@ export async function previewPack(
       await acquireAll(context, resolved.recipe, workRoot, () => true)
     );
     const selection = await selectPackFiles(resolved.recipe, acquisitions);
+    const outputPaths = selection.files.map((selected) => selected.outputPath);
     return {
       files: selection.files.map((selected) => ({
         outputPath: selected.outputPath,
         kind: selected.kind,
         source: selected.file.sourceLabel,
       })),
+      readFirst: (resolved.recipe.readFirst ?? []).map((target) => {
+        const { path, fragment } = splitReadFirstTarget(target);
+        const found = outputPaths.includes(path);
+        return { target, found, nearest: found ? [] : nearest(path, outputPaths), fragment };
+      }),
       warnings: [
         ...acquisitions.flatMap((acquisition) => acquisition.warnings),
         ...selection.warnings,

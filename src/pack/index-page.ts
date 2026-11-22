@@ -1,6 +1,7 @@
 /**
  * The generated, verified `index.md` of a pack (spec 4.8). Deterministic:
- * everything it says comes from the manifest fields, in sorted order, with
+ * everything it says comes from the manifest fields and, for read-first
+ * targets with a fragment, the heading text of pages the manifest lists, with
  * upstream text escaped. It never enumerates the agent-owned guides, so a
  * guide change never changes the index, the combined file, or the manifest.
  */
@@ -8,12 +9,26 @@
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import type { ManifestOutputEntry, PackManifest } from './manifest.js';
 
+/** A `recipe.readFirst` target as the build resolved it against the pack's outputs. */
+export interface ReadFirstLink {
+  /** Pack-relative path of a page or passthrough file. */
+  path: string;
+  /** The heading slug the target names, or null for the whole file. */
+  fragment: string | null;
+  /** The page title, or the path for a file without one. */
+  title: string;
+  /** The text of the heading `fragment` names, or null. */
+  heading: string | null;
+}
+
 export type IndexPageInput = Pick<
   PackManifest,
   'pack' | 'recipe' | 'origins' | 'acquiredAt' | 'license' | 'sources'
 > & {
   /** Page outputs (kind `page`) with their titles and token estimates. */
   pages: readonly Pick<ManifestOutputEntry, 'path' | 'title' | 'tokens'>[];
+  /** `recipe.readFirst` resolved, in recipe order; empty when the recipe marks none. */
+  readFirst: readonly ReadFirstLink[];
 };
 
 const TITLE_CAP = 120;
@@ -116,6 +131,27 @@ export function renderIndexPage(input: IndexPageInput): string {
     '',
     'Open the page for the API you need and read it before writing code against it. Search `pages/` for exact symbol names. Pages are upstream text at the pinned version. Guides, when this pack has any, are the digests in `guides/` written for this project: they link into the pages and never outrank them.',
   ];
+
+  if (input.readFirst.length > 0) {
+    lines.push(
+      '',
+      '## Read first',
+      '',
+      `Start with these pages before writing code against ${escapeIndexText(pack.title)} ${escapeIndexText(pack.version)}. They were marked as the ones to read first for this version, usually because they describe what changed.`,
+      ''
+    );
+    for (const entry of input.readFirst) {
+      const label =
+        entry.heading === null
+          ? escapeIndexText(entry.title)
+          : `${escapeIndexText(entry.title)}: ${escapeIndexText(entry.heading)}`;
+      const target =
+        entry.fragment === null
+          ? linkPath(entry.path)
+          : `${linkPath(entry.path)}#${entry.fragment}`;
+      lines.push(`- [${label}](${target})`);
+    }
+  }
 
   lines.push('', '## Pages');
 
