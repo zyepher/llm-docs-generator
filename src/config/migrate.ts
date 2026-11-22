@@ -27,6 +27,7 @@ import {
   realpathIfExists,
   resolveEffectiveOutputPath,
 } from '../utils/fs-path.js';
+import { projectDependencies } from '../deps/lockfiles.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { readJsonFile } from '../utils/json.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
@@ -148,7 +149,12 @@ export async function migrateV2Pack(
   // Resolving before writing means a recipe that would fail at sync never reaches the config.
   await resolvePackRecipe(
     { ...loaded.config, packs: { ...loaded.config.packs, [plan.id]: plan.pack } },
-    plan.id
+    plan.id,
+    {
+      resolveDependencyVersion: projectDependencies(loaded.projectRoot, {
+        skipDirectories: [loaded.packsDirRelative],
+      }).resolveVersion,
+    }
   );
   const saved = await saveProjectConfig(options.projectRoot, plan.id, plan.pack);
 

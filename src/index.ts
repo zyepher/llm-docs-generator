@@ -33,7 +33,6 @@ export {
   ConfigError,
   findProjectRoot,
   loadProjectConfig,
-  LockfileResolutionUnavailableError,
   recipeHash,
   resolvePackRecipe,
 } from './config/project.js';
@@ -48,16 +47,10 @@ export type {
   ResolvePackOptions,
   SourceConfig,
 } from './config/project.js';
-export { SyncLockedError, syncPacks } from './pack/build.js';
-export type {
-  AfterSyncContext,
-  AfterSyncResult,
-  AfterSyncStep,
-  OrphanResult,
-  PackSyncResult,
-  SyncOptions,
-  SyncReport,
-} from './pack/build.js';
+export { syncPacks } from './pack/build.js';
+export { SyncLockedError } from './pack/lock.js';
+export type { AgentBlockOutcome, AgentBlockStatus } from './agent/block.js';
+export type { OrphanResult, PackSyncResult, SyncOptions, SyncReport } from './pack/build.js';
 export type {
   RefreshFileChange,
   RefreshFileStatus,

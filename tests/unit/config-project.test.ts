@@ -19,14 +19,19 @@ import {
   ConfigError,
   findProjectRoot,
   initProjectConfig,
-  LockfileResolutionUnavailableError,
   loadProjectConfig,
   parseProjectConfig,
   recipeHash,
   resolvePackRecipe,
   saveProjectConfig,
   type ProjectConfig,
+  type ResolvePackOptions,
 } from '../../src/config/project.js';
+
+/** For recipes that pin a version: the lockfile is never consulted, and a consult is a miss. */
+const PINNED: ResolvePackOptions = {
+  resolveDependencyVersion: () => ({ kind: 'missing', searched: [] }),
+};
 
 const tempDirs: string[] = [];
 
@@ -227,7 +232,7 @@ describe('resolvePackRecipe', () => {
     parse({ schemaVersion: 3, packs: { vite: pack } });
 
   it('fills every default so the recipe is explicit', async () => {
-    const resolved = await resolvePackRecipe(config(localPack), 'vite');
+    const resolved = await resolvePackRecipe(config(localPack), 'vite', PINNED);
 
     expect(resolved.recipe).toEqual({
       title: 'vite',
@@ -270,7 +275,8 @@ describe('resolvePackRecipe', () => {
           { type: 'urls', urls: ['https://x.dev/{version}/guide/'] },
         ],
       }),
-      'vite'
+      'vite',
+      PINNED
     );
     const [git, urls] = resolved.recipe.sources;
 
@@ -292,13 +298,15 @@ describe('resolvePackRecipe', () => {
           version: '2026-07-28',
           sources: [{ type: 'git', repo: 'https://x.dev/r', ref: 'v{major}.{minor}' }],
         }),
-        'vite'
+        'vite',
+        PINNED
       )
     ).rejects.toThrow(/placeholder \{minor\} has no value for version "2026-07-28"/);
     await expect(
       resolvePackRecipe(
         config({ version: '1', sources: [{ type: 'local', path: 'docs', mount: 'v{major}' }] }),
-        'vite'
+        'vite',
+        PINNED
       )
     ).rejects.toThrow(
       /placeholders are only allowed in ref, paths, url, urls, include, and exclude/
@@ -316,7 +324,8 @@ describe('resolvePackRecipe', () => {
           },
         ],
       }),
-      'vite'
+      'vite',
+      PINNED
     );
     expect(resolved.recipe.sources[0]).toMatchObject({
       urls: [
@@ -332,22 +341,19 @@ describe('resolvePackRecipe', () => {
           version: '1',
           sources: [{ type: 'urls', urls: ['https://x.dev/a', 'https://y.dev/a.md'] }],
         }),
-        'vite'
+        'vite',
+        PINNED
       )
     ).rejects.toThrow(
       /https:\/\/x\.dev\/a and https:\/\/y\.dev\/a\.md would both be stored at "a\.md"/
     );
   });
 
-  it('resolves the version from lockfiles through the injected resolver', async () => {
+  it('resolves the version from lockfiles through the resolver', async () => {
     const pack = {
       dependency: { ecosystem: 'npm', name: 'vite' },
       sources: [{ type: 'local', path: 'docs' }],
     };
-
-    await expect(resolvePackRecipe(config(pack), 'vite')).rejects.toBeInstanceOf(
-      LockfileResolutionUnavailableError
-    );
 
     const found = await resolvePackRecipe(config(pack), 'vite', {
       resolveDependencyVersion: () => ({
@@ -391,7 +397,8 @@ describe('resolvePackRecipe', () => {
         title: 'T',
         sources: [{ type: 'local', path: './docs/', exclude: ['x'] }],
       }),
-      'vite'
+      'vite',
+      PINNED
     );
     const b = await resolvePackRecipe(
       config({
@@ -399,7 +406,8 @@ describe('resolvePackRecipe', () => {
         title: 'T',
         version: '1',
       }),
-      'vite'
+      'vite',
+      PINNED
     );
     const c = await resolvePackRecipe(
       config({
@@ -407,7 +415,8 @@ describe('resolvePackRecipe', () => {
         title: 'T',
         sources: [{ type: 'local', path: 'docs', exclude: ['y'] }],
       }),
-      'vite'
+      'vite',
+      PINNED
     );
 
     expect(a.recipeHash).toBe(b.recipeHash);
@@ -418,7 +427,9 @@ describe('resolvePackRecipe', () => {
   });
 
   it('names an unknown pack', async () => {
-    await expect(resolvePackRecipe(config(localPack), 'nope')).rejects.toThrow(/No pack "nope"/);
+    await expect(resolvePackRecipe(config(localPack), 'nope', PINNED)).rejects.toThrow(
+      /No pack "nope"/
+    );
   });
 });
 

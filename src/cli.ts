@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
 
 import packageJson from '../package.json';
+import { syncAgentBlocks, type AgentBlockOutcome, type AgentBlockStatus } from './agent/block.js';
 import {
   CONFIG_FILE_NAME,
   CONVERTER_TOOLS,
@@ -33,7 +34,7 @@ import {
   parsePackageSpec,
 } from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
-import { ECOSYSTEMS, type Ecosystem } from './deps/lockfiles.js';
+import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
 import { ensurePacksDir, previewPack, syncPacks, type SyncReport } from './pack/build.js';
 import {
   PACK_CHECK_NAMES,
@@ -61,7 +62,8 @@ interface CommandEntry {
 const COMMANDS = [
   {
     name: 'init',
-    summary: 'Create llm-docs.json and the packs directory (never overwrites config)',
+    summary:
+      'Create llm-docs.json, the packs directory, and empty managed blocks in the agent files (never overwrites config)',
     status: 'implemented',
   },
   {
@@ -71,7 +73,8 @@ const COMMANDS = [
   },
   {
     name: 'sync',
-    summary: 'Build or rebuild packs so they match their recipes',
+    summary:
+      'Build or rebuild packs so they match their recipes and lockfiles, then update the managed blocks',
     status: 'implemented',
   },
   {
@@ -81,7 +84,8 @@ const COMMANDS = [
   },
   {
     name: 'verify',
-    summary: 'Check packs against their manifests, recipes, and links (read-only, offline)',
+    summary:
+      'Check packs against their manifests, recipes, lockfiles, and links, and the managed blocks (read-only, offline)',
     status: 'implemented',
   },
   {
@@ -481,15 +485,39 @@ function buildPackRecipe(options: AddOptions): PackConfig {
 // Reporting
 // ---------------------------------------------------------------------------
 
-/** The exit code a sync report implies: the worst failure, else 1 for `--check` changes. */
-function syncExitCode(report: SyncReport): number {
-  const failures = report.packs.filter((pack) => pack.status === 'failed');
+/** The worst failure among `entries` (runtime over usage), else 1 when a check found changes. */
+function worstExitCode(
+  entries: readonly { status: string; exitCode?: 2 | 3 }[],
+  checkChanged: boolean
+): number {
+  const failures = entries.filter((entry) => entry.status === 'failed');
 
   if (failures.length > 0) {
-    return failures.some((pack) => pack.exitCode === EXIT_RUNTIME) ? EXIT_RUNTIME : EXIT_USAGE;
+    return failures.some((entry) => entry.exitCode === EXIT_RUNTIME) ? EXIT_RUNTIME : EXIT_USAGE;
   }
 
-  return report.check && report.changed ? EXIT_CHECK_FAILED : 0;
+  return checkChanged ? EXIT_CHECK_FAILED : 0;
+}
+
+/** A failed managed block counts like a failed pack. */
+function syncExitCode(report: SyncReport): number {
+  return worstExitCode([...report.packs, ...report.agentBlocks], report.check && report.changed);
+}
+
+const BLOCK_STATUS_TEXT: Readonly<Record<AgentBlockStatus, string>> = {
+  unchanged: 'llm-docs block up to date',
+  created: 'created with the llm-docs block',
+  updated: 'llm-docs block updated',
+  'would-create': 'would be created with the llm-docs block',
+  'would-update': 'llm-docs block would change',
+  failed: 'failed',
+};
+
+function printAgentBlocks(blocks: readonly AgentBlockOutcome[]): void {
+  for (const block of blocks) {
+    const error = block.error === undefined ? '' : `: ${block.error}`;
+    say(`${block.path}: ${BLOCK_STATUS_TEXT[block.status]}${error}`);
+  }
 }
 
 function printSyncReport(report: SyncReport): void {
@@ -523,18 +551,17 @@ function printSyncReport(report: SyncReport): void {
     say(`${orphan.id}: orphan pack directory, ${detail}`);
   }
 
-  for (const message of report.afterSync?.messages ?? []) {
-    say(message);
-  }
+  printAgentBlocks(report.agentBlocks);
 
   if (report.packs.length === 0) {
     say(
       `No packs in ${CONFIG_FILE_NAME}; add one with 'llm-docs add <id> --local <path> --version <v>'.`
     );
-  } else if (report.check) {
+  }
+  if (report.check) {
     say(
       report.changed
-        ? 'sync --check: packs are out of date.'
+        ? "sync --check: packs or managed blocks are out of date; run 'llm-docs sync'."
         : 'sync --check: everything is up to date.'
     );
   }
@@ -572,6 +599,8 @@ function printRefreshReport(report: SyncReport): void {
       say(`  warning: ${warning}`);
     }
   }
+
+  printAgentBlocks(report.agentBlocks);
 
   if (report.check) {
     say(
@@ -660,16 +689,25 @@ function buildProgram(): Command {
     );
     const loaded = await loadProjectConfig(projectRoot);
     await ensurePacksDir(loaded.packsDir);
-    // Phase 4: insert the empty managed agent-file blocks (spec 7.1) here.
+    // The same step sync ends with: before any pack is built, each block is empty markers.
+    const agentBlocks = await syncAgentBlocks(loaded, { check: false });
 
     if (options.json === true) {
-      writeJson({ projectRoot, configPath, created, packsDir: loaded.packsDirRelative });
+      writeJson({
+        projectRoot,
+        configPath,
+        created,
+        packsDir: loaded.packsDirRelative,
+        agentBlocks,
+      });
     }
     say(
       created
         ? `Created ${configPath} and ${loaded.packsDirRelative}/.`
         : `${configPath} already exists; left it unchanged.`
     );
+    printAgentBlocks(agentBlocks);
+    process.exitCode = worstExitCode(agentBlocks, false);
   });
 
   const add = program
@@ -723,7 +761,11 @@ function buildProgram(): Command {
 
     if (options.dryRun === true) {
       const config = { ...loaded.config, packs: { ...loaded.config.packs, [id]: pack } };
-      const resolved = await resolvePackRecipe(config, id);
+      const resolved = await resolvePackRecipe(config, id, {
+        resolveDependencyVersion: projectDependencies(loaded.projectRoot, {
+          skipDirectories: [loaded.packsDirRelative],
+        }).resolveVersion,
+      });
       const preview = await previewPack({ ...loaded, config }, resolved);
 
       if (options.json === true) {

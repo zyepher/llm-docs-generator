@@ -54,6 +54,34 @@ async function makeProject(files: Record<string, string>): Promise<string> {
   return root;
 }
 
+/** A package-lock.json (v3) whose root package depends directly on `name` at `version`. */
+function npmLockfile(name: string, version: string): string {
+  return `${JSON.stringify({
+    name: 'app',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': { name: 'app', dependencies: { [name]: `^${version}` } },
+      [`node_modules/${name}`]: { version },
+    },
+  })}\n`;
+}
+
+async function packVersion(root: string, id: string): Promise<string> {
+  const manifest = JSON.parse(
+    await readFile(join(root, 'agent-docs', id, 'manifest.json'), 'utf-8')
+  );
+  return manifest.pack.version;
+}
+
+const BLOCK_BEGIN = '<!-- BEGIN llm-docs: generated from llm-docs.json, do not edit by hand -->';
+const BLOCK_END = '<!-- END llm-docs -->';
+const BLOCK_HEADER =
+  '## Pinned reference docs\n\n' +
+  'This repository pins docs for these libraries at the versions it uses. Before writing code\n' +
+  'against one of them, open its index and the page for the API you need, and prefer those pages\n' +
+  'over memory. Pages are upstream text; guides are summaries that never outrank pages.\n\n';
+
 const DOCS = {
   'docs/index.md': '# Home\n\nSee [start](guide/start.md).\n',
   'docs/guide/start.mdx': "import X from 'x'\n\n# Start\n\n<Tip>Use it.</Tip>\n",
@@ -71,7 +99,7 @@ afterAll(async () => {
 });
 
 describe('llm-docs v3 CLI', () => {
-  it('init creates config and the packs directory once', async () => {
+  it('init creates config, the packs directory, and an empty managed block once', async () => {
     const root = await makeProject({});
     const first = await runCli(root, ['init', '--project', root, '--json']);
 
@@ -81,15 +109,19 @@ describe('llm-docs v3 CLI', () => {
       configPath: join(root, 'llm-docs.json'),
       created: true,
       packsDir: 'agent-docs',
+      agentBlocks: [{ path: 'AGENTS.md', status: 'created' }],
     });
+    expect(first.stderr).toContain('AGENTS.md: created with the llm-docs block');
     expect(await readFile(join(root, 'agent-docs', '.gitignore'), 'utf-8')).toBe(
       '.staging/\n.llm-docs.lock\n'
     );
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toBe(`${BLOCK_BEGIN}\n${BLOCK_END}\n`);
 
     const second = await runCli(root, ['init', '--project', root]);
     expect(second.code).toBe(0);
     expect(second.stdout).toBe('');
     expect(second.stderr).toContain('already exists; left it unchanged');
+    expect(second.stderr).toContain('AGENTS.md: llm-docs block up to date');
   });
 
   it('adds a local pack, syncs it, checks it, verifies it, and catches tampering', async () => {
@@ -122,7 +154,7 @@ describe('llm-docs v3 CLI', () => {
       changed: false,
       packs: [{ id: 'demo', status: 'unchanged' }],
       orphans: [],
-      afterSync: null,
+      agentBlocks: [{ path: 'AGENTS.md', status: 'unchanged' }],
     });
 
     const verify = await runCli(root, ['verify', '--json']);
@@ -131,6 +163,7 @@ describe('llm-docs v3 CLI', () => {
     expect(report).toMatchObject({ ok: true, strict: false });
     expect(report.results.map((result: { check: string }) => result.check)).toEqual([
       'config-schema',
+      'agent-block',
       'manifest-schema',
       'outputs',
       'unlisted-files',
@@ -184,6 +217,138 @@ describe('llm-docs v3 CLI', () => {
       { outputPath: 'pages/index.md', kind: 'page', source: 'docs/index.md' },
     ]);
     expect(await readdir(root)).toEqual(['docs']);
+  });
+
+  it('follows the lockfile for a dependency-bound pack and flags an explicit version that disagrees', async () => {
+    const root = await makeProject({
+      ...DOCS,
+      'package-lock.json': npmLockfile('demo-lib', '1.0.0'),
+    });
+    const dryRun = await runCli(root, [
+      'add',
+      'demo',
+      '--local',
+      'docs',
+      '--dependency',
+      'npm:demo-lib',
+      '--dry-run',
+      '--json',
+      '--project',
+      root,
+    ]);
+    expect(dryRun.code).toBe(0);
+    expect(JSON.parse(dryRun.stdout)).toMatchObject({ recipe: { version: '1.0.0' } });
+
+    const add = await runCli(root, [
+      'add',
+      'demo',
+      '--local',
+      'docs',
+      '--dependency',
+      'npm:demo-lib',
+      '--project',
+      root,
+    ]);
+    expect(add.code).toBe(0);
+    expect(add.stderr).toContain('AGENTS.md: created with the llm-docs block');
+    expect(await packVersion(root, 'demo')).toBe('1.0.0');
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '\n- demo 1.0.0: `agent-docs/demo/index.md` (guide)\n'
+    );
+    expect((await runCli(root, ['verify'])).code).toBe(0);
+
+    await writeFile(join(root, 'package-lock.json'), npmLockfile('demo-lib', '1.1.0'));
+    const check = await runCli(root, ['sync', '--check']);
+    expect(check.code).toBe(1);
+    expect(check.stderr).toContain('demo: would rebuild (the recipe changed)');
+    expect(check.stderr).toContain('AGENTS.md: llm-docs block up to date');
+    const stale = await runCli(root, ['verify']);
+    expect(stale.code).toBe(1);
+    expect(stale.stderr).toContain(
+      "demo lockfile fail: stale-pack: lockfiles resolve npm:demo-lib 1.1.0 (package-lock.json), the pack is 1.0.0; run 'llm-docs sync demo'"
+    );
+    const resync = await runCli(root, ['sync']);
+    expect(resync.code).toBe(0);
+    expect(resync.stderr).toContain('AGENTS.md: llm-docs block updated');
+    expect(await packVersion(root, 'demo')).toBe('1.1.0');
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '\n- demo 1.1.0: `agent-docs/demo/index.md` (guide)\n'
+    );
+    expect((await runCli(root, ['verify'])).code).toBe(0);
+
+    // An explicit version wins for the build, and verify reports that it disagrees (spec 2.4).
+    const pinned = await runCli(root, [
+      'add',
+      'pinned',
+      '--local',
+      'docs',
+      '--dependency',
+      'npm:demo-lib',
+      '--version',
+      '1.0.0',
+      '--project',
+      root,
+    ]);
+    expect(pinned.code).toBe(0);
+    expect(await packVersion(root, 'pinned')).toBe('1.0.0');
+    const disagree = await runCli(root, ['verify', 'pinned']);
+    expect(disagree.code).toBe(1);
+    expect(disagree.stderr).toContain(
+      "pinned lockfile fail: stale-pack: lockfiles resolve npm:demo-lib 1.1.0 (package-lock.json), the pack is 1.0.0; set packs.pinned.version in llm-docs.json to 1.1.0 (or remove it to follow the lockfile), then run 'llm-docs sync pinned'"
+    );
+  });
+
+  it('keeps the managed block in step, and fails a file with broken markers without guessing', async () => {
+    const root = await makeProject({ ...DOCS, 'AGENTS.md': '# Agents\n\nHouse rules.\n' });
+    expect(
+      (
+        await runCli(root, [
+          'add',
+          'demo',
+          '--local',
+          'docs',
+          '--version',
+          '1.0.0',
+          '--project',
+          root,
+        ])
+      ).code
+    ).toBe(0);
+    const synced = await readFile(join(root, 'AGENTS.md'), 'utf-8');
+    expect(synced).toBe(
+      `# Agents\n\nHouse rules.\n\n${BLOCK_BEGIN}\n${BLOCK_HEADER}- demo 1.0.0: \`agent-docs/demo/index.md\` (guide)\n${BLOCK_END}\n`
+    );
+
+    await writeFile(join(root, 'AGENTS.md'), synced.replace('(guide)', '(guide, hand-edited)'));
+    const check = await runCli(root, ['sync', '--check']);
+    expect(check.code).toBe(1);
+    expect(check.stderr).toContain('demo: up to date');
+    expect(check.stderr).toContain('AGENTS.md: llm-docs block would change');
+    const verify = await runCli(root, ['verify']);
+    expect(verify.code).toBe(1);
+    expect(verify.stderr).toContain(
+      "project agent-block fail: AGENTS.md: the llm-docs block differs from what sync would write; run 'llm-docs sync'"
+    );
+    const restore = await runCli(root, ['sync', '--json']);
+    expect(restore.code).toBe(0);
+    expect(JSON.parse(restore.stdout).agentBlocks).toEqual([
+      { path: 'AGENTS.md', status: 'updated' },
+    ]);
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toBe(synced);
+
+    const lone = `# Agents\n\n${BLOCK_BEGIN}\nnotes\n`;
+    await writeFile(join(root, 'AGENTS.md'), lone);
+    await writeFile(join(root, 'docs', 'index.md'), '# Home, edited\n');
+    const broken = await runCli(root, ['sync']);
+    expect(broken.code).toBe(2);
+    expect(broken.stderr).toContain('demo: built (source files changed)');
+    expect(broken.stderr).toContain(
+      "AGENTS.md: failed: mismatched llm-docs markers (a BEGIN marker on line 3 without an END); fix or remove them by hand, then run 'llm-docs sync'."
+    );
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toBe(lone);
+    expect((await runCli(root, ['verify', 'demo'])).stderr).toContain(
+      'project agent-block fail: AGENTS.md: mismatched llm-docs markers'
+    );
   });
 
   it('exits 2 with one clear line for usage and config errors', async () => {

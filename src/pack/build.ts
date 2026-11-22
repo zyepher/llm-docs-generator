@@ -6,27 +6,16 @@
  * sources are unchanged; otherwise acquire, select, convert, and write a
  * staging pack, verify it in place, and swap it in atomically, carrying the
  * agent-owned `guides/` across. The whole run holds an advisory lock in the
- * packs directory, and `afterSync` (Phase 4: managed agent-file blocks) runs
- * last.
+ * packs directory, and the managed agent-file blocks are updated last.
  */
 
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import {
-  copyFile,
-  lstat,
-  mkdir,
-  mkdtemp,
-  open,
-  readdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-} from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, posix, sep } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 
+import { syncAgentBlocks, type AgentBlockOutcome } from '../agent/block.js';
 import {
   ConfigError,
   loadProjectConfig,
@@ -37,6 +26,7 @@ import {
   type ResolvedPackRecipe,
   type TransformName,
 } from '../config/project.js';
+import { projectDependencies } from '../deps/lockfiles.js';
 import {
   acquireSource,
   assertSourceSupported,
@@ -54,15 +44,14 @@ import {
   type ManifestConverter,
 } from '../sources/convert.js';
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
-import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
+import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
-import { readJsonFile } from '../utils/json.js';
 import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
-import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
+import { listGuides } from './guides.js';
 import { createPackLinkRewriter } from './links.js';
 import { resolvePackLicense } from './license.js';
 import {
@@ -76,15 +65,14 @@ import {
   type ManifestSourceEntry,
   type PackManifest,
 } from './manifest.js';
-import { collectHeadings, convertMarkdownPage, type PackFileRef } from './markdown.js';
+import { convertMarkdownPage, type PackFileRef } from './markdown.js';
 import { diffRefresh, type RefreshReport } from './refresh.js';
 import { renderSourcePage } from './render-ir.js';
+import { LOCK_FILE, withPacksLock } from './lock.js';
 import { verifyPackFiles } from './verify.js';
 
 const STAGING_DIR = '.staging';
-const LOCK_FILE = '.llm-docs.lock';
 const PACKS_GITIGNORE = `${STAGING_DIR}/\n${LOCK_FILE}\n`;
-const LOCK_STALE_MS = 60 * 60 * 1000;
 const INDEX_FILE = 'index.md';
 
 export type PackSyncStatus = 'unchanged' | 'built' | 'would-build' | 'failed';
@@ -111,21 +99,6 @@ export interface OrphanResult {
   reason?: string;
 }
 
-export interface AfterSyncResult {
-  changed: boolean;
-  messages: string[];
-}
-
-export interface AfterSyncContext {
-  loaded: LoadedProjectConfig;
-  packs: readonly PackSyncResult[];
-  /** Report what would change, write nothing. */
-  check: boolean;
-}
-
-/** Runs last in every sync, under the lock. Phase 4 writes the managed agent-file blocks here. */
-export type AfterSyncStep = (context: AfterSyncContext) => Promise<AfterSyncResult>;
-
 export interface SyncOptions {
   /** Write nothing; report what would change. */
   check?: boolean;
@@ -140,8 +113,8 @@ export interface SyncOptions {
    * changed or the pack files no longer verify.
    */
   refresh?: boolean;
+  /** Overrides the project's lockfile scan (tests pin a lockfile answer with it). */
   resolveDependencyVersion?: DependencyVersionResolver | undefined;
-  afterSync?: AfterSyncStep | undefined;
   /** Clock for `acquiredAt` (tests pin it). */
   now?: () => Date;
   /** Recorded in the lock file. */
@@ -154,12 +127,8 @@ export interface SyncReport {
   changed: boolean;
   packs: PackSyncResult[];
   orphans: OrphanResult[];
-  afterSync: AfterSyncResult | null;
-}
-
-/** Another sync holds the packs directory lock: a runtime failure (exit 3). */
-export class SyncLockedError extends Error {
-  override name = 'SyncLockedError';
+  /** One entry per resolved agent file; empty with `agentFiles: []`. */
+  agentBlocks: AgentBlockOutcome[];
 }
 
 // ---------------------------------------------------------------------------
@@ -226,74 +195,6 @@ export async function ensurePacksDir(packsDir: string): Promise<void> {
     const prefix = current === '' || current.endsWith('\n') ? current : `${current}\n`;
     await writeTextFileSafely(gitignore, `${prefix}${missing.join('\n')}\n`);
   }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error instanceof Error && 'code' in error && error.code === 'EPERM';
-  }
-}
-
-async function lockIsStale(path: string): Promise<{ stale: boolean; holder: string }> {
-  let raw: unknown;
-
-  try {
-    raw = await readJsonFile(path);
-  } catch {
-    // Unreadable or half-written: stale once it is old enough not to be mid-write.
-    const age = Date.now() - (await stat(path)).mtimeMs;
-    return { stale: age > 5_000, holder: 'an unknown process' };
-  }
-
-  const pid = isRecord(raw) && typeof raw.pid === 'number' ? raw.pid : undefined;
-  const startedAt = isRecord(raw) && typeof raw.startedAt === 'string' ? raw.startedAt : '';
-  const command = isRecord(raw) && typeof raw.command === 'string' ? raw.command : 'llm-docs';
-  const started = Date.parse(startedAt);
-  const stale =
-    pid === undefined ||
-    !isProcessAlive(pid) ||
-    Number.isNaN(started) ||
-    Date.now() - started > LOCK_STALE_MS;
-
-  return { stale, holder: `'${command}' (pid ${pid ?? '?'}, started ${startedAt || 'unknown'})` };
-}
-
-/** Take the advisory lock with exclusive create; a stale lock is replaced once. */
-async function acquireLock(packsDir: string, command: string): Promise<() => Promise<void>> {
-  const path = join(packsDir, LOCK_FILE);
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await open(path, 'wx');
-      try {
-        await handle.writeFile(
-          `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), command })}\n`
-        );
-      } finally {
-        await handle.close();
-      }
-      return () => rm(path, { force: true });
-    } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) {
-        throw error;
-      }
-
-      const { stale, holder } = await lockIsStale(path);
-
-      if (!stale || attempt > 0) {
-        throw new SyncLockedError(
-          `Another llm-docs run holds ${join(packsDir, LOCK_FILE)}: ${holder}. Wait for it to finish, or delete the lock file if that process is gone.`
-        );
-      }
-
-      await rm(path, { force: true });
-    }
-  }
-
-  throw new SyncLockedError(`Could not take the lock in ${packsDir}.`);
 }
 
 async function manifestPackId(dir: string): Promise<string | undefined> {
@@ -381,44 +282,8 @@ async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): 
 }
 
 // ---------------------------------------------------------------------------
-// Guides and the index
+// The index
 // ---------------------------------------------------------------------------
-
-function fileStem(path: string): string {
-  const name = posix.basename(path);
-  const dot = name.lastIndexOf('.');
-  return dot > 0 ? name.slice(0, dot) : name;
-}
-
-/** Markdown guides under `<packDir>/guides`, with their first-H1 titles. */
-async function listGuides(packDir: string): Promise<IndexGuide[]> {
-  const root = join(packDir, 'guides');
-
-  if (!(await exists(root))) {
-    return [];
-  }
-
-  const guides: IndexGuide[] = [];
-
-  for await (const event of walkBoundedDirectoryTree({
-    root,
-    maxDepth: 16,
-    maxEntries: 10_000,
-    maxFiles: 10_000,
-    skipDirectoryNames: false,
-  })) {
-    if (event.kind !== 'file' || !/\.md$/i.test(event.entry.name)) {
-      continue;
-    }
-
-    const path = `guides/${event.relativePath.split(sep).join('/')}`;
-    const text = await readFile(event.absolutePath, 'utf-8');
-    const h1 = collectHeadings(text).find((heading) => heading.level === 1);
-    guides.push({ path, title: h1?.text || fileStem(path) });
-  }
-
-  return guides.sort((a, b) => compareStringsByCodeUnit(a.path, b.path));
-}
 
 function renderIndexFor(
   manifest: Omit<PackManifest, 'outputs'>,
@@ -1025,9 +890,13 @@ async function refreshOnePack(
   return { id, status: 'built', reason: 'upstream changed', warnings, refresh: report };
 }
 
-async function syncOnePack(context: SyncContext, id: string): Promise<PackSyncResult> {
+async function syncOnePack(
+  context: SyncContext,
+  id: string,
+  resolveDependencyVersion: DependencyVersionResolver
+): Promise<PackSyncResult> {
   const resolved = await resolvePackRecipe(context.loaded.config, id, {
-    resolveDependencyVersion: context.options.resolveDependencyVersion,
+    resolveDependencyVersion,
   });
   assertBuildable(resolved.recipe);
   const existing = await inspectExistingPack(context.loaded.packsDir, id);
@@ -1137,9 +1006,10 @@ async function handleOrphans(
 }
 
 /**
- * Sync `ids` (default: every configured pack). Per-pack failures are
- * reported in the result, not thrown; an invalid config, an unknown id, or a
- * held lock throws.
+ * Sync `ids` (default: every configured pack), then update the managed
+ * blocks in the agent files from every built pack. Per-pack and per-file
+ * failures are reported in the result, not thrown; an invalid config, an
+ * unknown id, or a held lock throws.
  */
 export async function syncPacks(
   projectRoot: string,
@@ -1162,20 +1032,17 @@ export async function syncPacks(
     projectRoot: await resolveEffectiveOutputPath(loaded.projectRoot),
     options,
   };
-  let release: (() => Promise<void>) | undefined;
-
-  if (!check) {
-    await ensurePacksDir(loaded.packsDir);
-    release = await acquireLock(loaded.packsDir, options.command ?? 'llm-docs sync');
-  }
-
-  try {
+  const resolveDependencyVersion =
+    options.resolveDependencyVersion ??
+    projectDependencies(loaded.projectRoot, { skipDirectories: [loaded.packsDirRelative] })
+      .resolveVersion;
+  const run = async (): Promise<SyncReport> => {
     const recoveryWarnings = check ? [] : await recoverStaging(loaded.packsDir);
     const packs: PackSyncResult[] = [];
 
     for (const id of selected) {
       try {
-        packs.push(await syncOnePack(context, id));
+        packs.push(await syncOnePack(context, id, resolveDependencyVersion));
       } catch (error) {
         packs.push({
           id,
@@ -1198,17 +1065,21 @@ export async function syncPacks(
       await rm(join(loaded.packsDir, STAGING_DIR), { recursive: true, force: true });
     }
 
-    const afterSync =
-      options.afterSync === undefined ? null : await options.afterSync({ loaded, packs, check });
+    const agentBlocks = await syncAgentBlocks(loaded, { check });
     const changed =
       packs.some((pack) => pack.status === 'built' || pack.status === 'would-build') ||
       orphans.some((orphan) => orphan.status === 'pruned' || orphan.status === 'would-prune') ||
-      afterSync?.changed === true;
+      agentBlocks.some((block) => block.status !== 'unchanged' && block.status !== 'failed');
 
-    return { check, changed, packs, orphans, afterSync };
-  } finally {
-    await release?.();
+    return { check, changed, packs, orphans, agentBlocks };
+  };
+
+  if (check) {
+    return run();
   }
+
+  await ensurePacksDir(loaded.packsDir);
+  return withPacksLock(loaded.packsDir, options.command ?? 'llm-docs sync', run);
 }
 
 export interface PackPreview {

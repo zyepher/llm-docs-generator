@@ -251,6 +251,33 @@ export async function scanDependencies(
   };
 }
 
+/** A project's lockfile view for the length of one command. */
+export interface ProjectDependencies {
+  /** The scan, run on the first call; later calls share the same promise. */
+  scan(): Promise<DependencyScan>;
+  /** findDependencyVersion over that scan: the resolver resolvePackRecipe takes. */
+  resolveVersion(ref: DependencyRef): Promise<DependencyVersionLookup>;
+}
+
+/**
+ * One lazy, memoized scan of a project. A command whose packs all pin a
+ * `version` never walks the tree. The memo lives only in the returned
+ * object, so a lockfile edited between two commands is always seen. Callers
+ * pass their packsDir in `skipDirectories`: packs never contribute lockfiles.
+ */
+export function projectDependencies(
+  projectRoot: string,
+  options: ScanDependenciesOptions = {}
+): ProjectDependencies {
+  let pending: Promise<DependencyScan> | undefined;
+  const scan = (): Promise<DependencyScan> => {
+    pending ??= scanDependencies(projectRoot, options);
+    return pending;
+  };
+
+  return { scan, resolveVersion: async (ref) => findDependencyVersion(await scan(), ref) };
+}
+
 /**
  * The version a project resolves for one dependency. Direct entries win when
  * any exist, so a transitive copy at another version (common in npm trees)

@@ -97,7 +97,9 @@ describe('llm-docs migrate', () => {
 
     const loaded = await loadProjectConfig(project);
     expect(loaded.config.packs).toEqual({ 'vite-8': expected });
-    const resolved = await resolvePackRecipe(loaded.config, 'vite-8');
+    const resolved = await resolvePackRecipe(loaded.config, 'vite-8', {
+      resolveDependencyVersion: () => ({ kind: 'missing', searched: [] }),
+    });
     expect(resolved.recipe.sources[0]).toMatchObject({ type: 'git', paths: ['docs'] });
     expect(await readFile(join(packDir, 'manifest.json'), 'utf-8')).toBe(before);
   });

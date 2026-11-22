@@ -272,7 +272,7 @@ const projectConfigSchema = z.strictObject({
   schemaVersion: z.literal(3),
   packsDir: projectPathSchema.optional(),
   agentFiles: z.union([z.literal('auto'), z.array(projectPathSchema)]).optional(),
-  block: z.strictObject({ maxBytes: z.number().int().min(256).max(65_536).optional() }).optional(),
+  block: z.strictObject({ maxBytes: z.number().int().min(1024).max(65_536).optional() }).optional(),
   hook: z
     .strictObject({
       enabled: z.boolean().optional(),
@@ -449,16 +449,21 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-export async function loadProjectConfig(projectRoot: string): Promise<LoadedProjectConfig> {
+/**
+ * The project's config, or null when llm-docs.json does not exist. An invalid
+ * config still throws ConfigError: "absent" and "broken" are different answers.
+ */
+export async function loadProjectConfigIfPresent(
+  projectRoot: string
+): Promise<LoadedProjectConfig | null> {
   const root = resolve(projectRoot);
-  const configPath = join(root, CONFIG_FILE_NAME);
   let text: string;
 
   try {
-    text = await readFile(configPath, 'utf-8');
+    text = await readFile(join(root, CONFIG_FILE_NAME), 'utf-8');
   } catch (error) {
     if (isFileNotFoundError(error)) {
-      throw new ConfigError(`No ${CONFIG_FILE_NAME} in ${root}; run 'llm-docs init' first.`);
+      return null;
     }
     throw error;
   }
@@ -466,18 +471,26 @@ export async function loadProjectConfig(projectRoot: string): Promise<LoadedProj
   return assertPacksDirInsideProject(parseProjectConfig(root, text));
 }
 
+export async function loadProjectConfig(projectRoot: string): Promise<LoadedProjectConfig> {
+  const loaded = await loadProjectConfigIfPresent(projectRoot);
+
+  if (loaded === null) {
+    throw new ConfigError(
+      `No ${CONFIG_FILE_NAME} in ${resolve(projectRoot)}; run 'llm-docs init' first.`
+    );
+  }
+
+  return loaded;
+}
+
 /** The project's config, or an empty one when llm-docs.json does not exist yet (`add`, `migrate`). */
 export async function loadOrEmptyConfig(projectRoot: string): Promise<LoadedProjectConfig> {
-  try {
-    return await loadProjectConfig(projectRoot);
-  } catch (error) {
-    if (error instanceof ConfigError && error.message.startsWith(`No ${CONFIG_FILE_NAME}`)) {
-      return assertPacksDirInsideProject(
-        parseProjectConfig(projectRoot, JSON.stringify({ schemaVersion: 3, packs: {} }))
-      );
-    }
-    throw error;
-  }
+  return (
+    (await loadProjectConfigIfPresent(projectRoot)) ??
+    assertPacksDirInsideProject(
+      parseProjectConfig(projectRoot, JSON.stringify({ schemaVersion: 3, packs: {} }))
+    )
+  );
 }
 
 /**
@@ -633,28 +646,22 @@ export async function saveProjectConfig(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves the version a project's lockfiles pin for a dependency. The result
- * matches `findDependencyVersion` in src/deps/lockfiles.ts; Phase 4 injects an
- * implementation backed by `scanDependencies`. When no resolver is supplied, a
- * pack that needs lockfile resolution fails with a clear message.
+ * Resolves the version a project's lockfiles pin for a dependency, with the
+ * result shape of `findDependencyVersion` in src/deps/lockfiles.ts. Commands
+ * pass `projectDependencies(...).resolveVersion`.
  */
 export type DependencyVersionResolver = (
   dependency: DependencyRef
 ) => Promise<DependencyVersionLookup> | DependencyVersionLookup;
 
 export interface ResolvePackOptions {
-  resolveDependencyVersion?: DependencyVersionResolver | undefined;
+  resolveDependencyVersion: DependencyVersionResolver;
 }
 
 export interface ResolvedPack {
   id: string;
   recipe: ResolvedPackRecipe;
   recipeHash: string;
-}
-
-/** Thrown when a pack's version can only come from lockfiles and no resolver is available. */
-export class LockfileResolutionUnavailableError extends ConfigError {
-  override name = 'LockfileResolutionUnavailableError';
 }
 
 /** sha256 of the canonical (sorted-key, compact) JSON of a resolved recipe. */
@@ -665,7 +672,7 @@ export function recipeHash(recipe: ResolvedPackRecipe): string {
 export async function resolvePackRecipe(
   config: ProjectConfig,
   id: string,
-  options: ResolvePackOptions = {}
+  options: ResolvePackOptions
 ): Promise<ResolvedPack> {
   const pack = Object.hasOwn(config.packs, id) ? config.packs[id] : undefined;
 
@@ -712,7 +719,7 @@ export async function resolvePackRecipe(
 async function resolvePackVersion(
   id: string,
   pack: PackConfig,
-  resolver: DependencyVersionResolver | undefined
+  resolver: DependencyVersionResolver
 ): Promise<string> {
   if (pack.version !== undefined) {
     return pack.version;
@@ -725,12 +732,6 @@ async function resolvePackVersion(
   }
 
   const label = `${dependency.ecosystem}:${dependency.name}`;
-
-  if (resolver === undefined) {
-    throw new LockfileResolutionUnavailableError(
-      `Pack "${id}" takes its version from the lockfile entry for ${label}, but lockfile resolution is not available; set "version" for packs.${id} in ${CONFIG_FILE_NAME}.`
-    );
-  }
 
   const lookup = await resolver(dependency);
 

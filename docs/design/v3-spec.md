@@ -81,7 +81,7 @@ never silently disable behavior.
   "schemaVersion": 3,
   "packsDir": "agent-docs",               // project-relative, default "agent-docs"
   "agentFiles": "auto",                    // "auto" | string[] of project-relative paths | []
-  "block": { "maxBytes": 4096 },          // managed block budget
+  "block": { "maxBytes": 4096 },          // managed block budget, 1024 to 65536 bytes
   "hook": { "enabled": true, "nearCutoffDays": 90 },
   "model": { "cutoff": "2026-06" },       // optional override for status and hook
   "packs": {
@@ -501,7 +501,9 @@ Per pack, each a named check with pass, fail, or warn:
 | `license` | warn for `unknown` and `proprietary`; fail under `--strict` |
 
 Plus project-level checks: `config-schema`, and `agent-block` (each managed block matches what
-`sync` would write). Output lists one line per problem with the pack id, check name, and path.
+`sync` would write; an agent file that does not exist yet is a warning, so a project that
+gitignores it can still run `verify` in CI). Output lists one line per problem with the pack id,
+check name, and path.
 
 ## 6. Dependencies, release dates, and model cutoffs
 
@@ -592,7 +594,9 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
 Written by `sync` and `init` into each agent file. `agentFiles: "auto"` means: `AGENTS.md` if
 it exists; `CLAUDE.md` if it exists and does not contain an `@AGENTS.md` import line (Claude
 Code reads AGENTS.md only when no CLAUDE.md exists, unless imported); if neither exists,
-create `AGENTS.md`. Markers:
+create `AGENTS.md`. Agent files are written through their real path, so a symlinked
+`CLAUDE.md -> AGENTS.md` is one file written once; a link that leads outside the project is an
+error naming the link. Markers:
 
 ```
 <!-- BEGIN llm-docs: generated from llm-docs.json, do not edit by hand -->
@@ -613,14 +617,17 @@ over memory. Pages are upstream text; guides are summaries that never outrank pa
 - MCP spec 2026-07-28: `agent-docs/mcp/index.md` (specification, schema, guides)
 ```
 
-The parenthesized topics are the pack's top-level page directories plus `guides` when present,
-dropped (whole pack lines first keep, topics drop first, from the last pack backwards) when
-over budget; if even the bare lines exceed the budget the block lists the first packs and ends
-with `- ...and N more: see agent-docs/`. Upstream-derived text (titles, descriptions,
-directory names) is escaped: control characters and backticks removed, `<`/`>` replaced, single
-line, 80 character cap. Blocks are inserted at the end of the file when absent, with one blank
-line before. Text outside the markers is never touched. A file with mismatched markers is an
-error, never a guess.
+Packs appear in `llm-docs.json` order. The parenthesized topics are the pack's top-level page
+directories (sorted) plus `guides` when present, followed by the pack's `description` when it
+has one. Over budget (measured in UTF-8 bytes, markers included), topics and descriptions drop
+first, from the last pack backwards; if even the bare lines exceed the budget the block lists
+the first packs and ends with `- ...and N more: see agent-docs/`. Upstream-derived text
+(titles, descriptions, directory names) is escaped: control characters and backticks removed,
+`@` removed (Claude Code expands `@path` in `CLAUDE.md`), `<`/`>` replaced, single line, 80
+character cap. Blocks are inserted at the end of the file when absent, with one blank line
+before, in the file's own line endings. Text outside the markers is never touched. Marker lines
+inside fenced or indented code are not markers. A file with mismatched markers is an error,
+never a guess.
 
 ### 7.2 Session-start hook
 
