@@ -3,7 +3,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -121,6 +121,34 @@ describe('captureGitState (git provenance capture)', () => {
 
     expect(state?.dirty).toBe(true);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'never runs a program the repository config names (fsmonitor, hooks)',
+    async () => {
+      const root = await makeTempDir('llm-docs-git-');
+      const marker = join(await makeTempDir('llm-docs-git-marker-'), 'ran');
+      await initRepo(root);
+      await writeSourceFile(root, 'docs/a.md', '# A\n');
+      git(root, ['add', '.']);
+      git(root, ['commit', '-q', '-m', 'init']);
+
+      const script = join(root, '.git', 'run.sh');
+      writeFileSync(script, `#!/bin/sh\necho ran >> "${marker}"\n`, { mode: 0o755 });
+      git(root, ['config', 'core.fsmonitor', script]);
+      const hooks = join(root, '.git', 'hooks');
+      await mkdir(hooks, { recursive: true });
+      writeFileSync(join(hooks, 'post-index-change'), `#!/bin/sh\necho ran >> "${marker}"\n`, {
+        mode: 0o755,
+      });
+      // A newer mtime makes status refresh, and so rewrite, the index.
+      await writeSourceFile(root, 'docs/a.md', '# A\n');
+
+      const state = await captureGitState(join(root, 'docs'));
+
+      expect(state?.commit).toMatch(/^[0-9a-f]{40}$/);
+      expect(existsSync(marker)).toBe(false);
+    }
+  );
 
   it('returns undefined for a non-git source (never an error)', async () => {
     const plain = await makeTempDir('llm-docs-git-none-');

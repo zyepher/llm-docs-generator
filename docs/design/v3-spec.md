@@ -1234,7 +1234,8 @@ writes files.
   race a check and a write, which is out of scope; `sync`, `add`, `refresh`, `init`, and
   `migrate` run read-only git commands in the project (`src/core/git-state.ts`: the host
   commit of a `local` source, the git top level) with the user's own git config, outside the
-  4.1 policy, while `status`, `sync --check`, and the hook never run git there.
+  4.1 policy but with fsmonitor and hooks disabled, no index refresh, and no look inside
+  submodules, while `status`, `sync --check`, and the hook never run git there.
 
 ## 12. Quality bar and delivery
 

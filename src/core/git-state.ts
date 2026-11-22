@@ -7,6 +7,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { devNull } from 'node:os';
 import { lstat } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { promisify } from 'node:util';
@@ -62,7 +63,9 @@ export async function captureGitState(resolvedSourcePath: string): Promise<GitSt
   const tags = (await gitLines(gitCwd.dir, ['tag', '--points-at', 'HEAD'])).sort(
     compareStringsByCodeUnit
   );
-  const status = await gitLines(repoRoot, ['status', '--porcelain']);
+  // A changed submodule commit still shows. A submodule's own work tree is not looked at:
+  // that would run git inside it, under its config.
+  const status = await gitLines(repoRoot, ['status', '--porcelain', '--ignore-submodules=dirty']);
 
   return {
     remoteUrl,
@@ -145,7 +148,22 @@ async function gitLines(cwd: string, args: string[]): Promise<string[]> {
 async function git(cwd: string, args: string[]): Promise<GitCommandResult> {
   const result = await execFileAsync(
     'git',
-    ['-c', 'protocol.ext.allow=never', '-C', cwd, ...args],
+    [
+      '-c',
+      'protocol.ext.allow=never',
+      // These commands only read the repository the user is working in, whose own
+      // .git/config applies. Three settings there can make a read run a program or
+      // write: the fsmonitor hook, hooks (post-index-change fires when status
+      // refreshes the index), and the index refresh itself.
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      `core.hooksPath=${devNull}`,
+      '--no-optional-locks',
+      '-C',
+      cwd,
+      ...args,
+    ],
     {
       maxBuffer: 10 * 1024 * 1024,
       timeout: GIT_COMMAND_TIMEOUT_MS,
