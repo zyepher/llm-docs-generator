@@ -66,6 +66,10 @@ import { errorMessage, isFileNotFoundError, isRecord } from './utils/guards.js';
 import { writeTextFileSafely } from './utils/safe-write.js';
 
 const CLI_NAME = 'llm-docs';
+// Not package.json's description: the bundle inlines each package.json value
+// the CLI reads, so reading it would tie the committed bundle to npm metadata.
+const CLI_DESCRIPTION =
+  'Version-pinned, verified reference docs for AI coding agents, kept in your repository and locked to your dependencies.';
 const EXIT_CHECK_FAILED = 1;
 const EXIT_USAGE = 2;
 const EXIT_RUNTIME = 3;
@@ -1032,7 +1036,7 @@ function buildProgram(): Command {
   program.enablePositionalOptions();
   program
     .name(CLI_NAME)
-    .description(packageJson.description)
+    .description(CLI_DESCRIPTION)
     .version(packageJson.version)
     .addHelpText(
       'after',
