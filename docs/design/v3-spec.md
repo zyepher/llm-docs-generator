@@ -697,7 +697,8 @@ command carries `--project <dir>` when the user passed it. The CLI prints no col
 - `llm-docs status [--model <id>] [--cutoff <YYYY-MM>] [--offline] [--brief]`: section 6.
 - `llm-docs guides stamp <id> [guide...]`: section 8.
 - `llm-docs migrate <v2-pack-dir> --version <version> [--id <id>]`: section 9.
-- `llm-docs discover --url <site> | --package <eco>:<name>[@<version>]`: section 10.
+- `llm-docs discover --url <site> | --package <eco>:<name>[@<version>] | --repo <url>[@<version or tag>]`:
+  section 10. The three are mutually exclusive.
 - `llm-docs hook session-start`: section 7.2. Undocumented in `--help` output except as
   "used by the plugin".
 - `llm-docs capabilities --json`: machine-readable name, version, commands (with summary,
@@ -1217,6 +1218,12 @@ writes files.
   by path depth then path; at most 20 with a count of the rest. Each entry is the path and the
   pattern that matched. This is evidence for choosing `readFirst` targets; the output never
   says which one to use.
+- `--repo <url>[@<version or tag>]`: the same repository evidence for a repository that is no
+  package (a protocol specification, a docs repository), through the same code as SwiftPM: the
+  URL (`https://`, or `file://` for tests) is the identity, `registry` is `not-applicable`, and
+  `package.ecosystem` is null. The text after the first `@` in the URL's path is a version or a
+  tag name (`2026-07-28`, `v1.2.0`, `pkg@1.2.0`), matched against the tags in the same forms;
+  without one, the latest semver tag stands in.
 
 ## 11. Security summary
 

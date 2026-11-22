@@ -1222,15 +1222,27 @@ describe('llm-docs v3 CLI', () => {
       expect(result.stderr).not.toContain('{');
     }
 
+    const plain = await runCli(root, ['discover', '--repo', `${repo.url}@v1.0.0`]);
+    expect(plain.code, plain.stderr).toBe(0);
+    expect(JSON.parse(plain.stdout)).toMatchObject({
+      package: { ecosystem: null, name: repo.url, version: 'v1.0.0' },
+      registry: { status: 'not-applicable' },
+      tags: { status: 'matched', matches: [{ tag: 'v1.0.0', form: 'v-prefixed' }] },
+      docDirectories: { status: 'listed', tag: 'v1.0.0', commit: repo.head },
+    });
+    expect(plain.stderr).toContain(`repository ${repo.url}@v1.0.0 (requested)`);
+
     for (const args of [
       ['discover'],
       ['discover', '--url', 'https://example.com', '--package', 'npm:hono'],
+      ['discover', '--package', 'npm:hono', '--repo', 'https://github.com/honojs/hono'],
+      ['discover', '--url', 'https://example.com', '--repo', 'https://github.com/honojs/hono'],
     ]) {
       const result = await runCli(root, args);
       expect(result.code).toBe(2);
       expect(result.stdout).toBe('');
       expect(result.stderr).toContain(
-        "discover needs exactly one of --url <site> and --package <ecosystem>:<name>[@<version>]; for example 'llm-docs discover --package npm:vite'."
+        "discover needs exactly one of --url <site>, --package <ecosystem>:<name>[@<version>], and --repo <url>[@<version or tag>]; for example 'llm-docs discover --package npm:vite'."
       );
     }
 
@@ -1251,10 +1263,11 @@ describe('llm-docs v3 CLI', () => {
     const discover = capabilities.commands.find(
       (command: { name: string }) => command.name === 'discover'
     );
-    expect(discover.summary).toMatch(/--url: .*--package: /);
+    expect(discover.summary).toMatch(/--url: .*--package: .*--repo: /);
     expect(discover.options.map((option: { flags: string }) => option.flags)).toEqual([
       '--url <site>',
       '--package <ecosystem:name[@version]>',
+      '--repo <url[@version]>',
       '--json',
     ]);
   });

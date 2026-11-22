@@ -40,6 +40,7 @@ import {
   describePackageDiscovery,
   discoverPackage,
   parsePackageSpec,
+  parseRepositorySpec,
 } from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
@@ -259,7 +260,7 @@ const COMMANDS = [
   {
     name: 'discover',
     summary:
-      'Print read-only evidence for writing a recipe, as JSON on stdout: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments) or a package (--package: registry metadata, matching git tags, Markdown directories, change documents). Run it before add to choose a source.',
+      'Print read-only evidence for writing a recipe, as JSON on stdout: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments, path prefixes), a package (--package: registry metadata, matching git tags, Markdown directories, change documents), or a repository with no package (--repo: the same evidence without the registry). Run it before add to choose a source.',
     status: 'implemented',
     examples: [
       { argv: ['discover', '--package', 'npm:vite'], note: 'Evidence for the latest Vite release' },
@@ -268,6 +269,14 @@ const COMMANDS = [
         note: 'Evidence for one version, with its git tags and docs directories',
       },
       { argv: ['discover', '--url', 'https://vite.dev'], note: "The site's llms.txt and sitemap" },
+      {
+        argv: [
+          'discover',
+          '--repo',
+          'https://github.com/modelcontextprotocol/modelcontextprotocol@2026-07-28',
+        ],
+        note: 'A protocol repository at a tag: its docs directories and change documents',
+      },
     ],
   },
   {
@@ -1562,16 +1571,27 @@ function buildProgram(): Command {
       '--package <ecosystem:name[@version]>',
       `Package to inspect, such as npm:vite@7.1.0; ecosystems: ${ECOSYSTEMS.join(', ')} (swiftpm:<repository url>) (default version: the latest)`
     )
+    .option(
+      '--repo <url[@version]>',
+      'Repository with no package to inspect, such as a protocol specification: an https:// URL, optionally @<version or tag> (default version: the latest release tag)'
+    )
     .option('--json', 'Accepted for consistency: discover always prints JSON on stdout')
-    .action(async (options: { url?: string; package?: string }) => {
-      if ((options.url === undefined) === (options.package === undefined)) {
+    .action(async (options: { url?: string; package?: string; repo?: string }) => {
+      const given = [options.url, options.package, options.repo].filter(
+        (value) => value !== undefined
+      );
+      if (given.length !== 1) {
         throw new UsageError(
-          "discover needs exactly one of --url <site> and --package <ecosystem>:<name>[@<version>]; for example 'llm-docs discover --package npm:vite'."
+          "discover needs exactly one of --url <site>, --package <ecosystem>:<name>[@<version>], and --repo <url>[@<version or tag>]; for example 'llm-docs discover --package npm:vite'."
         );
       }
 
-      if (options.package !== undefined) {
-        const discovery = await discoverPackage(parsePackageSpec(options.package));
+      if (options.package !== undefined || options.repo !== undefined) {
+        const discovery = await discoverPackage(
+          options.repo === undefined
+            ? parsePackageSpec(options.package ?? '')
+            : parseRepositorySpec(options.repo)
+        );
         writeJson(discovery);
         for (const line of describePackageDiscovery(discovery)) {
           say(line);

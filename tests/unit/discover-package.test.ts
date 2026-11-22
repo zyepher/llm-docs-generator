@@ -26,6 +26,7 @@ import {
   matchVersionTags,
   normalizeRepositoryUrl,
   parsePackageSpec,
+  parseRepositorySpec,
   rankMarkdownDirectories,
   tagDateWarnings,
   type PackageDiscovery,
@@ -230,6 +231,33 @@ describe('parsePackageSpec', () => {
   ])('refuses %s as a usage error', (value, message) => {
     expect(() => parsePackageSpec(value)).toThrow(ConfigError);
     expect(() => parsePackageSpec(value)).toThrow(message);
+  });
+});
+
+describe('parseRepositorySpec', () => {
+  it('reads a repository URL and an optional version or tag', () => {
+    expect(
+      parseRepositorySpec('https://github.com/modelcontextprotocol/modelcontextprotocol@2026-07-28')
+    ).toEqual({
+      ecosystem: null,
+      name: 'https://github.com/modelcontextprotocol/modelcontextprotocol',
+      version: '2026-07-28',
+    });
+    expect(parseRepositorySpec('file:///srv/spec')).toEqual({
+      ecosystem: null,
+      name: 'file:///srv/spec',
+      version: undefined,
+    });
+  });
+
+  it.each([
+    ['github.com/org/spec', /--repo <repository url> needs an https:\/\/ or file:\/\/ URL/],
+    ['git@github.com:org/spec.git', /needs an https:\/\/ or file:\/\/ URL/],
+    ['https://user:secret@example.com/spec', /without credentials/],
+    ['https://example.com/spec@1 0', /--repo <repository url> version "1 0" is not a version/],
+  ])('refuses %s as a usage error', (value, message) => {
+    expect(() => parseRepositorySpec(value)).toThrow(ConfigError);
+    expect(() => parseRepositorySpec(value)).toThrow(message);
   });
 });
 
@@ -745,6 +773,39 @@ describe('discoverPackage', () => {
       ],
       more: 0,
     });
+  });
+
+  it('reports the same evidence for a plain repository named with --repo, at a version or a tag', async () => {
+    const upstream = await makeUpstream();
+    const discovery = await discoverPackage(parseRepositorySpec(`${upstream.url}@1.0.0`));
+
+    expect(discovery.package).toEqual({
+      ecosystem: null,
+      name: upstream.url,
+      requestedVersion: '1.0.0',
+      version: '1.0.0',
+      versionSource: 'requested',
+    });
+    expect(discovery.registry).toEqual({
+      status: 'not-applicable',
+      reason: 'A plain repository has no package registry.',
+    });
+    expect(discovery.tags).toMatchObject({
+      status: 'matched',
+      matches: [{ tag: 'v1.0.0' }, { tag: 'widget@1.0.0' }],
+    });
+    expect(discovery.docDirectories).toMatchObject({ status: 'listed', tag: 'v1.0.0' });
+    expect(discovery.changeDocuments).toMatchObject({
+      documents: [{ path: 'CHANGELOG.md', pattern: 'changelog' }],
+    });
+    expect(describePackageDiscovery(discovery)[0]).toBe(
+      `repository ${upstream.url}@1.0.0 (requested)`
+    );
+
+    // A tag name works as the version: the bare form matches it exactly.
+    const byTag = await discoverPackage(parseRepositorySpec(`${upstream.url}@widget@1.0.0`));
+    expect(byTag.tags).toMatchObject({ matches: [{ tag: 'widget@1.0.0', form: 'bare' }] });
+    expect(byTag.docDirectories).toMatchObject({ status: 'listed', tag: 'widget@1.0.0' });
   });
 
   it('warns when a tag was committed more than 14 days from the version publish date', async () => {

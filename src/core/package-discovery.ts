@@ -1,9 +1,11 @@
 /**
- * `discover --package` (spec 10): read-only evidence about where a package's
- * docs live. Registry metadata, the git tags that match the version, and, at
- * the first exact tag, the directories holding Markdown and the files that
- * describe change. The planner reads the evidence and writes the recipe;
- * nothing here chooses a source or a page to read first.
+ * `discover --package` and `discover --repo` (spec 10): read-only evidence
+ * about where a package's docs live. Registry metadata, the git tags that
+ * match the version, and, at the first exact tag, the directories holding
+ * Markdown and the files that describe change. A plain repository (`--repo`)
+ * and a SwiftPM package are named by their repository URL and skip the
+ * registry. The planner reads the evidence and writes the recipe; nothing
+ * here chooses a source or a page to read first.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -40,12 +42,16 @@ const DATED_TAG_LIMIT = 10;
 const TAG_PUBLISH_GAP_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/;
+/** A version or a tag name after a repository URL: monorepo tags carry `@` and `/` (`pkg@1.2.3`). */
+const REPOSITORY_VERSION_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9.+_@/-]{0,127}$/;
 const NAME_PATTERN = /^@?[A-Za-z0-9][A-Za-z0-9._~/-]*$/;
 
 export interface PackageSpec {
-  ecosystem: Ecosystem;
-  /** The registry name; for swiftpm, the repository URL. */
+  /** Null for a plain repository named with `discover --repo`. */
+  ecosystem: Ecosystem | null;
+  /** The registry name; for swiftpm and a plain repository, the repository URL. */
   name: string;
+  /** For a plain repository, a version or a tag name. */
   version: string | undefined;
 }
 
@@ -115,7 +121,7 @@ export type DocDirectoryEvidence =
 
 export interface PackageDiscovery {
   package: {
-    ecosystem: Ecosystem;
+    ecosystem: Ecosystem | null;
     name: string;
     requestedVersion: string | null;
     /** The version every piece of evidence below is about. */
@@ -146,41 +152,15 @@ export function parsePackageSpec(value: string): PackageSpec {
     );
   }
 
-  const at = rest.lastIndexOf('@');
-  // A scoped npm name starts with '@'; a URL's '@' before its path is userinfo, not a version.
-  const hasVersion = ecosystem === 'swiftpm' ? at > rest.lastIndexOf('/') : at > 0;
-  const name = hasVersion ? rest.slice(0, at) : rest;
-  const version = hasVersion ? rest.slice(at + 1) : undefined;
-
-  if (version !== undefined && !VERSION_PATTERN.test(version)) {
-    throw new ConfigError(
-      `--package version "${version}" is not a version (letters, digits, ".", "+", "_", "-"); write it as it appears in the registry.`
-    );
-  }
-
   if (ecosystem === 'swiftpm') {
-    let url: URL;
-    try {
-      url = new URL(name);
-    } catch {
-      throw new ConfigError(
-        `--package swiftpm:<repository url> needs an https:// or file:// URL; got "${redactUrl(name)}".`
-      );
-    }
-    if (
-      (url.protocol !== 'https:' && url.protocol !== 'file:') ||
-      url.username !== '' ||
-      url.password !== '' ||
-      url.search !== '' ||
-      url.hash !== ''
-    ) {
-      // The name is echoed in the output, so a credential anywhere in it is refused here.
-      throw new ConfigError(
-        `--package swiftpm:<repository url> needs an https:// or file:// URL without credentials, a query, or a fragment; got "${redactUrl(name)}".`
-      );
-    }
-    return { ecosystem, name, version };
+    return { ...parseRepositoryUrl(rest, '--package swiftpm:<repository url>'), ecosystem };
   }
+
+  const at = rest.lastIndexOf('@');
+  // A scoped npm name starts with '@'.
+  const name = at > 0 ? rest.slice(0, at) : rest;
+  const version =
+    at > 0 ? checkedVersion(rest.slice(at + 1), '--package', VERSION_PATTERN) : undefined;
 
   if (!NAME_PATTERN.test(name) || name.split('/').some((segment) => /^\.{0,2}$/.test(segment))) {
     throw new ConfigError(
@@ -189,6 +169,59 @@ export function parsePackageSpec(value: string): PackageSpec {
   }
 
   return { ecosystem, name, version };
+}
+
+/** Parse `discover --repo <url>[@<version or tag>]`, a repository with no package registry. */
+export function parseRepositorySpec(value: string): PackageSpec {
+  return { ...parseRepositoryUrl(value, '--repo <repository url>'), ecosystem: null };
+}
+
+function checkedVersion(version: string, flag: string, pattern: RegExp): string {
+  if (!pattern.test(version)) {
+    throw new ConfigError(
+      pattern === VERSION_PATTERN
+        ? `${flag} version "${version}" is not a version (letters, digits, ".", "+", "_", "-"); write it as it appears in the registry.`
+        : `${flag} version "${version}" is not a version or tag name (letters, digits, ".", "+", "_", "-", "@", "/", no ".."); write it as the tag is named.`
+    );
+  }
+  return version;
+}
+
+/**
+ * `<url>[@<version or tag>]` where the URL is https:// or file://. The version
+ * starts at the first '@' in the path: one before the path is userinfo, and a
+ * tag may hold more (`pkg@1.2.3`).
+ */
+function parseRepositoryUrl(
+  value: string,
+  flag: string
+): { name: string; version: string | undefined } {
+  const path = value.indexOf('/', value.indexOf('://') + '://'.length);
+  const at = path === -1 ? -1 : value.indexOf('@', path);
+  const name = at === -1 ? value : value.slice(0, at);
+  const version =
+    at === -1 ? undefined : checkedVersion(value.slice(at + 1), flag, REPOSITORY_VERSION_PATTERN);
+  let url: URL;
+
+  try {
+    url = new URL(name);
+  } catch {
+    throw new ConfigError(`${flag} needs an https:// or file:// URL; got "${redactUrl(name)}".`);
+  }
+  if (
+    (url.protocol !== 'https:' && url.protocol !== 'file:') ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.search !== '' ||
+    url.hash !== ''
+  ) {
+    // The name is echoed in the output, so a credential anywhere in it is refused here.
+    throw new ConfigError(
+      `${flag} needs an https:// or file:// URL without credentials, a query, or a fragment; got "${redactUrl(name)}".`
+    );
+  }
+
+  return { name, version };
 }
 
 // ---------------------------------------------------------------------------
@@ -533,7 +566,10 @@ export async function discoverPackage(
     },
     registry: {
       status: 'not-applicable',
-      reason: 'A SwiftPM package is identified by its repository URL; there is no registry.',
+      reason:
+        spec.ecosystem === null
+          ? 'A plain repository has no package registry.'
+          : 'A SwiftPM package is identified by its repository URL; there is no registry.',
     },
     // Every path that leaves the repository missing replaces this with its own reason.
     repository: { status: 'missing', reason: 'No repository was looked up.' },
@@ -544,8 +580,9 @@ export async function discoverPackage(
     warnings,
   };
   let declared: { url: string; directory: string | null };
+  const namedByUrl = spec.ecosystem === 'swiftpm' || spec.ecosystem === null;
 
-  if (spec.ecosystem === 'swiftpm') {
+  if (spec.ecosystem === 'swiftpm' || spec.ecosystem === null) {
     declared = { url: spec.name, directory: null };
   } else {
     const client = createHttpClient();
@@ -584,10 +621,9 @@ export async function discoverPackage(
     declared = lookup.metadata.repository;
   }
 
-  const normalized =
-    spec.ecosystem === 'swiftpm'
-      ? { url: spec.name, directory: null }
-      : normalizeRepositoryUrl(declared.url);
+  const normalized = namedByUrl
+    ? { url: spec.name, directory: null }
+    : normalizeRepositoryUrl(declared.url);
 
   if ('refused' in normalized) {
     result.repository = {
@@ -627,10 +663,9 @@ export async function discoverPackage(
   }
   const directory = declared.directory ?? normalized.directory;
   result.repository = { status: 'ok', url, directory };
-  const tagName =
-    spec.ecosystem === 'swiftpm'
-      ? posix.basename(requestedUrl.pathname).replace(/\.git$/i, '')
-      : spec.name;
+  const tagName = namedByUrl
+    ? posix.basename(requestedUrl.pathname).replace(/\.git$/i, '')
+    : spec.name;
   const workDir = await mkdtemp(join(tmpdir(), 'llm-docs-discover-'));
 
   try {
@@ -661,7 +696,7 @@ export async function discoverPackage(
       result.tags = { status: 'no-match', tagCount: tags.size };
       result.docDirectories = skipped(
         version === null
-          ? 'No version was given and no tag looks like a release (1.2.3 or v1.2.3); pass --package swiftpm:<url>@<version>.'
+          ? `No version was given and no tag looks like a release (1.2.3 or v1.2.3); pass ${spec.ecosystem === null ? '--repo <url>@<version or tag>' : '--package swiftpm:<url>@<version>'}.`
           : `None of the ${tags.size} tags names ${version}, so this tool cannot tell which commit was released as ${version}.`
       );
       return result;
@@ -833,7 +868,7 @@ export function tagDateWarnings(discovery: PackageDiscovery): string[] {
 export function describePackageDiscovery(result: PackageDiscovery): string[] {
   const { package: pkg, registry, repository, tags, docDirectories, changeDocuments } = result;
   const lines = [
-    `${pkg.ecosystem}:${pkg.name}@${pkg.version ?? '(no version)'}${pkg.versionSource === null ? '' : ` (${pkg.versionSource})`}`,
+    `${pkg.ecosystem === null ? 'repository ' : `${pkg.ecosystem}:`}${pkg.name}@${pkg.version ?? '(no version)'}${pkg.versionSource === null ? '' : ` (${pkg.versionSource})`}`,
   ];
 
   switch (registry.status) {

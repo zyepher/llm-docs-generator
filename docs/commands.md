@@ -249,9 +249,10 @@ Reads a v2 pack's `manifest.json` (schema `0.1.0`, mode `local-source-docs`) and
 
 ## `discover`
 
-Prints read-only evidence for writing a recipe, always as JSON on stdout, with a summary on stderr. It writes no files. Pass exactly one of:
+Prints read-only evidence for writing a recipe, always as JSON on stdout, with a summary on stderr. It writes no files. Pass exactly one of `--package`, `--repo`, and `--url`:
 
 - `--package <ecosystem>:<name>[@<version>]`: registry metadata (repository URL and directory, homepage, documentation URL, license, the version's publish date), the git tags that match the version, the top documentation directories at the matching tag (ranked by Markdown file count), and `changeDocuments`, the changelog, migration, and upgrade files at that tag. Without a version it uses the latest. For `swiftpm`, the name is the repository URL.
+- `--repo <url>[@<version or tag>]`: the same evidence as `--package` for a repository that is not a package, such as a protocol specification: the git tags that match, the documentation directories at the matching tag, and the change documents. The URL is `https://`; the text after the first `@` in its path is a version or a tag name (`2026-07-28`, `v1.2.0`, `pkg@1.2.0`). Without one, the latest semver tag stands in. `registry` is `not-applicable` and `package.ecosystem` is `null`.
 - `--url <site>`: the site's `llms.txt` and `sitemap.xml`, whether pages serve raw Markdown when `.md` is appended (at most 3 probes), the version-looking path segments its `llms.txt` uses, and `pathPrefixes`: the leading path prefixes of the same-origin URLs it lists, with counts, each cut after its first version segment when it has one (`/specification/2026-07-28`, `/seps`). Those prefixes are what an `--include` glob starts with: `--include '/specification/{version}/**'`. The summary prints the top six.
 
 Use it before `add`: the [`add-docs` skill](../plugin/skills/add-docs/SKILL.md) reads its fields. It reports evidence and never says which source to use.
@@ -262,7 +263,7 @@ Use it before `add`: the [`add-docs` skill](../plugin/skills/add-docs/SKILL.md) 
 | `2` | A usage error, a malformed package spec, or a URL the network policy refuses. |
 | `3` | The registry could not be reached. |
 
-`--json` is accepted and changes nothing. `--package` output: `package` (`ecosystem`, `name`, `requestedVersion`, `version`, `versionSource`), `registry`, `repository`, `tags`, `docDirectories`, `changeDocuments`, and `warnings`. `--url` output: `website`, `inspectedResources`, `crawlPolicy`, `candidates`, `llmsTxt` (`url`, `listedUrls`, `versionSegments`, `pathPrefixes` with `prefix` and `urls`, sorted by count then path and capped at 40, `morePathPrefixes`, `markdownProbes`, or `null`), and `warnings`.
+`--json` is accepted and changes nothing. `--package` and `--repo` output: `package` (`ecosystem`, `name`, `requestedVersion`, `version`, `versionSource`), `registry`, `repository`, `tags`, `docDirectories`, `changeDocuments`, and `warnings`. `--url` output: `website`, `inspectedResources`, `crawlPolicy`, `candidates`, `llmsTxt` (`url`, `listedUrls`, `versionSegments`, `pathPrefixes` with `prefix` and `urls`, sorted by count then path and capped at 40, `morePathPrefixes`, `markdownProbes`, or `null`), and `warnings`.
 
 ## `capabilities`
 
