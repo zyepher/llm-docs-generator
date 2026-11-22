@@ -78,7 +78,9 @@ import { LOCK_FILE, withPacksLock } from './lock.js';
 import { verifyPackFiles } from './verify.js';
 
 const STAGING_DIR = '.staging';
-const PACKS_GITIGNORE = `${STAGING_DIR}/\n${LOCK_FILE}\n`;
+// No trailing slash: `.staging/` matches directories only, so a symbolic link of that
+// name would not be ignored and could be committed.
+const PACKS_GITIGNORE = `${STAGING_DIR}\n${LOCK_FILE}\n`;
 const INDEX_FILE = 'index.md';
 
 export type PackSyncStatus = 'unchanged' | 'built' | 'would-build' | 'failed';
@@ -172,6 +174,17 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+async function isRealDirectory(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isDirectory();
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
 
 /**
@@ -197,9 +210,39 @@ function randomSuffix(): string {
   return randomBytes(6).toString('hex');
 }
 
+/**
+ * `.staging` is where sync builds packs and where recovery deletes leftovers,
+ * so it must be a directory this tool made. A symbolic link there (one can be
+ * committed to a repository) would send those writes and deletes into
+ * whatever it points at, outside the packs directory.
+ */
+async function assertStagingIsRealDirectory(packsDir: string): Promise<void> {
+  const stagingRoot = join(packsDir, STAGING_DIR);
+  let isDirectory: boolean;
+  let isSymbolicLink: boolean;
+
+  try {
+    const stats = await lstat(stagingRoot);
+    isDirectory = stats.isDirectory();
+    isSymbolicLink = stats.isSymbolicLink();
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+
+  if (!isDirectory) {
+    throw new ConfigError(
+      `${stagingRoot} is ${isSymbolicLink ? 'a symbolic link' : 'not a directory'}. llm-docs builds packs in that directory and deletes leftovers from it, so it only uses one it created itself. Remove ${stagingRoot} and run the command again.`
+    );
+  }
+}
+
 /** Create `packsDir` and its `.gitignore` for the staging and lock files (spec 2.6). */
 export async function ensurePacksDir(packsDir: string): Promise<void> {
   await mkdir(packsDir, { recursive: true });
+  await assertStagingIsRealDirectory(packsDir);
   const gitignore = join(packsDir, '.gitignore');
   let current = '';
 
@@ -237,6 +280,7 @@ async function manifestPackId(dir: string): Promise<string | undefined> {
  * interruption never loses a pack or its guides.
  */
 async function recoverStaging(packsDir: string): Promise<string[]> {
+  await assertStagingIsRealDirectory(packsDir);
   const stagingRoot = join(packsDir, STAGING_DIR);
   let entries: string[];
 
@@ -260,6 +304,13 @@ async function recoverStaging(packsDir: string): Promise<string[]> {
   for (const entry of parsed) {
     const dir = join(stagingRoot, entry.name);
 
+    // Only a real directory can be a pack left by an interrupted sync. Anything else
+    // (a symbolic link above all) is removed by name, never entered or moved into place.
+    if (!(await isRealDirectory(dir))) {
+      await rm(dir, { force: true });
+      continue;
+    }
+
     if (entry.id !== undefined && (await manifestPackId(dir)) === entry.id) {
       const target = join(packsDir, entry.id);
 
@@ -271,7 +322,7 @@ async function recoverStaging(packsDir: string): Promise<string[]> {
 
       if (
         entry.kind === 'staging' &&
-        (await exists(join(dir, 'guides'))) &&
+        (await isRealDirectory(join(dir, 'guides'))) &&
         (await exists(target)) &&
         !(await exists(join(target, 'guides')))
       ) {
@@ -820,6 +871,7 @@ async function buildPack(
     inventories: acquisitions.map((acquisition) => acquisition.inventory),
   });
 
+  await assertStagingIsRealDirectory(packsDir);
   await mkdir(join(packsDir, STAGING_DIR), { recursive: true });
   const stagingDir = join(packsDir, STAGING_DIR, `${resolved.id}-${randomSuffix()}`);
   await mkdir(stagingDir);
@@ -1294,6 +1346,7 @@ export async function syncPacks(
       ids === undefined || ids.length === 0 ? await handleOrphans(loaded, options) : [];
     if (!check) {
       // Every build has swapped in or cleaned up its own staging directory by now.
+      await assertStagingIsRealDirectory(loaded.packsDir);
       await rm(join(loaded.packsDir, STAGING_DIR), { recursive: true, force: true });
     }
 

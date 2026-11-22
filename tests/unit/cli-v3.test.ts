@@ -113,7 +113,7 @@ describe('llm-docs v3 CLI', () => {
     });
     expect(first.stderr).toContain('AGENTS.md: created with the llm-docs block');
     expect(await readFile(join(root, 'agent-docs', '.gitignore'), 'utf-8')).toBe(
-      '.staging/\n.llm-docs.lock\n'
+      '.staging\n.llm-docs.lock\n'
     );
     expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toBe(`${BLOCK_BEGIN}\n${BLOCK_END}\n`);
 

@@ -149,7 +149,7 @@ describe('syncPacks', () => {
       'demo/pages/index.md',
     ]);
     expect(await readFile(join(root, 'agent-docs', '.gitignore'), 'utf-8')).toBe(
-      '.staging/\n.llm-docs.lock\n'
+      '.staging\n.llm-docs.lock\n'
     );
 
     const manifest = await readPackManifest(join(root, 'agent-docs', 'demo'));
@@ -424,6 +424,63 @@ describe('syncPacks', () => {
     expect(await readdir(packs)).not.toContain('.staging');
     expect(await snapshot(join(packs, 'demo'))).toEqual(before);
   });
+
+  it.skipIf(!canCreateSymlinks)(
+    'refuses a .staging that is a symbolic link, and deletes nothing through it',
+    async () => {
+      const root = await makeProject({ demo: PACK }, DOCS);
+      const packs = join(root, 'agent-docs');
+      const victim = join(root, 'victim');
+      await writeFiles(victim, { 'keep/data.txt': 'precious', 'notes.txt': 'secret' });
+      await mkdir(packs, { recursive: true });
+      await symlink(victim, join(packs, '.staging'), 'dir');
+      const before = await snapshot(victim);
+
+      await expect(syncPacks(root, undefined)).rejects.toThrow(
+        /\.staging is a symbolic link\..*Remove .*\.staging and run the command again/s
+      );
+
+      expect(await snapshot(victim)).toEqual(before);
+      expect(await readdir(packs)).not.toContain('demo');
+    }
+  );
+
+  it('refuses a .staging that is a file', async () => {
+    const root = await makeProject({ demo: PACK }, DOCS);
+    await writeFiles(join(root, 'agent-docs'), { '.staging': 'not a directory' });
+
+    await expect(syncPacks(root, undefined)).rejects.toThrow(/\.staging is not a directory\./);
+  });
+
+  it.skipIf(!canCreateSymlinks)(
+    'removes a symbolic link left inside .staging by name, without entering or restoring it',
+    async () => {
+      const root = await makeProject({ demo: PACK }, DOCS);
+      await syncPacks(root, undefined);
+      const packs = join(root, 'agent-docs');
+      const victim = join(root, 'victim');
+      // A link named like a pack set aside by an interrupted swap, pointing at a directory
+      // that even holds a manifest for that pack id.
+      await writeFiles(victim, {
+        'manifest.json': await readFile(join(packs, 'demo', 'manifest.json'), 'utf-8'),
+        'guides/g.md': '# G\n',
+        'data.txt': 'precious',
+      });
+      await rm(join(packs, 'demo'), { recursive: true });
+      await mkdir(join(packs, '.staging'));
+      await symlink(victim, join(packs, '.staging', 'demo-old-abcdef012345'), 'dir');
+      await symlink(victim, join(packs, '.staging', 'demo-0123456789ab'), 'dir');
+      const before = await snapshot(victim);
+
+      const report = await syncPacks(root, undefined);
+
+      expect(report.packs[0]).toMatchObject({ id: 'demo', status: 'built' });
+      expect(report.packs[0]?.warnings.join(' ')).not.toMatch(/Restored/);
+      expect(await snapshot(victim)).toEqual(before);
+      expect(await readdir(packs)).not.toContain('.staging');
+      expect(await readdir(join(packs, 'demo'))).not.toContain('guides');
+    }
+  );
 
   it('rejects output collisions that differ only by case or extension', async () => {
     const root = await makeProject(

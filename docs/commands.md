@@ -30,7 +30,7 @@ When a run has both config errors and runtime failures across several packs, it 
 
 ## `init`
 
-Creates `llm-docs.json`, the packs directory with a `.gitignore` for `.staging/` and `.llm-docs.lock`, and the managed block in each agent file. It never overwrites an existing config, so running it again only brings the managed blocks up to date.
+Creates `llm-docs.json`, the packs directory with a `.gitignore` for `.staging` and `.llm-docs.lock`, and the managed block in each agent file. It never overwrites an existing config, so running it again only brings the managed blocks up to date.
 
 Use it to adopt the tool in a repository before adding packs. `add` creates the config on its own, so `init` is optional.
 
