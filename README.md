@@ -1,6 +1,6 @@
 # llm-docs
 
-AI coding agents write the version of a library they remember. `llm-docs` puts the docs for the versions your project actually uses into your repository, and tells the agent at the start of each session which libraries are newer than its training data and which page to read first.
+AI coding agents write code for the library versions they were trained on. Your project may use a newer release, or stay on an older one on purpose. `llm-docs` saves the docs for the exact versions you use inside your repository, and tells the agent at the start of each session which of them are newer than its training data and which page to read first.
 
 This README has two parts: [for humans](#for-humans) and [for agents](#for-agents).
 
@@ -51,6 +51,7 @@ Results will be published here with the date, the model, the Claude Code version
 ### Good to know
 
 - **It only helps with libraries you pin.** For other new libraries, the session note lists them and suggests pinning their docs.
+- **Language versions can be pinned, but are not tracked yet.** You can save the docs for a language or toolchain version (Swift 6, a specific Swift 5.x, Dart, Go, Python) the same way as a library's, and the agent will see them listed. The tool does not yet read which language version your project uses, so it will not flag a new language version in the session note or notice when you upgrade. Libraries get both.
 - **Saved docs are copies of someone else's work.** Check each library's license before you commit or share them. The tool records the license it finds and warns when it finds none.
 - **It fetches without logging in.** A private repository or a site behind a login cannot be fetched. Put those docs in a folder inside your project and pin that folder.
 - **Docs take space.** Expect a few hundred kilobytes to a few megabytes per library.
