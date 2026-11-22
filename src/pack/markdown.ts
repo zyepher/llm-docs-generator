@@ -843,8 +843,9 @@ export interface LinkTarget {
 
 /**
  * Every link destination outside code: inline links and images, reference
- * definitions, autolinks, and `href`/`src` attributes of lowercase (HTML)
- * tags. Capitalized JSX component props are not links. Verify's `links`
+ * definitions, autolinks, and the URL attributes (`href`, `src`, each
+ * `srcset` candidate, `action`, `formaction`, `poster`, `data`,
+ * `xlink:href`) of lowercase (HTML) tags. Capitalized JSX component props are not links. Verify's `links`
  * check reads exactly this set, so Phase 2b's rewriter must rewrite through
  * it too (the two must never disagree about what a link is).
  */
@@ -925,7 +926,8 @@ export function findLinkTargets(text: string, options: MarkdownSyntaxOptions = {
 function htmlAttributeTargets(tag: JsxTag): LinkTarget[] {
   const targets: LinkTarget[] = [];
   const attributesOffset = tag.end - (tag.selfClosing ? 2 : 1) - tag.attributes.length;
-  const pattern = /(?:^|\s)(href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`{]+))/gi;
+  const pattern =
+    /(?:^|\s)(xlink:href|href|src|srcset|action|formaction|poster|data)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`{]+))/gi;
 
   for (const match of tag.attributes.matchAll(pattern)) {
     const value = match[2] ?? match[3] ?? match[4];
@@ -939,14 +941,27 @@ function htmlAttributeTargets(tag: JsxTag): LinkTarget[] {
     const valueOffset = match.index + match[0].length - value.length - quoted;
     const start = attributesOffset + valueOffset;
     const nameStart = attributesOffset + match.index + match[0].indexOf(name);
-    targets.push({
-      kind: 'html-attribute',
-      target: value,
-      start,
-      end: start + value.length,
-      span: { start: nameStart, end: start + value.length + quoted },
-      label: { start: nameStart, end: nameStart + name.length },
-    });
+    const span = { start: nameStart, end: start + value.length + quoted };
+    const label = { start: nameStart, end: nameStart + name.length };
+    // srcset lists `url [descriptor]` candidates separated by commas: each URL is a target.
+    const candidates =
+      name.toLowerCase() === 'srcset'
+        ? [...value.matchAll(/(?:^|,)\s*([^\s,]+)/g)].map((candidate) => ({
+            text: candidate[1] ?? '',
+            offset: candidate.index + candidate[0].length - (candidate[1] ?? '').length,
+          }))
+        : [{ text: value, offset: 0 }];
+
+    for (const candidate of candidates) {
+      targets.push({
+        kind: 'html-attribute',
+        target: candidate.text,
+        start: start + candidate.offset,
+        end: start + candidate.offset + candidate.text.length,
+        span,
+        label,
+      });
+    }
   }
 
   return targets;

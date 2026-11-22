@@ -425,3 +425,92 @@ describe('createPackLinkRewriter: targets outside the pack (spec 4.5 steps 4 and
     expect(result.text).toBe(['    ```js', '[x] (unresolved: ./gone.md)', '    ```'].join('\n'));
   });
 });
+
+describe('createPackLinkRewriter: link schemes', () => {
+  it.each([
+    ['[a](file:///etc/passwd)', '[a] (unresolved: file:///etc/passwd)'],
+    ['[a](file:../../../../etc/passwd)', '[a] (unresolved: file:../../../../etc/passwd)'],
+    ['[a](javascript:alert(1))', '[a] (unresolved: javascript:alert(1))'],
+    ['[a](JaVaScRiPt:alert(1))', '[a] (unresolved: JaVaScRiPt:alert(1))'],
+    ['[a](<\u0001javascript:alert(1)>)', '[a] (unresolved: \u0001javascript:alert(1))'],
+    ['[a](<java\tscript:alert(1)>)', '[a] (unresolved: java script:alert(1))'],
+    ['[a](&#106;avascript:alert(1))', '[a] (unresolved: &#106;avascript:alert(1))'],
+    ['[a](javascript\\:alert(1))', '[a] (unresolved: javascript\\:alert(1))'],
+    ['[a](vbscript:msgbox(1))', '[a] (unresolved: vbscript:msgbox(1))'],
+    ['[a](data:text/plain,hi)', '[a] (unresolved: data:text/plain,hi)'],
+    ['[a](blob:https://x.dev/1)', '[a] (unresolved: blob:https://x.dev/1)'],
+    ['[a](vscode://file/etc/passwd)', '[a] (unresolved: vscode://file/etc/passwd)'],
+    ['[a](tel:+15550100)', '[a] (unresolved: tel:+15550100)'],
+    ['<file:///etc/passwd>', 'file:///etc/passwd (unresolved: file:///etc/passwd)'],
+    ['[r]: javascript:alert(1)', '[r] (unresolved: javascript:alert(1))'],
+    [
+      '<a href="&#106;avascript:alert(1)">x</a>',
+      '<a data-unresolved-href="&#106;avascript:alert(1)">x</a>',
+    ],
+    [
+      '<a href="javascript&colon;alert(1)">x</a>',
+      '<a data-unresolved-href="javascript&colon;alert(1)">x</a>',
+    ],
+    [
+      '<a href="jav&#x09;ascript:alert(1)">x</a>',
+      '<a data-unresolved-href="jav&#x09;ascript:alert(1)">x</a>',
+    ],
+    [
+      '<a href="java\nscript:alert(1)">x</a>',
+      '<a data-unresolved-href="java\nscript:alert(1)">x</a>',
+    ],
+    [
+      '<a href=" \u0000javascript:alert(1)">x</a>',
+      '<a data-unresolved-href=" \u0000javascript:alert(1)">x</a>',
+    ],
+    [
+      '<form action="javascript:alert(1)"></form>',
+      '<form data-unresolved-action="javascript:alert(1)"></form>',
+    ],
+    [
+      '<video poster="data:image/png;base64,AAAA"></video>',
+      '<video data-unresolved-poster="data:image/png;base64,AAAA"></video>',
+    ],
+    [
+      '<object data="file:///etc/passwd"></object>',
+      '<object data-unresolved-data="file:///etc/passwd"></object>',
+    ],
+    [
+      '<img srcset="https://x.dev/a.png 1x, file:///etc/passwd 2x">',
+      '<img data-unresolved-srcset="https://x.dev/a.png 1x, file:///etc/passwd 2x">',
+    ],
+  ])('turns %j into plain text', (text, expected) => {
+    const result = rewriteLocal(text);
+    expect(result.text).toBe(expected);
+    expect(result.unresolved.map((entry) => entry.reason)).toContain('disallowed-scheme');
+    expect(result.plainTextConversions).toBeGreaterThan(0);
+  });
+
+  it.each([
+    '[a](https://x.dev/a)',
+    '[a](HTTPS://x.dev/a)',
+    '[a](http://x.dev/a)',
+    '[a](mailto:docs@x.dev)',
+    '[a](#install)',
+    '<a href="https://x.dev/a">x</a>',
+    '<img srcset="https://x.dev/a.png 1x, https://x.dev/b.png 2x">',
+  ])('keeps %j live', (text) => {
+    const result = rewriteLocal(text);
+    expect(result.text).toBe(text);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it('reads a percent-encoded colon as part of a relative path, not a scheme', () => {
+    const result = rewriteLocal('[a](javascript%3Aalert(1))');
+    expect(result.text).toBe('[a] (unresolved: javascript%3Aalert(1))');
+    expect(result.unresolved).toEqual([{ target: 'javascript%3Aalert(1)', reason: 'not-found' }]);
+  });
+
+  it('resolves relative srcset and poster targets like any other link', () => {
+    expect(
+      rewritten('<img srcset="../index.md 1x, ../../../../etc/passwd 2x"><video poster="topic.md">')
+    ).toBe(
+      '<img data-unresolved-srcset="../index.md 1x, ../../../../etc/passwd 2x"><video poster="topic.md">'
+    );
+  });
+});

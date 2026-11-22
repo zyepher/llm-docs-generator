@@ -1,9 +1,10 @@
 /**
  * Link rewriting for pack pages (spec 4.5). Every link destination outside
  * code that `findLinkTargets` reports (inline links, images, reference
- * definitions, autolinks, raw HTML `href`/`src`) is resolved in this order:
+ * definitions, autolinks, raw HTML URL attributes) is resolved in this order:
  *
- * 1. A fragment-only target stays as written.
+ * 1. A fragment-only target stays as written; a target whose scheme is not
+ *    https, http, or mailto becomes plain text (step 5).
  * 2. A relative path that names another file of the pack (exactly, or as a
  *    route: `.md`/`.mdx`/`.html` extension or a trailing `/index` dropped)
  *    becomes the relative path from this page to that file's output, with
@@ -36,6 +37,49 @@ import {
 } from './markdown.js';
 
 const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+
+/**
+ * The schemes a link in a pack page may keep live. Every other one (`file:`,
+ * `javascript:`, `data:`, `vbscript:`, `blob:`, `tel:`, app schemes) becomes
+ * plain text: an agent reading the pack has no use for them, and a reader
+ * that follows them could run code or open local files.
+ */
+const LIVE_SCHEMES = new Set(['https', 'http', 'mailto']);
+
+const NAMED_CHARACTERS: Readonly<Record<string, string>> = {
+  colon: ':',
+  tab: '\t',
+  newline: '\n',
+  period: '.',
+  plus: '+',
+  amp: '&',
+};
+
+/**
+ * The scheme a target names, read the way a browser or a Markdown renderer
+ * reads it: character references and backslash escapes decoded, tabs and
+ * line breaks dropped, leading spaces and control characters skipped, case
+ * folded. A percent-encoded colon does not end a scheme (`a%3Ab` is a path).
+ */
+function linkScheme(target: string): string | undefined {
+  const decoded = target
+    .replace(/&#(?:x([0-9a-f]+)|([0-9]+));?/gi, (_reference, hex?: string, decimal?: string) => {
+      const code = hex === undefined ? Number(decimal) : Number.parseInt(hex, 16);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : '�';
+    })
+    .replace(
+      /&([a-z]+);/gi,
+      (reference, name: string) => NAMED_CHARACTERS[name.toLowerCase()] ?? reference
+    )
+    .replace(/\\([!-/:-@[-`{-~])/g, '$1')
+    .replace(/[\t\n\r]/g, '');
+  let start = 0;
+  while (start < decoded.length && decoded.charCodeAt(start) <= 0x20) {
+    start += 1;
+  }
+  return /^([a-z][a-z0-9+.-]*):/i.exec(decoded.slice(start))?.[1]?.toLowerCase();
+}
+
 const ROUTE_EXTENSION = /\.(?:md|mdx|markdown|html?|rst)$/i;
 const GITHUB_BLOB_URL = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([0-9a-f]{40})\/(.+)$/;
 
@@ -392,6 +436,11 @@ export function createPackLinkRewriter(context: PackLinkContext): LinkRewriter {
       return { kind: 'keep', external: false };
     }
 
+    const scheme = linkScheme(written);
+    if (scheme !== undefined && !LIVE_SCHEMES.has(scheme)) {
+      return { kind: 'plain', reason: 'disallowed-scheme' };
+    }
+
     const hash = raw.indexOf('#');
     const fragment = hash === -1 ? '' : raw.slice(hash);
     const withQuery = hash === -1 ? raw : raw.slice(0, hash);
@@ -555,12 +604,15 @@ function plainTextEdits(text: string, target: LinkTarget): Edit[] {
   }
 }
 
-/** Apply non-overlapping edits. */
+/** Apply edits in order; one repeating an earlier range (an attribute renamed twice) is skipped. */
 function applyEdits(text: string, edits: readonly Edit[]): string {
   let output = '';
   let cursor = 0;
 
   for (const edit of [...edits].sort((a, b) => a.start - b.start)) {
+    if (edit.start < cursor) {
+      continue;
+    }
     output += text.slice(cursor, edit.start) + edit.text;
     cursor = edit.end;
   }

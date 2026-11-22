@@ -416,10 +416,15 @@ Unknown transform names are config errors.
 ### 4.5 Links in pages
 
 Rewriting runs on Markdown text outside fenced code, indented code, and inline code, covering
-inline links, images, reference definitions, autolinks, and `href`/`src` attributes in raw
-HTML. For each target:
+inline links, images, reference definitions, autolinks, and the URL attributes in raw HTML
+(`href`, `src`, each `srcset` candidate, `action`, `formaction`, `poster`, `data`,
+`xlink:href`). For each target:
 
-1. Fragment-only (`#x`): unchanged.
+1. Fragment-only (`#x`): unchanged. A target with a scheme other than `https`, `http`, or
+   `mailto` (`file:`, `javascript:`, `data:`, `tel:`, app schemes) goes to step 5 with reason
+   `disallowed-scheme`; the scheme is read as a browser reads it (case folded, character
+   references and backslash escapes decoded, tabs and line breaks dropped, leading spaces and
+   control characters skipped; a percent-encoded colon is not a scheme).
 2. Relative path that resolves (after stripping a `.md`, `.mdx`, `.markdown`, `.html`, `.htm`,
    or `.rst` extension or a trailing `/index`, the same normalization v2 uses for extensionless
    routes) to another acquired page of the same pack: rewritten to the relative path from this
@@ -436,9 +441,9 @@ HTML. For each target:
    For other hosts it goes to step 5.
 5. Anything else: converted to plain text `[label] (unresolved: target)` and recorded in
    `links.unresolved` with a reason (`not-found`, `not-in-pack`, `outside-source`,
-   `outside-repository`, `outside-pack-non-github-remote`, `site-absolute-without-base-url`, or
-   `malformed`). In raw HTML the attribute is renamed to `data-unresolved-href` or
-   `data-unresolved-src` instead.
+   `outside-repository`, `outside-pack-non-github-remote`, `site-absolute-without-base-url`,
+   `malformed`, or `disallowed-scheme`). In raw HTML the attribute is renamed to
+   `data-unresolved-<name>` (`data-unresolved-href`, `data-unresolved-src`, ...) instead.
 
 `verify` fails on a relative link in a page or index that does not resolve on disk, so the
 build never leaves one: a relative target is rewritten to a pack page or an absolute upstream
