@@ -12,6 +12,7 @@
  * function of the recipe and the upstream bytes (spec 2.5).
  */
 
+import type { Stats } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { join, posix, relative, resolve, sep } from 'node:path';
 
@@ -37,6 +38,37 @@ export const CITATIONS_LOCK_PATH = 'guides/citations.lock.json';
 // ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------
+
+/**
+ * The pack directory and its guides/ must each be a real directory, or absent.
+ * Sync builds into, moves, and deletes the pack directory and carries guides/
+ * across rebuilds, and stamp writes the citations lock into guides/, so a
+ * symbolic link at either would carry those writes to wherever it points.
+ * Refused, never followed and never repaired by deleting anything.
+ */
+export async function assertRealPackDirectories(packDir: string): Promise<void> {
+  for (const dir of [packDir, join(packDir, 'guides')]) {
+    let stats: Stats;
+
+    try {
+      stats = await lstat(dir);
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    if (stats.isSymbolicLink()) {
+      throw new ConfigError(
+        `${dir} is a symbolic link. llm-docs only builds packs and keeps guides in real directories, and never writes through a link; replace ${dir} with a real directory holding the files it points at, then run the command again.`
+      );
+    }
+    if (!stats.isDirectory()) {
+      throw new ConfigError(`${dir} is not a directory; move it away, then run the command again.`);
+    }
+  }
+}
 
 /** Pack-relative paths of the Markdown guides under `<packDir>/guides`, sorted. */
 export async function listGuides(packDir: string): Promise<string[]> {
@@ -474,6 +506,7 @@ export async function stampGuides(
   const lockPath = `${packLabel}/${CITATIONS_LOCK_PATH}`;
 
   return withPacksLock(loaded.packsDir, `llm-docs guides stamp ${packId}`, async () => {
+    await assertRealPackDirectories(packDir);
     if ((await realpathIfExists(packDir)) === undefined) {
       throw new ConfigError(
         `No pack directory ${packLabel}/; build the pack with 'llm-docs sync ${packId}' first.`

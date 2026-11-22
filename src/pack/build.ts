@@ -53,6 +53,7 @@ import { estimateTokenCount } from '../utils/text-metrics.js';
 import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type ReadFirstLink } from './index-page.js';
 import {
+  assertRealPackDirectories,
   listGuides,
   reviewGuidesAfterBuild,
   reviewGuidesForRefreshCheck,
@@ -532,6 +533,7 @@ async function inspectExistingPack(packsDir: string, id: string): Promise<Existi
   if (!(await exists(dir))) {
     return { kind: 'absent' };
   }
+  await assertRealPackDirectories(dir);
 
   try {
     const manifest = await readPackManifest(dir);

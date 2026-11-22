@@ -483,6 +483,41 @@ describe('syncPacks', () => {
   );
 
   it.skipIf(!canCreateSymlinks)(
+    'refuses a pack directory or guides/ that is a symbolic link, and builds nothing through it',
+    async () => {
+      const root = await makeProject({ demo: PACK }, DOCS);
+      await syncPacks(root, undefined);
+      const packs = join(root, 'agent-docs');
+      const outside = join(root, 'outside');
+      await cp(join(packs, 'demo'), outside, { recursive: true });
+      await rm(join(packs, 'demo'), { recursive: true });
+      await symlink(outside, join(packs, 'demo'), 'dir');
+      await writeFiles(root, { 'docs/index.md': '# Home, edited\n' });
+      const before = await snapshot(outside);
+
+      const report = await syncPacks(root, undefined);
+
+      expect(report.packs[0]).toMatchObject({ id: 'demo', status: 'failed', exitCode: 2 });
+      expect(report.packs[0]?.error).toBe(
+        `${join(packs, 'demo')} is a symbolic link. llm-docs only builds packs and keeps guides in real directories, and never writes through a link; replace ${join(packs, 'demo')} with a real directory holding the files it points at, then run the command again.`
+      );
+      expect(await snapshot(outside)).toEqual(before);
+
+      await rm(join(packs, 'demo'));
+      await cp(outside, join(packs, 'demo'), { recursive: true });
+      const guides = join(root, 'my-guides');
+      await writeFiles(guides, { 'g.md': '# G\n' });
+      await symlink(guides, join(packs, 'demo', 'guides'), 'dir');
+
+      const guidesLinked = await syncPacks(root, undefined);
+      expect(guidesLinked.packs[0]).toMatchObject({ status: 'failed', exitCode: 2 });
+      expect(guidesLinked.packs[0]?.error).toMatch(/demo[\\/]guides is a symbolic link\./);
+      expect(await snapshot(guides)).toEqual({ 'g.md': '# G\n' });
+      expect(await readdir(packs)).not.toContain('.staging');
+    }
+  );
+
+  it.skipIf(!canCreateSymlinks)(
     'refuses a packs .gitignore that is a symbolic link, leaving its target alone',
     async () => {
       const root = await makeProject({ demo: PACK }, DOCS);
