@@ -1,4 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import {
+  chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -7,6 +10,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -17,7 +21,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { canCreateSymlinks } from '../helpers/symlinks.js';
 
-import { writeTextFileSafely } from '../../src/utils/safe-write.js';
+import {
+  readRegularFile,
+  RefusedFileError,
+  writeTextFileSafely,
+} from '../../src/utils/safe-write.js';
 
 // The only way to make a real filesystem refuse the final rename on demand is to inject the
 // refusal at the fs boundary; every assertion still reads the real files back.
@@ -97,6 +105,54 @@ describe('writeTextFileSafely', () => {
     }
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'keeps the permission bits of the file it replaces, and creates new files with the default',
+    async () => {
+      // Windows has no POSIX permission bits: Node maps only the read-only attribute.
+      const dir = await makeTempDir();
+      const kept = join(dir, 'AGENTS.md');
+      await writeFile(kept, 'old\n');
+      await chmod(kept, 0o600);
+      const fresh = join(dir, 'new.md');
+
+      await writeTextFileSafely(kept, 'new\n');
+      await writeTextFileSafely(fresh, 'new\n');
+
+      expect((await stat(kept)).mode & 0o777).toBe(0o600);
+      expect(await readFile(kept, 'utf-8')).toBe('new\n');
+      expect((await stat(fresh)).mode & 0o777).toBe(0o666 & ~process.umask());
+    }
+  );
+
+  it('refuses to replace a read-only file, leaving it as it was', async () => {
+    const dir = await makeTempDir();
+    const path = join(dir, 'AGENTS.md');
+    await writeFile(path, 'protected\n');
+    await chmod(path, 0o444);
+
+    await expect(writeTextFileSafely(path, 'x')).rejects.toMatchObject({
+      refusal: { kind: 'read-only' },
+      message: `${path} is read-only`,
+    });
+    expect(await readFile(path, 'utf-8')).toBe('protected\n');
+    expect(await readdir(dir)).toEqual(['AGENTS.md']);
+    await chmod(path, 0o644);
+  });
+
+  it('refuses to replace a file with other hard links, so no link is left behind', async () => {
+    const dir = await makeTempDir();
+    const path = join(dir, 'AGENTS.md');
+    const other = join(dir, 'shared.md');
+    await writeFile(other, 'shared\n');
+    await link(other, path);
+
+    await expect(writeTextFileSafely(path, 'x')).rejects.toMatchObject({
+      refusal: { kind: 'hard-linked', links: 2 },
+    });
+    expect(await readFile(path, 'utf-8')).toBe('shared\n');
+    expect((await stat(path)).nlink).toBe(2);
+  });
+
   it('keeps the previous content and removes its temp file when the final rename fails', async () => {
     const dir = await makeTempDir();
     const path = join(dir, 'manifest.json');
@@ -136,5 +192,58 @@ describe('writeTextFileSafely', () => {
     expect(observed.has('partial')).toBe(false);
     expect(await readFile(path, 'utf-8')).toBe(next);
     expect(await readdir(dir)).toEqual(['big.txt']);
+  });
+});
+
+describe('readRegularFile', () => {
+  it('reads a regular file and rejects a missing one with ENOENT', async () => {
+    const dir = await makeTempDir();
+    await writeFile(join(dir, 'a.md'), 'text');
+
+    expect((await readRegularFile(join(dir, 'a.md'), { followLinks: false })).toString()).toBe(
+      'text'
+    );
+    await expect(
+      readRegularFile(join(dir, 'missing.md'), { followLinks: true })
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses a directory', async () => {
+    const dir = await makeTempDir();
+    await mkdir(join(dir, 'AGENTS.md'));
+
+    await expect(
+      readRegularFile(join(dir, 'AGENTS.md'), { followLinks: true })
+    ).rejects.toMatchObject({ refusal: { kind: 'not-regular', found: 'a directory' } });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a named pipe without blocking on it',
+    async () => {
+      // Windows has no named pipes in the file system namespace.
+      const dir = await makeTempDir();
+      const fifo = join(dir, 'AGENTS.md');
+      execFileSync('mkfifo', [fifo]);
+
+      for (const followLinks of [true, false]) {
+        await expect(readRegularFile(fifo, { followLinks })).rejects.toThrow(
+          new RefusedFileError(fifo, { kind: 'not-regular', found: 'a named pipe' })
+        );
+      }
+    },
+    5_000
+  );
+
+  it.skipIf(!canCreateSymlinks)('follows a symbolic link only when asked to', async () => {
+    const dir = await makeTempDir();
+    await writeFile(join(dir, 'target.md'), 'target');
+    await symlink(join(dir, 'target.md'), join(dir, 'link.md'));
+
+    expect((await readRegularFile(join(dir, 'link.md'), { followLinks: true })).toString()).toBe(
+      'target'
+    );
+    await expect(
+      readRegularFile(join(dir, 'link.md'), { followLinks: false })
+    ).rejects.toMatchObject({ refusal: { kind: 'not-regular', found: 'a symbolic link' } });
   });
 });

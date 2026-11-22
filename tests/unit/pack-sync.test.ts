@@ -482,6 +482,21 @@ describe('syncPacks', () => {
     }
   );
 
+  it.skipIf(!canCreateSymlinks)(
+    'refuses a packs .gitignore that is a symbolic link, leaving its target alone',
+    async () => {
+      const root = await makeProject({ demo: PACK }, DOCS);
+      await writeFiles(root, { 'outside.txt': 'outside\n' });
+      await mkdir(join(root, 'agent-docs'));
+      await symlink(join(root, 'outside.txt'), join(root, 'agent-docs', '.gitignore'));
+
+      await expect(syncPacks(root, undefined)).rejects.toThrow(
+        /\.gitignore is a symbolic link, not a regular file\. llm-docs adds \.staging and \.llm-docs\.lock to that file/
+      );
+      expect(await readFile(join(root, 'outside.txt'), 'utf-8')).toBe('outside\n');
+    }
+  );
+
   it('rejects output collisions that differ only by case or extension', async () => {
     const root = await makeProject(
       { demo: PACK },

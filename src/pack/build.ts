@@ -47,7 +47,7 @@ import {
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { renderCombinedPack } from './combined.js';
@@ -247,21 +247,30 @@ export async function ensurePacksDir(packsDir: string): Promise<void> {
   let current = '';
 
   try {
-    current = await readFile(gitignore, 'utf-8');
-  } catch (error) {
-    if (!isFileNotFoundError(error)) {
-      throw error;
+    try {
+      current = (await readRegularFile(gitignore, { followLinks: false })).toString('utf-8');
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        throw error;
+      }
     }
-  }
 
-  const lines = current.split(/\r?\n/).map((line) => line.trim());
-  const missing = PACKS_GITIGNORE.trimEnd()
-    .split('\n')
-    .filter((line) => !lines.includes(line));
+    const lines = current.split(/\r?\n/).map((line) => line.trim());
+    const missing = PACKS_GITIGNORE.trimEnd()
+      .split('\n')
+      .filter((line) => !lines.includes(line));
 
-  if (missing.length > 0) {
-    const prefix = current === '' || current.endsWith('\n') ? current : `${current}\n`;
-    await writeTextFileSafely(gitignore, `${prefix}${missing.join('\n')}\n`);
+    if (missing.length > 0) {
+      const prefix = current === '' || current.endsWith('\n') ? current : `${current}\n`;
+      await writeTextFileSafely(gitignore, `${prefix}${missing.join('\n')}\n`);
+    }
+  } catch (error) {
+    if (error instanceof RefusedFileError) {
+      throw new ConfigError(
+        `${error.message}. llm-docs adds ${STAGING_DIR} and ${LOCK_FILE} to that file so git ignores them, and only rewrites a writable regular file there; replace it with one (or add those two lines yourself), then run the command again.`
+      );
+    }
+    throw error;
   }
 }
 

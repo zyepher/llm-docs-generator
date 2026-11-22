@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   mkdir,
   mkdtemp,
@@ -415,6 +416,26 @@ describe('stampGuides', () => {
       "No pack directory agent-docs/demo/; build the pack with 'llm-docs sync demo' first."
     );
   });
+});
+
+describe('stampGuides refuses links and special files', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a citations lock that is a named pipe without blocking on it',
+    async () => {
+      // Windows has no named pipes in the file system namespace.
+      const root = await builtPack({ 'a.md': GUIDE_A });
+      execFileSync('mkfifo', [lockFile(root)]);
+
+      await expect(stamp(root)).rejects.toThrow(
+        /citations\.lock\.json is a named pipe, not a regular file, so llm-docs will not replace it\..*remove agent-docs\/demo\/guides\/citations\.lock\.json/
+      );
+      expect(await assessCitations(packDir(root))).toEqual({
+        kind: 'invalid-lock',
+        message: `${lockFile(root)} is a named pipe, not a regular file`,
+      });
+    },
+    5_000
+  );
 });
 
 describe('assessCitations', () => {

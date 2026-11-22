@@ -12,7 +12,7 @@
  * function of the recipe and the upstream bytes (spec 2.5).
  */
 
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { join, posix, relative, resolve, sep } from 'node:path';
 
 import { z } from 'zod';
@@ -21,8 +21,8 @@ import { ConfigError, formatSchemaIssues, type LoadedProjectConfig } from '../co
 import { isSameOrDescendant, realpathIfExists } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
-import { canonicalJsonStringify, readJsonFile } from '../utils/json.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { canonicalJsonStringify } from '../utils/json.js';
+import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { withPacksLock } from './lock.js';
@@ -237,9 +237,9 @@ function packFileReader(packDir: string): (path: string) => Promise<Buffer | und
       return undefined;
     }
     try {
-      return (await lstat(absolute)).isFile() ? await readFile(absolute) : undefined;
+      return await readRegularFile(absolute, { followLinks: false });
     } catch (error) {
-      if (isFileNotFoundError(error)) {
+      if (isFileNotFoundError(error) || error instanceof RefusedFileError) {
         return undefined;
       }
       throw error;
@@ -336,11 +336,24 @@ async function readCitationsLock(packDir: string): Promise<LockRead> {
   let raw: unknown;
 
   try {
-    raw = await readJsonFile(join(packDir, ...CITATIONS_LOCK_PATH.split('/')));
+    raw = JSON.parse(
+      (
+        await readRegularFile(join(packDir, ...CITATIONS_LOCK_PATH.split('/')), {
+          followLinks: false,
+        })
+      ).toString('utf-8')
+    );
   } catch (error) {
-    return isFileNotFoundError(error)
-      ? { kind: 'absent' }
-      : { kind: 'invalid', message: `not readable JSON (${errorMessage(error)})` };
+    if (isFileNotFoundError(error)) {
+      return { kind: 'absent' };
+    }
+    return {
+      kind: 'invalid',
+      message:
+        error instanceof RefusedFileError
+          ? error.message
+          : `not readable JSON (${errorMessage(error)})`,
+    };
   }
 
   const parsed = citationsLockSchema.safeParse(raw);
@@ -565,15 +578,25 @@ export async function stampGuides(
     let current: string | undefined;
 
     try {
-      current = await readFile(target, 'utf-8');
+      current = (await readRegularFile(target, { followLinks: false })).toString('utf-8');
+      // Equal bytes skip the write; a refused file still reaches the write, which refuses it.
     } catch (error) {
-      if (!isFileNotFoundError(error)) {
+      if (!isFileNotFoundError(error) && !(error instanceof RefusedFileError)) {
         throw error;
       }
     }
 
     if (current !== text) {
-      await writeTextFileSafely(target, text);
+      try {
+        await writeTextFileSafely(target, text);
+      } catch (error) {
+        if (error instanceof RefusedFileError) {
+          throw new ConfigError(
+            `${error.message}, so llm-docs will not replace it. The citations lock is a regular file only 'llm-docs guides stamp' writes; remove ${lockPath} (or make it writable), then run 'llm-docs guides stamp ${packId}' again.`
+          );
+        }
+        throw error;
+      }
     }
 
     return {

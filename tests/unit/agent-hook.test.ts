@@ -1,10 +1,22 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { canCreateSymlinks } from '../helpers/symlinks.js';
 
 import { HOOK_LIMITS, runSessionStartHook, type HookIo } from '../../src/agent/hook.js';
 import { syncPacks } from '../../src/pack/build.js';
@@ -136,6 +148,7 @@ interface RunOptions {
   now?: Date;
   elapsedMs?: () => number;
   harness?: 'claude-code' | 'cursor' | 'unknown';
+  onSpawn?: () => void;
 }
 
 async function runHook(options: RunOptions = {}): Promise<HookRun> {
@@ -161,7 +174,10 @@ async function runHook(options: RunOptions = {}): Promise<HookRun> {
     elapsedMs: options.elapsedMs ?? (() => 0),
     now: () => options.now ?? NOW,
     writeStdout: (text) => out.push(text),
-    spawnWarmStatus: (root) => spawned.push(root),
+    spawnWarmStatus: (root) => {
+      spawned.push(root);
+      options.onSpawn?.();
+    },
   };
 
   await runSessionStartHook(io);
@@ -630,6 +646,64 @@ describe('when the hook stays silent', () => {
     );
   });
 
+  it('logs that it printed its note when the deadline passes during the warm-up', async () => {
+    const root = await project();
+    const { 'npm:date-fns@2.30.0': _missing, ...known } = RELEASES;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const run = await runHook({
+        cache: await seededCache(known),
+        payload: { cwd: root, ...OPUS },
+        onSpawn: () => vi.advanceTimersByTime(HOOK_LIMITS.deadlineMs),
+      });
+
+      expect(injected(run)).toContain(DEPENDENCIES_HEADING);
+      expect(run.spawned).toEqual([root]);
+      expect(await hookLog(run.cache)).toMatch(
+        new RegExp(
+          `^\\S+ session-start missed its ${HOOK_LIMITS.deadlineMs} ms deadline while starting the background warm-up, after it printed its note\\n$`
+        )
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.skipIf(!canCreateSymlinks)(
+    'never writes hook.log through a symbolic link, and never rotates one into place',
+    async () => {
+      const cache = await seededCache();
+      const outside = join(await tempDir(), 'outside.txt');
+      await writeFile(outside, 'not the hook log\n');
+      await symlink(outside, join(cache, 'hook.log'));
+      const root = await project();
+
+      await runHook({ cache, payload: 'not json', env: { CLAUDE_PROJECT_DIR: root } });
+
+      expect(await readFile(outside, 'utf-8')).toBe('not the hook log\n');
+      expect((await readdir(cache)).sort()).toEqual(['hook.log', 'release-dates.json']);
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'treats a named pipe as an agent file as absent, logs it, and keeps its deadline',
+    async () => {
+      // Windows has no named pipes in the file system namespace.
+      const root = await project({ packs: { zod: ZOD_PINNED }, build: ['zod'] });
+      execFileSync('mkfifo', [join(root, 'AGENTS.md')]);
+      const started = Date.now();
+
+      const run = await runHook({ payload: { cwd: root, ...OPUS } });
+
+      expect(Date.now() - started).toBeLessThan(HOOK_LIMITS.deadlineMs);
+      expect(injected(run)).toContain('- Zod 4.0.0: `agent-docs/zod/index.md`');
+      expect(await hookLog(run.cache)).toContain(
+        'AGENTS.md is a named pipe, not a regular file; replace it with a regular file, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into. (treated as absent)'
+      );
+    },
+    10_000
+  );
+
   it('prints nothing, logs, and resolves when the run throws', async () => {
     const root = await project();
     const broken: AsyncIterable<string> = {
@@ -691,6 +765,28 @@ describe('background warm-up', () => {
     expect((await runHook(at(7))).spawned).toEqual([root]);
     expect((await readdir(join(cache, 'hook-warm'))).length).toBe(1);
   });
+});
+
+describe('background warm-up through links', () => {
+  it.skipIf(!canCreateSymlinks)(
+    'never writes the warm-up marker through a hook-warm/ that is a symbolic link',
+    async () => {
+      const root = await project();
+      const cache = await seededCache({
+        'npm:date-fns@2.30.0': RELEASES['npm:date-fns@2.30.0'] ?? '',
+      });
+      const outside = await tempDir();
+      await symlink(outside, join(cache, 'hook-warm'), 'dir');
+
+      const run = await runHook({ cache, payload: { cwd: root, ...OPUS } });
+
+      expect(run.spawned).toEqual([]);
+      expect(await readdir(outside)).toEqual([]);
+      expect(await hookLog(cache)).toContain(
+        `${join(cache, 'hook-warm')} is not a directory; skipped the background warm-up`
+      );
+    }
+  );
 });
 
 describe('managed block visibility', () => {

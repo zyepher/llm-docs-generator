@@ -1,4 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import {
+  chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -181,6 +184,75 @@ describe('agent file resolution', () => {
       );
       expect(await readFile(join(outside, 'CLAUDE.md'), 'utf-8')).toBe('# Elsewhere\n');
     }
+  );
+});
+
+describe('agent files the tool refuses to write', () => {
+  it('keeps the permission bits of an agent file it rewrites', async () => {
+    const root = await makeProject({ 'AGENTS.md': '# Agents\n' });
+    await chmod(join(root, 'AGENTS.md'), 0o600);
+
+    expect(await syncBlocks(root)).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+    // Windows keeps only the read-only attribute, which a writable file does not have.
+    expect((await stat(join(root, 'AGENTS.md'))).mode & 0o777).toBe(
+      process.platform === 'win32' ? 0o666 : 0o600
+    );
+  });
+
+  it('refuses a read-only agent file, leaving it untouched', async () => {
+    const root = await makeProject({ 'AGENTS.md': '# Agents\n' });
+    await chmod(join(root, 'AGENTS.md'), 0o444);
+
+    expect(await syncBlocks(root)).toEqual([
+      {
+        path: 'AGENTS.md',
+        status: 'failed',
+        exitCode: 2,
+        error:
+          'AGENTS.md is read-only, so llm-docs will not rewrite it; make it writable to let sync update the llm-docs block, or leave AGENTS.md out of "agentFiles" in llm-docs.json.',
+      },
+    ]);
+    expect(await read(root, 'AGENTS.md')).toBe('# Agents\n');
+    await chmod(join(root, 'AGENTS.md'), 0o644);
+  });
+
+  it('refuses a hard-linked agent file, so the other link never misses the block', async () => {
+    const root = await makeProject({ 'shared.md': '# Shared\n' });
+    await link(join(root, 'shared.md'), join(root, 'AGENTS.md'));
+
+    expect(await syncBlocks(root)).toEqual([
+      {
+        path: 'AGENTS.md',
+        status: 'failed',
+        exitCode: 2,
+        error:
+          'AGENTS.md has 2 hard links, so replacing it would leave the other links without the llm-docs block; replace the links with a single file (a symbolic link to it is fine), or list the real file in "agentFiles" in llm-docs.json.',
+      },
+    ]);
+    expect((await stat(join(root, 'AGENTS.md'))).nlink).toBe(2);
+    expect(await read(root, 'shared.md')).toBe('# Shared\n');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a named pipe as an agent file without blocking, and a harness treats it as absent',
+    async () => {
+      // Windows has no named pipes in the file system namespace.
+      const root = await makeProject({});
+      execFileSync('mkfifo', [join(root, 'AGENTS.md')]);
+      const message =
+        'AGENTS.md is a named pipe, not a regular file; replace it with a regular file, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into.';
+
+      expect(await syncBlocks(root)).toEqual([
+        { path: 'AGENTS.md', status: 'failed', exitCode: 2, error: message },
+      ]);
+      expect(await checkAgentBlocks(await loadProjectConfig(root))).toEqual([
+        { status: 'fail', path: 'AGENTS.md', message },
+      ]);
+      const ignored: string[] = [];
+      expect(await harnessSeesBlock(root, 'codex', (problem) => ignored.push(problem))).toBe(false);
+      expect(ignored).toEqual([`${message} (treated as absent)`]);
+    },
+    5_000
   );
 });
 
@@ -482,7 +554,7 @@ describe('syncAgentBlocks', () => {
       { packs: { docs: { version: '1.0.0', sources: [{ type: 'local', path: 'docs' }] } } }
     );
     const message =
-      'AGENTS.md is a directory, not a file; rename it, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into.';
+      'AGENTS.md is a directory, not a regular file; replace it with a regular file, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into.';
 
     const report = await syncPacks(root, undefined);
     expect(report.packs).toMatchObject([{ id: 'docs', status: 'built' }]);

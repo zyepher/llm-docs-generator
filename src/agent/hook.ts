@@ -12,8 +12,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { writeSync } from 'node:fs';
-import { appendFile, mkdir, readFile, rename, stat } from 'node:fs/promises';
+import { constants, writeSync } from 'node:fs';
+import { lstat, mkdir, open, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -23,7 +23,7 @@ import { defaultCacheDir, type RegistryEndpoints } from '../deps/registries.js';
 import { formatStatusBrief, gatherProjectStatus, type ProjectStatus } from '../deps/status.js';
 import { errorMessage, isNonEmptyString, isRecord } from '../utils/guards.js';
 import { sha256Hex } from '../utils/hash.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { readRegularFile, writeTextFileSafely } from '../utils/safe-write.js';
 import { blockBody, harnessSeesBlock, type Harness } from './block.js';
 
 /** Every budget the hook keeps, in milliseconds counted from process start unless noted. */
@@ -217,11 +217,12 @@ function envelope(harness: Harness | 'unknown', text: string): string {
  */
 export async function sessionBrief(
   status: ProjectStatus,
-  harness: Harness | 'unknown'
+  harness: Harness | 'unknown',
+  ignored?: (problem: string) => void
 ): Promise<string> {
   const head = formatStatusBrief(status.report, { maxChars: HOOK_LIMITS.maxChars });
 
-  if (status.loaded === null || (await harnessSeesBlock(status.projectRoot, harness))) {
+  if (status.loaded === null || (await harnessSeesBlock(status.projectRoot, harness, ignored))) {
     return head;
   }
 
@@ -243,33 +244,63 @@ export async function sessionBrief(
  */
 async function maybeWarm(io: HookIo, cacheDir: string, projectRoot: string): Promise<void> {
   const marker = join(cacheDir, WARM_DIR, sha256Hex(projectRoot).slice(0, 16));
-  const last = Date.parse((await readFile(marker, 'utf-8').catch(() => '')).trim());
-  const since = io.now().getTime() - last;
+  const text = await readRegularFile(marker, { followLinks: false }).then(
+    (bytes) => bytes.toString('utf-8'),
+    () => ''
+  );
+  const since = io.now().getTime() - Date.parse(text.trim());
 
   if (Number.isFinite(since) && since >= 0 && since < HOOK_LIMITS.warmIntervalMs) {
     return;
   }
 
   await mkdir(dirname(marker), { recursive: true });
+  // A link at hook-warm/ would carry the marker write to wherever it points.
+  if (!(await lstat(dirname(marker))).isDirectory()) {
+    throw new Error(`${dirname(marker)} is not a directory; skipped the background warm-up`);
+  }
   await writeTextFileSafely(marker, `${io.now().toISOString()}\n`);
   io.spawnWarmStatus(projectRoot);
 }
 
-/** Append one line to `<cacheDir>/hook.log`, first moving it to hook.log.1 when full. Never throws. */
+/**
+ * Append one line to `<cacheDir>/hook.log`, first moving it to hook.log.1 when
+ * full. Never throws. Writes only into a regular file with one link: a
+ * symbolic or hard link there would carry the line into some other file, and
+ * opening a named pipe would block the hook.
+ */
 async function appendHookLog(io: HookIo, cacheDir: string, message: string): Promise<void> {
   const path = join(cacheDir, LOG_FILE);
   const line = `${io.now().toISOString()} ${message.replace(/\s*\n\s*/g, ' ')}\n`;
 
   try {
     await mkdir(cacheDir, { recursive: true });
-    const size = await stat(path).then(
-      (entry) => entry.size,
-      () => 0
-    );
-    if (size > 0 && size + Buffer.byteLength(line) > HOOK_LIMITS.logMaxBytes) {
+    const existing = await lstat(path).catch(() => undefined);
+    if (existing !== undefined && !existing.isFile()) {
+      return;
+    }
+    if (
+      existing !== undefined &&
+      existing.size + Buffer.byteLength(line) > HOOK_LIMITS.logMaxBytes
+    ) {
       await rename(path, `${path}.1`);
     }
-    await appendFile(path, line);
+    const handle = await open(
+      path,
+      constants.O_WRONLY |
+        constants.O_APPEND |
+        constants.O_CREAT |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0)
+    );
+    try {
+      const opened = await handle.stat();
+      if (opened.isFile() && opened.nlink === 1) {
+        await handle.write(line);
+      }
+    } finally {
+      await handle.close();
+    }
   } catch {
     // The log is the hook's only error channel; with it gone, staying silent is the policy.
   }
@@ -289,6 +320,7 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
   const log = (message: string): Promise<void> => appendHookLog(io, cacheDir, message);
   const left = (): number => HOOK_LIMITS.deadlineMs - io.elapsedMs();
   let expired = false;
+  let printed = false;
 
   const run = async (): Promise<void> => {
     let payload = EMPTY_PAYLOAD;
@@ -348,7 +380,11 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
     for (const problem of ignoredCutoffs) {
       await log(`${problem}; ignored it`);
     }
-    const text = await sessionBrief(status, harness);
+    const ignored: string[] = [];
+    const text = await sessionBrief(status, harness, (problem) => ignored.push(problem));
+    for (const problem of ignored) {
+      await log(problem);
+    }
 
     if (expired || left() < 0) {
       expired = true;
@@ -356,6 +392,7 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
     }
     if (text !== '') {
       io.writeStdout(envelope(harness, text));
+      printed = true;
     }
     if (status.pendingReleaseDates > 0) {
       await maybeWarm(io, cacheDir, projectRoot);
@@ -379,6 +416,10 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
   }
 
   if (expired) {
-    await log(`session-start missed its ${HOOK_LIMITS.deadlineMs} ms deadline; printed nothing`);
+    await log(
+      printed
+        ? `session-start missed its ${HOOK_LIMITS.deadlineMs} ms deadline while starting the background warm-up, after it printed its note`
+        : `session-start missed its ${HOOK_LIMITS.deadlineMs} ms deadline; printed nothing`
+    );
   }
 }
