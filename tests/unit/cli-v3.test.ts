@@ -95,6 +95,8 @@ async function runHook(
         resolveResult({ code, stdout, stderr });
       }
     );
+    // The hook may exit without reading its payload (switched off, or past its deadline).
+    child.stdin?.on('error', () => undefined);
     child.stdin?.end(payload);
   });
   return { ...result, log: await readFile(logPath, 'utf-8').catch(() => '') };

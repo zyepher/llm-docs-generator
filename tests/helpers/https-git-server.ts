@@ -132,6 +132,8 @@ export async function gitHttpBackend(
       });
       const output: Buffer[] = [];
       child.stdout.on('data', (chunk: Buffer) => output.push(chunk));
+      // git http-backend answers some requests without reading the body.
+      child.stdin.on('error', () => undefined);
       child.stdin.end(body);
       child.on('close', () => {
         const raw = Buffer.concat(output);
