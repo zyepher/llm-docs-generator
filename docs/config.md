@@ -85,7 +85,19 @@ Default `include` for `git` and `local` sources is `**/*.{md,mdx,markdown,rst,ht
 |---|---|---|---|
 | `repo` | string | required | An `https://` URL without credentials: no user name or password, and no token, key, signature, or similar parameter. `file://` is accepted with a warning that the origin is not portable. `ssh://` and `git@` remotes are rejected. |
 | `ref` | string | required | A tag, a branch, or a 40-hex commit. A branch is accepted with a warning that the pin floats until the next sync records a new commit. |
-| `paths` | string array | `["."]` (the whole repository) | Repository-relative directories or files to take. No absolute paths and no `..`. |
+| `paths` | string array | `["."]` (the whole repository) | Repository-relative directories or files to take. No absolute paths and no `..`. Files are stored relative to the common root of these paths; see below. |
+
+Every taken file is stored by its path relative to the common root of `paths`: the deepest directory that holds every entry, where a file entry counts as the directory it is in. That stored path is what `include`, `exclude`, and `passthrough` match, and the file's output is `pages/<mount>/<stored path>` (or `files/<mount>/<stored path>`).
+
+| `paths` | Common root | `docs/guide/start.md` is stored as |
+|---|---|---|
+| `["."]` (the default) | the repository root | `docs/guide/start.md` |
+| `["docs"]` | `docs` | `guide/start.md` |
+| `["docs/guide", "docs/index.md"]` | `docs` | `guide/start.md` |
+| `["docs/guide/start.md"]` | `docs/guide` | `start.md` |
+| `["README.md", "docs/guide"]` | the repository root | `docs/guide/start.md` |
+
+So one file lands directly under `pages/` or `files/`, without its directories: `"paths": ["schema/2026-07-28/schema.ts"]` with a passthrough glob gives `files/schema.ts`. Set `mount` to put it in a directory, such as `"mount": "schema"` for `files/schema/schema.ts`. Write `include`, `exclude`, and `passthrough` globs against the stored path, not the repository path: with `"paths": ["docs"]`, exclude the blog with `**/blog/**` or `blog/**`, not `docs/blog/**`. The stored path, without its extension, is also the page's path on the website for [`site`](#pack-keys) links, so `paths` whose stored paths mirror the site's URL paths let links to the site resolve to pages. Stored paths are distinct within a source, and two files that would land on one output path (from two sources, or paths that differ only by case) are a config error naming both.
 
 llm-docs never sends credentials to git, and it clears git's credential helpers, so it cannot fetch a private repository. To pin docs from one, copy them into a folder in the project and use a [`local`](#local) source.
 

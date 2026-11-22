@@ -210,6 +210,23 @@ describe('acquireGit', () => {
       await context()
     );
     expect(two.files.map((file) => file.path).sort()).toEqual(['guide/start.md', 'index.md']);
+
+    // One file is taken from its own directory, so only its name is left.
+    const file = await acquireGit(
+      gitSource(repo.url, 'v1', { paths: ['docs/guide/start.md'] }),
+      await context()
+    );
+    expect(file.files.map((entry) => entry.path)).toEqual(['start.md']);
+
+    // A file and a directory at different depths share only the repository root.
+    const mixed = await acquireGit(
+      gitSource(repo.url, 'v1', { paths: ['README.md', 'docs/guide'] }),
+      await context()
+    );
+    expect(mixed.files.map((entry) => entry.path).sort()).toEqual([
+      'README.md',
+      'docs/guide/start.md',
+    ]);
   });
 
   it('rejects an included symlink, ignores others, and never fetches submodules', async () => {
