@@ -158,7 +158,9 @@ Rules:
 - `version` must be a non-empty string without whitespace, `<`, `>`, or control characters. It
   need not be semver (`2026-07-28`
   is a valid version for a protocol revision).
-- `dependency.ecosystem` is one of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`.
+- `dependency.ecosystem` is one of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`, `toolchain`.
+  For `toolchain`, `dependency.name` is one of `go`, `python`, `rust`, `swift`, `dart`,
+  `flutter`, `node`, and the version comes from the project's version files (6.1).
 - `covers` lists 1 to 20 more dependencies, in the shape of `dependency` and under its rules,
   that the pack's docs also describe (one docs set for a family: `@modelcontextprotocol/server`
   and `@modelcontextprotocol/client`, `@tanstack/*`, the `effect` packages). No two may name the
@@ -760,14 +762,14 @@ characters, and a name that follows its registry's rule; any other entry is skip
 warning naming the lockfile and the package:
 
 ```ts
-type Ecosystem = 'npm' | 'pypi' | 'cargo' | 'go' | 'pub' | 'swiftpm'
+type Ecosystem = 'npm' | 'pypi' | 'cargo' | 'go' | 'pub' | 'swiftpm' | 'toolchain'
 interface ResolvedDependency {
   ecosystem: Ecosystem
   name: string                 // registry name; npm scoped names kept as @scope/name
   version: string              // exact resolved version
   direct: boolean              // declared by the project manifest next to the lockfile
   dev: boolean
-  lockfile: string             // project-relative POSIX path
+  lockfile: string             // project-relative POSIX path; for a toolchain, its version file
   repositoryUrl?: string       // known for swiftpm and go
 }
 interface DependencyScan {
@@ -806,6 +808,50 @@ name says nothing about a private one. A lookup that finds a dependency only the
 Name normalization: PyPI names are PEP 503 normalized; others exact. Parsers never execute
 project code. TOML is parsed with `smol-toml`.
 
+The same walk also reads the project's language and toolchain versions (`src/deps/toolchains.ts`)
+as the `toolchain` ecosystem, whose names are a closed set: `go`, `python`, `rust`, `swift`,
+`dart`, `flutter`, `node`. Its "lockfiles" are the version files below, read with the lockfile
+rules (never through a symbolic link, the same size cap, nothing run), at most 200 of them,
+the shallowest first. A toolchain is tracked at its feature release, `major.minor`, or `major`
+when the file states only a major: `3.15.2` is tracked as `3.15`. A channel name, a
+pre-release, or a range without a lower bound states nothing. An exact pin wins over a minimum:
+within one directory one declaration per toolchain is kept (a pin before a minimum, then the
+file order below), and across the project a pin drops every minimum of its toolchain. What
+remains are ordinary direct dependencies (`lockfile` names the version file), so two different
+versions are a conflict exactly as two lockfiles are. `lockfiles` does not list version files
+that are not lockfiles, and a toolchain lookup that finds nothing has an empty `searched`.
+
+| File | What it declares |
+|---|---|
+| `go.mod`, `go.work` | `toolchain go<V>`: go pin. Otherwise `go <V>`: go minimum (also when the `toolchain` value names no version, such as `default` or `local`). |
+| `.python-version` | First line that is not blank and not a `#` comment: python pin. |
+| `Pipfile` | `requires.python_full_version`, else `requires.python_version`: python pin. |
+| `pyproject.toml` | `project.requires-python`, else `tool.poetry.dependencies.python`: python minimum. |
+| `rust-toolchain.toml` | `toolchain.channel`: rust pin. |
+| `rust-toolchain` | With a `[toolchain]` line, as `rust-toolchain.toml`; otherwise the first non-blank line: rust pin. |
+| `Cargo.toml` | `package.rust-version`, else `workspace.package.rust-version`: rust minimum. |
+| `.swift-version` | First non-blank line: swift pin. |
+| `Package.swift` | The `// swift-tools-version:` comment among the comment lines at the top: swift minimum. |
+| `pubspec.yaml` | `environment.sdk`: dart minimum. `environment.flutter`: flutter minimum. |
+| `pubspec.lock` | `sdks.dart`: dart minimum. `sdks.flutter`: flutter minimum. |
+| `.fvmrc` | `flutter`: flutter pin. |
+| `.nvmrc`, `.node-version` | First line that is not blank and not a `#` comment: node pin. |
+| `package.json` | `volta.node`: node pin. Otherwise `engines.node`: node minimum. |
+| `.tool-versions` | Per line `<tool> <version>` (`golang`/`go`, `python`, `rust`, `swift`, `dart`, `flutter` with a `-stable` suffix dropped, `nodejs`/`node`): a pin; the first line for a tool wins. |
+
+A minimum is the lowest version its constraint allows (`>=3.11,<3.14` is `3.11`, `^20.0.0 ||
+^22.0.0` is `20.0`). File order per toolchain, which breaks a tie in one directory:
+
+| Toolchain | Order |
+|---|---|
+| go | `go.work`, `go.mod`, `.tool-versions` |
+| python | `.python-version`, `.tool-versions`, `Pipfile`, `pyproject.toml` |
+| rust | `rust-toolchain`, `rust-toolchain.toml`, `.tool-versions`, `Cargo.toml` |
+| swift | `.swift-version`, `.tool-versions`, `Package.swift` |
+| dart | `.tool-versions`, `pubspec.yaml`, `pubspec.lock` |
+| flutter | `.fvmrc`, `.tool-versions`, `pubspec.yaml`, `pubspec.lock` |
+| node | `.nvmrc`, `.node-version`, `package.json`, `.tool-versions` |
+
 ### 6.2 Release dates
 
 `lookupReleaseDates(deps, { offline, budgetMs })` returns publish timestamps, cached in the user
@@ -825,6 +871,18 @@ cached. Lookups run 4 at a time with a 5 s timeout each.
 | go | `https://proxy.golang.org/<escaped module>/@v/<version>.info` `Time` |
 | pub | `https://pub.dev/api/packages/<name>` `versions[].published` |
 | swiftpm | GitHub repositories only: the commit date of the tag (as written, then with a `v` prefix; annotated tags dereferenced) via `api.github.com` (uses `GITHUB_TOKEN` when set); others unknown |
+| toolchain go | `https://go.dev/doc/devel/release` (HTML): the `(released YYYY-MM-DD)` date of the entry whose id is `goX.Y.0`, else `goX.Y` |
+| toolchain python | `https://www.python.org/api/v2/downloads/release/?name=Python%20X.Y.0`: `release_date` of the entry named exactly `Python X.Y.0` |
+| toolchain rust | `https://static.rust-lang.org/manifests.txt`: the date in the path `dist/<YYYY-MM-DD>/channel-rust-X.Y.0.toml` |
+| toolchain swift | `https://www.swift.org/api/v1/install/releases.json`: `date` of the entry named `X.Y` or `X.Y.0` |
+| toolchain dart | `https://storage.googleapis.com/storage/v1/b/dart-archive/o/channels%2Fstable%2Frelease%2FX.Y.0%2FVERSION` `timeCreated` |
+| toolchain flutter | `https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json`: the earliest `release_date` of a `stable` entry whose version is `X.Y.0` or `vX.Y.0` |
+| toolchain node | `https://nodejs.org/dist/index.json`: `date` of the entry whose version is `vX.Y.0` |
+
+A toolchain version is dated by its feature release (`X.Y.0`), whatever patch the project
+states. A name outside the seven, or a version that is not one, is unsupported. A feed that
+does not list the release is a confirmed absence, cached for 24 hours. Each toolchain response
+is capped at 5 MiB.
 
 `budgetMs` bounds total wall time; unfinished lookups return `null` and are retried next time.
 Only the hook passes a budget; `status` waits for every lookup.
@@ -1214,7 +1272,9 @@ writes files.
   Without a version it uses the registry's latest (for swiftpm, the latest semver tag) and
   records which in `package.versionSource`. Ecosystems: npm, pypi, cargo, pub, go (swiftpm: the
   repository URL, `https://` or `file://`, is the identity). A package or version that does not
-  exist is reported in the JSON with exit 0; an unreachable registry is exit 3.
+  exist is reported in the JSON with exit 0; an unreachable registry is exit 3. A `toolchain`
+  is refused as a usage error (exit 2): a language's docs are not a registry package, so the
+  planner finds its docs repository (the add-docs skill lists where to look) and uses `--repo`.
   From the same tree, `changeDocuments`: files whose name or a directory on their path names a
   description of change (case-insensitive, by words: `CHANGELOG`, `CHANGES`, `HISTORY`,
   `RELEASES`, `RELEASE_NOTES`/`release-notes`, `MIGRATION`/`migrating`/`migrate`,

@@ -189,6 +189,8 @@ Pack states:
 | `missing` | Configured but not built, or its manifest cannot be read (missing, not JSON, or not a regular file). | `llm-docs sync <id>`. |
 | `orphan` | Built but no longer in the config. | `llm-docs sync --prune`, or add it back. |
 
+For a pack bound to a toolchain (see [Languages and toolchains](config.md#languages-and-toolchains)), the lockfile in `not-in-lockfile`, `lockfile-conflict`, and `lockfile-unread` means the project's version files, such as `.python-version` or `go.mod`, and a toolchain's release date is the date of its feature release (`X.Y.0`).
+
 - `--model <id>` takes a model id or a Claude Code alias. Without it, `status` uses `ANTHROPIC_MODEL`, then the `model` in Claude Code's settings files, as the hook does. A settings file that is not a regular file is skipped with a warning. The report prints the model and where its id came from. A settings file holds only a default that a session can override, so a cutoff found through one is marked as assumed, and the note words it as an assumption.
 - `--cutoff YYYY-MM` sets the cutoff directly. A malformed cutoff, from the option, `model.cutoff`, or `LLM_DOCS_MODEL_CUTOFF`, exits `2`. (The session-start hook instead logs a malformed `LLM_DOCS_MODEL_CUTOFF` and skips it.)
 - `--offline` uses cached release dates only. Without it, missing dates are fetched from the registries and cached.
@@ -252,7 +254,7 @@ Reads a v2 pack's `manifest.json` (schema `0.1.0`, mode `local-source-docs`) and
 
 Prints read-only evidence for writing a recipe, always as JSON on stdout, with a summary on stderr. It writes no files. Pass exactly one of `--package`, `--repo`, and `--url`:
 
-- `--package <ecosystem>:<name>[@<version>]`: registry metadata (repository URL and directory, homepage, documentation URL, license, the version's publish date), the git tags that match the version, the top documentation directories at the matching tag (ranked by Markdown file count), and `changeDocuments`, the changelog, migration, and upgrade files at that tag. Without a version it uses the latest. For `swiftpm`, the name is the repository URL.
+- `--package <ecosystem>:<name>[@<version>]`: registry metadata (repository URL and directory, homepage, documentation URL, license, the version's publish date), the git tags that match the version, the top documentation directories at the matching tag (ranked by Markdown file count), and `changeDocuments`, the changelog, migration, and upgrade files at that tag. Without a version it uses the latest. For `swiftpm`, the name is the repository URL. It does not take a `toolchain`: a language's docs are not a registry package, so find its docs repository and use `--repo`.
 - `--repo <url>[@<version or tag>]`: the same evidence as `--package` for a repository that is not a package, such as a protocol specification: the git tags that match, the documentation directories at the matching tag, and the change documents. The URL is an `https://` URL, or a `file://` URL for a repository on this machine; the text after the first `@` in its path is a version or a tag name (`2026-07-28`, `v1.2.0`, `pkg@1.2.0`). Without one, the latest semver tag stands in. `registry` is `not-applicable` and `package.ecosystem` is `null`.
 - `--url <site>`: the site's `llms.txt` and `sitemap.xml`, whether pages serve raw Markdown when `.md` is appended (at most 3 probes), the version-looking path segments its `llms.txt` uses, and `pathPrefixes`: the leading path prefixes of the same-origin URLs it lists, with counts, each cut after its first version segment when it has one (`/specification/2026-07-28`), at the same depth when its siblings have one (`/specification/draft`), else after its first directory (`/seps`). Those prefixes are what an `--include` glob starts with: `--include '/specification/{version}/**'`. The summary prints the top six.
 
@@ -270,7 +272,7 @@ Use it before `add`: the [`add-docs` skill](../plugin/skills/add-docs/SKILL.md) 
 
 Describes what this build supports. Exit `0`.
 
-`--json`: `name`, `version`, `commands[]` (`name`, `summary`, `status`, and `options[]` of `{ flags, description }`), `sourceTypes`, `converters` (each with its install command), `ecosystems`, `transforms`, `checks` (`pack` and `project`), and `limits` (`maxFiles`, `maxTotalBytes`, `defaultMaxFileBytes`, `maxMaxFileBytes`). Without `--json`, it prints the command list on stdout.
+`--json`: `name`, `version`, `commands[]` (`name`, `summary`, `status`, and `options[]` of `{ flags, description }`), `sourceTypes`, `converters` (each with its install command), `ecosystems`, `toolchains` (the names a `toolchain` dependency takes), `transforms`, `checks` (`pack` and `project`), and `limits` (`maxFiles`, `maxTotalBytes`, `defaultMaxFileBytes`, `maxMaxFileBytes`). Without `--json`, it prints the command list on stdout.
 
 ## `hook session-start`
 

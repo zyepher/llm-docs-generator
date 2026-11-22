@@ -47,8 +47,8 @@ A pack id matches `^[a-z0-9][a-z0-9._-]{0,63}$`. It is the pack's directory name
 | `title` | string | the pack id | Non-empty. Shown in the index, the managed block, `status`, and the hook note. |
 | `description` | string | none | One line shown after the pack in the managed block, escaped (see [Escaping](#escaping)). |
 | `dependency` | object | none | `{ "ecosystem": ..., "name": ... }`. Binds the pack to a dependency the lockfiles resolve. |
-| `dependency.ecosystem` | string | required | One of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`. |
-| `dependency.name` | string | required | The registry name as the lockfile spells it, such as `@scope/name`. PyPI names are matched after PEP 503 normalization. |
+| `dependency.ecosystem` | string | required | One of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`, `toolchain`. |
+| `dependency.name` | string | required | The registry name as the lockfile spells it, such as `@scope/name`. PyPI names are matched after PEP 503 normalization. For `toolchain`, one of `go`, `python`, `rust`, `swift`, `dart`, `flutter`, `node` (see [Languages and toolchains](#languages-and-toolchains)). |
 | `covers` | object array | none | 1 to 20 more dependencies these docs also describe, each `{ "ecosystem": ..., "name": ... }` with the same rules as `dependency`. Distinct, and none equal to `dependency`. Binds no version. See [`covers`](#covers). |
 | `version` | string | the lockfile version | Required unless `dependency` is set. No whitespace, no `<` or `>`, no control characters. Need not be semver: `2026-07-28` is valid. |
 | `sources` | array | required | At least one source. See [Sources](#sources). |
@@ -63,6 +63,66 @@ A pack id matches `^[a-z0-9][a-z0-9._-]{0,63}$`. It is the pack's directory name
 
 - With `version` set, the pack uses it. When `dependency` is also set and the lockfile resolves another version, the `lockfile` check of `verify` fails, because the point of binding a dependency is that the two agree.
 - With only `dependency`, the version is the one the project's lockfiles resolve. No lockfile entry is a config error that names the lockfiles searched. Two lockfiles that resolve different versions is a config error that lists each; set `version` to choose one.
+
+### Languages and toolchains
+
+A pack can bind to the language or toolchain the project is written against: `"dependency": { "ecosystem": "toolchain", "name": "python" }`, where the name is one of `go`, `python`, `rust`, `swift`, `dart`, `flutter`, or `node`. Its version then comes from the project's own version files instead of a lockfile, and `sync`, `verify`, and `status` follow it as they follow a lockfile. Its release date is the date of the feature release, from the vendor's release feed.
+
+Two rules decide the version:
+
+1. **A toolchain is tracked at its feature release**, written `major.minor` (`3.15`, `6.4`, `1.27`), or `major` alone when the file states only a major (`22`). Patch releases do not change a language, so `3.15.2` in `.python-version` is tracked as `3.15`.
+2. **An exact pin wins over a minimum.** A file that names the version in use (`.python-version`, the `toolchain` line of `go.mod`) is a pin. A file that states a lower bound (`requires-python = ">=3.12"`, the `go` line, `// swift-tools-version:`) is a minimum, and the minimum is the version tracked. Within one directory, one declaration per toolchain is kept: a pin before a minimum, then the file order below. Across the project, when any kept declaration of a toolchain is a pin, its minimums are dropped. Two different versions left after that are a conflict, exactly as two lockfiles that disagree are.
+
+Files read:
+
+| File | What is read | Kind |
+|---|---|---|
+| `go.mod`, `go.work` | The `toolchain go<version>` line; when there is none, or it names no version (`default`, `local`), the `go <version>` line. | `toolchain` line: pin. `go` line: minimum. |
+| `.python-version` | The first line that is not blank and not a `#` comment. | pin |
+| `Pipfile` | `requires.python_full_version`, else `requires.python_version`. | pin |
+| `pyproject.toml` | `project.requires-python`, else `tool.poetry.dependencies.python`, at its lowest allowed version. | minimum |
+| `rust-toolchain.toml` | `toolchain.channel`. | pin |
+| `rust-toolchain` | The `[toolchain]` table when it has one (as `rust-toolchain.toml`), else the first non-blank line. | pin |
+| `Cargo.toml` | `package.rust-version`, else `workspace.package.rust-version`. | minimum |
+| `.swift-version` | The first non-blank line. | pin |
+| `Package.swift` | The `// swift-tools-version:` comment among the comment lines at the top. | minimum |
+| `pubspec.yaml` | `environment.sdk` (Dart) and `environment.flutter` (Flutter), at their lowest allowed versions. | minimum |
+| `pubspec.lock` | `sdks.dart` and `sdks.flutter`, at their lowest allowed versions. | minimum |
+| `.fvmrc` | `flutter`. | pin |
+| `.nvmrc`, `.node-version` | The first line that is not blank and not a `#` comment. | pin |
+| `package.json` | `volta.node`; else `engines.node`, at its lowest allowed version. | `volta.node`: pin. `engines.node`: minimum. |
+| `.tool-versions` | One `<tool> <version>` per line: `golang` or `go`, `python`, `rust`, `swift`, `dart`, `flutter` (a `-stable` suffix dropped), `nodejs` or `node`. The first line for a tool wins. | pin |
+
+File order per toolchain, which breaks a tie between two declarations of the same kind in one directory:
+
+| Toolchain | Order |
+|---|---|
+| `go` | `go.work`, `go.mod`, `.tool-versions` |
+| `python` | `.python-version`, `.tool-versions`, `Pipfile`, `pyproject.toml` |
+| `rust` | `rust-toolchain`, `rust-toolchain.toml`, `.tool-versions`, `Cargo.toml` |
+| `swift` | `.swift-version`, `.tool-versions`, `Package.swift` |
+| `dart` | `.tool-versions`, `pubspec.yaml`, `pubspec.lock` |
+| `flutter` | `.fvmrc`, `.tool-versions`, `pubspec.yaml`, `pubspec.lock` |
+| `node` | `.nvmrc`, `.node-version`, `package.json`, `.tool-versions` |
+
+A channel name (`stable`, `lts/*`, `nightly-2026-01-01`, `system`), a pre-release (`3.13-dev`, `1.27rc1`), or a range without a lower bound (`<4`, `*`) states nothing, so that file does not count. `mise.toml`, `.go-version`, `runtime.txt`, `devEngines` in `package.json`, and Xcode build settings are not read. The files are read with the lockfile rules: never through a symbolic link, never over the lockfile size limit, and nothing in them runs. At most 200 of them are read, the shallowest first; past that, a warning says how many were left.
+
+With no file stating a version, set `version`, or state the version in one of the files above. A pack for Python's language reference and "What's New" pages:
+
+```json
+{
+  "title": "Python",
+  "dependency": { "ecosystem": "toolchain", "name": "python" },
+  "sources": [
+    {
+      "type": "git",
+      "repo": "https://github.com/python/cpython",
+      "ref": "v{version}.0",
+      "paths": ["Doc/whatsnew", "Doc/reference"]
+    }
+  ]
+}
+```
 
 ## Sources
 

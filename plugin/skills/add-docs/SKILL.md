@@ -13,7 +13,7 @@ Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/.
 
 If the library is a dependency of this project, bind the pack to it with `--dependency <ecosystem>:<name>` and leave out `--version`. The lockfile then decides the version. When the lockfile moves, `llm-docs sync` rebuilds the pack at the new version and `llm-docs verify` fails until it does, so the docs can never silently drift from the code.
 
-- Use the registry name as the lockfile spells it, such as `npm:@tanstack/react-query` or `pypi:pydantic`. Ecosystems are `npm`, `pypi`, `cargo`, `go`, `pub`, and `swiftpm`.
+- Use the registry name as the lockfile spells it, such as `npm:@tanstack/react-query` or `pypi:pydantic`. Ecosystems are `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`, and `toolchain` (for a language, see Languages and toolchains below).
 - Pass `--version` alone only for docs that no lockfile pins, such as a protocol revision (`2026-07-28`) or a hosted API.
 - If two workspaces resolve different versions, sync stops and names both. Ask the user which version the docs should follow, then pass it with `--version` next to `--dependency`.
 - When one docs set describes several packages of a family that the project depends on (a server and a client SDK, `@tanstack/*` packages), bind the pack to the main one and list each other one with `--covers <ecosystem>:<name>`. The session-start note then stops reporting them as dependencies with no pinned docs. Cover only packages these docs really describe; one whose docs live elsewhere gets its own pack.
@@ -108,6 +108,29 @@ The manifest records the license it detects from the repository's license files.
 4. Search `pages/` for the exact symbol names the project uses. If a symbol you need is missing, widen the source with `--replace` and run the dry run again.
 
 Commit `llm-docs.json` and the pack directory. The managed block in `AGENTS.md` or `CLAUDE.md` now points every future session at the pack.
+
+## Languages and toolchains
+
+A language version is pinned like a library. Bind the pack with `--dependency toolchain:<name>`, where `<name>` is `go`, `python`, `rust`, `swift`, `dart`, `flutter`, or `node`, and leave out `--version`. The version then comes from the project's own files, such as `.python-version`, the `toolchain` line of `go.mod`, `.swift-version`, or `.nvmrc`, and `sync` and `verify` follow it as they follow a lockfile.
+
+- The version is a feature release, written `major.minor` (`3.15`, `6.4`, `1.27`). Patch releases do not change a language, so `3.15.2` in `.python-version` is tracked as `3.15`. Build the ref from it: `v{version}.0` for a tag named `v3.15.0`.
+- An exact pin wins over a minimum. A project that states only a minimum (`requires-python = ">=3.12"`, `// swift-tools-version: 6.0`, `environment: sdk: ^3.9.0`) is tracked at that minimum, which is the language level its code may rely on.
+- `llm-docs status` shows the version it read and the file it came from. If no file states one, pass `--version`.
+- There is no registry to ask, so find the docs repository yourself and confirm it with `llm-docs discover --repo <url>@<tag>`. The starting points below were checked on 2026-11-22. Confirm each the same way before you rely on it.
+
+| Toolchain | Docs at a release | What changed |
+|---|---|---|
+| `python` | `https://github.com/python/cpython`, tag `v<X.Y.Z>`, folder `Doc/` (reStructuredText) | `Doc/whatsnew/<X.Y>.rst` |
+| `node` | `https://github.com/nodejs/node`, tag `v<X.Y.Z>`, folder `doc/api/` | `doc/changelogs/CHANGELOG_V<X>.md` |
+| `go` | `https://github.com/golang/go`, tag `go<X.Y.Z>` (`go<X.Y>` before 1.21), `doc/go_spec.html` | Release notes are in `https://github.com/golang/website` under `_content/doc/`, which has no tags |
+| `rust` | `https://github.com/rust-lang/rust`, tag `<X.Y.Z>` | `RELEASES.md` at that tag. The book and the reference are separate repositories without version tags |
+| `swift` | `https://github.com/swiftlang/swift-book`, tag `swift-<X.Y>-fcs` (`swift-6-fcs` for 6.0), folder `TSPL.docc` | `CHANGELOG.md` in `https://github.com/swiftlang/swift` at the release tag |
+| `dart` | `https://github.com/dart-lang/site-www` has no tags and describes the current release only | `CHANGELOG.md` in `https://github.com/dart-lang/sdk` at tag `<X.Y.Z>` |
+| `flutter` | `https://github.com/flutter/website` has no tags and describes the current release only | Its release notes and breaking-change pages, on `main` |
+
+Where the docs have no tag for the version, tell the user. A pack built from a branch records the commit it took, and `llm-docs refresh --check` reports when upstream has moved, but its pages describe whatever was current that day, not the pinned version.
+
+Take only what the project needs. All of `Doc/` in CPython is hundreds of pages. The language reference, the library pages the project uses, and the "What's New" page for the version are usually enough. Mark the what-changed page with `--read-first`.
 
 ## Hard rules
 

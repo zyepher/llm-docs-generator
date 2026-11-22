@@ -41,7 +41,7 @@ Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/.
 | `--url <url>` | One page to fetch (repeatable). |
 | `--urls-file <file>` | Pages to fetch, one URL per line, `#` starts a comment. |
 | `--local <path>` | A project-relative folder or file. |
-| `--dependency <ecosystem>:<name>` | Binds the pack to a dependency, so the lockfile decides the version. |
+| `--dependency <ecosystem>:<name>` | Binds the pack to a dependency, so the lockfile decides the version. `toolchain:<name>` binds it to the project's language version, which the project's own version files decide. |
 | `--covers <ecosystem>:<name>` | Another package the same docs describe, such as a client next to a server SDK (repeatable, at most 20). Status and the session-start note then count it as documented. Binds no version. |
 | `--version <version>` | The docs version. Required unless `--dependency` is set. |
 | `--include <glob>` | Files a source takes (repeatable). For `--llms-txt`, URL paths. |

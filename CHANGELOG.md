@@ -34,6 +34,7 @@ Recipes and sources:
 - `llm-docs.json`, validated by a strict zod schema published as `schema/llm-docs.schema.json`.
 - Four source types: a `git` repository at a tag, branch, or commit; an explicit `urls` list; an `llms-txt` index with a required filter; and a `local` folder.
 - Dependency binding: a pack bound to `npm`, `pypi`, `cargo`, `go`, `pub`, or `swiftpm` takes its version from the project's lockfiles, and `{version}` placeholders let a recipe follow the lockfile to the next release.
+- **Language and toolchain versions.** A pack binds to `toolchain:<name>`, where the name is `go`, `python`, `rust`, `swift`, `dart`, `flutter`, or `node`. The version comes from the project's own files (`.python-version`, `go.mod`, `.nvmrc`, `.tool-versions`, and the rest), tracked at its feature release, so `3.15.2` is tracked as `3.15`. An exact pin wins over a minimum such as `requires-python`. Release dates come from each vendor's release feed, and `status` and the session-start note list a toolchain newer than the model's cutoff like any dependency.
 - Converters for PDFs and office documents: Docling, MarkItDown, a custom command, or an agent conversion recorded as such. Spreadsheets and other files can be carried byte-identical as passthrough files.
 - `readFirst`: up to five pages the index, `status`, and the session-start note show first, usually the migration guide.
 - Opt-in transforms: `strip-mintlify-banner`, `strip-html-comments`, and `drop-frontmatter-description`.
