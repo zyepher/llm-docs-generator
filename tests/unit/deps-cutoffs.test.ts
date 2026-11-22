@@ -250,6 +250,32 @@ describe('cutoff precedence', () => {
     );
     expect(() => resolveModelCutoff({ override: '2025-13', env: {} })).toThrow(ConfigError);
   });
+
+  it('skips each malformed explicit cutoff for the next source when told to ignore them', () => {
+    const ignored: string[] = [];
+    const ignoreInvalid = (problem: string): number => ignored.push(problem);
+
+    expect(
+      resolveModelCutoff({
+        modelId: 'claude-opus-5-5',
+        override: '2025-13',
+        configCutoff: 'June 2025',
+        env: { LLM_DOCS_MODEL_CUTOFF: '2025-6' },
+        ignoreInvalid,
+      })
+    ).toMatchObject({ cutoff: '2026-06', source: 'table' });
+    expect(
+      resolveModelCutoff({ configCutoff: 'June 2025', env: { ...env }, ignoreInvalid })
+    ).toMatchObject({ cutoff: '2025-03', source: 'env' });
+    expect(resolveModelCutoff({ override: 'x', env: {}, ignoreInvalid })).toBeUndefined();
+    expect(ignored).toEqual([
+      '--cutoff must be a YYYY-MM month (for example 2026-06), got "2025-13"',
+      'llm-docs.json model.cutoff must be a YYYY-MM month (for example 2026-06), got "June 2025"',
+      'LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month (for example 2026-06), got "2025-6"',
+      'llm-docs.json model.cutoff must be a YYYY-MM month (for example 2026-06), got "June 2025"',
+      '--cutoff must be a YYYY-MM month (for example 2026-06), got "x"',
+    ]);
+  });
 });
 
 describe('resolveModelIdFromEnvironment', () => {

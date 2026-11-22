@@ -174,7 +174,7 @@ Pack states:
 | `orphan` | Built but no longer in the config. | `llm-docs sync --prune`, or add it back. |
 
 - `--model <id>` takes a model id or a Claude Code alias. Without it, `status` uses `ANTHROPIC_MODEL`, then the `model` in Claude Code's settings files, as the hook does.
-- `--cutoff YYYY-MM` sets the cutoff directly. A malformed cutoff, from the option, `model.cutoff`, or `LLM_DOCS_MODEL_CUTOFF`, exits `2`.
+- `--cutoff YYYY-MM` sets the cutoff directly. A malformed cutoff, from the option, `model.cutoff`, or `LLM_DOCS_MODEL_CUTOFF`, exits `2`. (The session-start hook instead logs a malformed `LLM_DOCS_MODEL_CUTOFF` and skips it.)
 - `--offline` uses cached release dates only. Without it, missing dates are fetched from the registries and cached.
 - `--brief` prints only the session-start note on stdout, for the harness detected from the environment, and nothing when there is nothing to say. It takes precedence over `--json`, and it prints even when the hook is turned off.
 

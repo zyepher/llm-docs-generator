@@ -722,6 +722,12 @@ export interface GatherStatusOptions {
   modelId?: string;
   /** `--cutoff YYYY-MM`. A malformed value is a ConfigError (exit 2). */
   cutoff?: string;
+  /**
+   * The hook's policy for a malformed `--cutoff`, `model.cutoff`, or
+   * LLM_DOCS_MODEL_CUTOFF: report it here and go on with the next source.
+   * Without it, a malformed value is a ConfigError, for a person to fix.
+   */
+  ignoreInvalidCutoff?: (problem: string) => void;
   env: NodeJS.ProcessEnv;
   homeDir: string;
   cacheDir: string;
@@ -795,7 +801,8 @@ async function packStatusInput(
  * `model.cutoff`, LLM_DOCS_MODEL_CUTOFF, then the table match for the model
  * id from `--model`, the payload, or the environment), and the release dates
  * of direct dependencies and of each bound pack's version. Throws only for
- * an unreadable project (I/O) or a malformed cutoff (ConfigError).
+ * an unreadable project (I/O) or, without `ignoreInvalidCutoff`, a malformed
+ * cutoff (ConfigError).
  */
 export async function gatherProjectStatus(
   project: ProjectContext,
@@ -819,6 +826,9 @@ export async function gatherProjectStatus(
       ...(modelId === null ? {} : { modelId }),
       ...(options.cutoff === undefined ? {} : { override: options.cutoff }),
       ...(configCutoff === undefined ? {} : { configCutoff }),
+      ...(options.ignoreInvalidCutoff === undefined
+        ? {}
+        : { ignoreInvalid: options.ignoreInvalidCutoff }),
       env: options.env,
     }) ?? null;
 

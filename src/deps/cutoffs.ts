@@ -21,6 +21,8 @@ export interface ResolveModelCutoffInput {
   /** `model.cutoff` from llm-docs.json */
   configCutoff?: string;
   env?: NodeJS.ProcessEnv;
+  /** Receives each malformed explicit cutoff, which is then skipped instead of thrown. */
+  ignoreInvalid?: (problem: string) => void;
 }
 
 const CUTOFF_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/;
@@ -144,42 +146,50 @@ function lookupModelCutoff(
   };
 }
 
-function validatedCutoff(value: string, origin: string): string {
-  const trimmed = value.trim();
-
-  if (!CUTOFF_PATTERN.test(trimmed)) {
-    throw new ConfigError(
-      `${origin} must be a YYYY-MM month (for example 2026-06), got "${value}".`
-    );
-  }
-
-  return trimmed;
-}
-
 /**
  * The training data cutoff to compare release dates against. Precedence:
  * `--cutoff`, config `model.cutoff`, LLM_DOCS_MODEL_CUTOFF, then the shipped
  * table for the model id. An unknown model yields undefined; the cutoff is
- * never guessed. A malformed explicit value is an error, not a fallthrough.
+ * never guessed. A malformed explicit value is a ConfigError, unless
+ * `ignoreInvalid` is given: then it is reported there and resolution goes on
+ * with the next source (the hook must not lose its whole note to one typo).
  */
 export function resolveModelCutoff(input: ResolveModelCutoffInput): ModelCutoff | undefined {
   const env = input.env ?? process.env;
-
-  if (input.override !== undefined) {
-    const cutoff = validatedCutoff(input.override, '--cutoff');
-    return { cutoff, label: `cutoff ${cutoff} (--cutoff)`, source: 'flag' };
-  }
-
-  if (input.configCutoff !== undefined) {
-    const cutoff = validatedCutoff(input.configCutoff, 'llm-docs.json model.cutoff');
-    return { cutoff, label: `cutoff ${cutoff} (llm-docs.json)`, source: 'config' };
-  }
-
   const fromEnv = env[CUTOFF_ENV];
+  const explicit = [
+    { value: input.override, origin: '--cutoff', from: '--cutoff', source: 'flag' },
+    {
+      value: input.configCutoff,
+      origin: 'llm-docs.json model.cutoff',
+      from: 'llm-docs.json',
+      source: 'config',
+    },
+    {
+      value: isNonEmptyString(fromEnv) ? fromEnv : undefined,
+      origin: CUTOFF_ENV,
+      from: CUTOFF_ENV,
+      source: 'env',
+    },
+  ] as const;
 
-  if (isNonEmptyString(fromEnv)) {
-    const cutoff = validatedCutoff(fromEnv, CUTOFF_ENV);
-    return { cutoff, label: `cutoff ${cutoff} (${CUTOFF_ENV})`, source: 'env' };
+  for (const { value, origin, from, source } of explicit) {
+    if (value === undefined) {
+      continue;
+    }
+
+    const cutoff = value.trim();
+
+    if (CUTOFF_PATTERN.test(cutoff)) {
+      return { cutoff, label: `cutoff ${cutoff} (${from})`, source };
+    }
+
+    const problem = `${origin} must be a YYYY-MM month (for example 2026-06), got "${value}"`;
+
+    if (input.ignoreInvalid === undefined) {
+      throw new ConfigError(`${problem}.`);
+    }
+    input.ignoreInvalid(problem);
   }
 
   if (!isNonEmptyString(input.modelId)) {

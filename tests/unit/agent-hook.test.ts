@@ -585,17 +585,32 @@ describe('when the hook stays silent', () => {
     );
   });
 
-  it('prints nothing, logs, and resolves when the analysis throws', async () => {
+  it('prints nothing, logs, and resolves when the run throws', async () => {
     const root = await project();
-    const run = await runHook({
-      payload: { cwd: root, ...OPUS },
-      env: { LLM_DOCS_MODEL_CUTOFF: 'June' },
-    });
+    const broken: AsyncIterable<string> = {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(new Error('EIO: read failed')) }),
+    };
+    const run = await runHook({ stdin: broken, env: { CLAUDE_PROJECT_DIR: root } });
 
     expect(run.out).toEqual([]);
-    expect(await hookLog(run.cache)).toContain(
-      'session-start failed: LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month (for example 2026-06), got "June".'
+    expect(await hookLog(run.cache)).toMatch(/^\S+ session-start failed: EIO: read failed\n$/);
+  });
+
+  it('ignores a malformed cutoff override, logging it, and keeps the rest of the note', async () => {
+    const root = await project();
+    const env = { LLM_DOCS_MODEL_CUTOFF: 'June' };
+    const ignored =
+      /^\S+ LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month \(for example 2026-06\), got "June"; ignored it\n$/;
+
+    const fromModel = await runHook({ payload: { cwd: root, ...OPUS }, env });
+    expect(injected(fromModel)).toBe(ALL_DEPENDENCIES);
+    expect(await hookLog(fromModel.cache)).toMatch(ignored);
+
+    const none = await runHook({ payload: { cwd: root, model: 'some-unknown-model' }, env });
+    expect(injected(none).split('\n')[0]).toBe(
+      'Recently released dependencies (your training data may predate them), released in the last 180 days with no pinned docs, newest first:'
     );
+    expect(await hookLog(none.cache)).toMatch(ignored);
   });
 
   it(`rotates hook.log past ${HOOK_LIMITS.logMaxBytes} bytes, keeping one previous file`, async () => {

@@ -64,7 +64,7 @@ The harness timeout in both hook files is 5 s, well above the hook's own deadlin
 
 ### Failure policy
 
-The hook always exits 0, never writes to stderr, and prints nothing when it fails. It logs problems to `hook.log` in the cache directory, which rotates at 1 MB and keeps one previous file, `hook.log.1`. If `node` is not on the `PATH` the harness passes to hooks, the hook command fails and both harnesses treat that as a non-blocking error.
+The hook always exits 0, never writes to stderr, and prints nothing when it fails. A malformed `LLM_DOCS_MODEL_CUTOFF` does not fail it: the hook logs the value, ignores it, and takes the cutoff from the next source, or uses the neutral heading when none is left. A malformed `model.cutoff` makes `llm-docs.json` invalid, and with an invalid config the hook logs the problem and sends only the dependency part of the note. It logs problems to `hook.log` in the cache directory, which rotates at 1 MB and keeps one previous file, `hook.log.1`. If `node` is not on the `PATH` the harness passes to hooks, the hook command fails and both harnesses treat that as a non-blocking error.
 
 ## Which agent files each harness reads
 

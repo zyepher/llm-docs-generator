@@ -715,8 +715,9 @@ similar), and strips Bedrock `-v1:0` suffixes and snapshot dates (`-20250929`, `
 `-2025-04-14`). Only entries backed by a published source are included; the source URL is
 recorded per entry. Resolution order: `--cutoff`, config `model.cutoff`,
 `LLM_DOCS_MODEL_CUTOFF`, the table match for `--model` or the hook's model id. Each of the first
-three must be `YYYY-MM`; a malformed one is an error (exit 2 in `status`). No match means no
-cutoff and the after-cutoff analysis is skipped (never guessed).
+three must be `YYYY-MM`; a malformed one is an error (exit 2 in `status`, where a person can fix
+it), while the hook logs it and goes on with the next source (7.2). No match means no cutoff and
+the after-cutoff analysis is skipped (never guessed).
 
 When a vendor gives two dates for one model (Anthropic's reliable knowledge cutoff and training
 data cutoff; a Google model card's general date and an earlier date some domains stop at), the
@@ -887,8 +888,10 @@ context for the agent. Behavior:
   nears. A run that misses the deadline prints nothing.
 - Failure policy: always exit 0. Errors go to `<cache dir>/hook.log` (rotated at 1 MB, one
   previous file kept), never to stdout or stderr. An invalid `llm-docs.json` is logged and the
-  hook continues with the dependency analysis only. A malformed `model.cutoff` or
-  `LLM_DOCS_MODEL_CUTOFF` fails the run, which is logged and prints nothing.
+  hook continues with the dependency analysis only. A malformed `LLM_DOCS_MODEL_CUTOFF` costs the
+  override, not the note: it is logged, that source is ignored, and cutoff resolution goes on
+  with the next source, ending at the neutral heading when none resolves. (A malformed
+  `model.cutoff` makes `llm-docs.json` invalid, so the rule above applies to it.)
   `LLM_DOCS_HOOK=off` or config `hook.enabled: false` disables output.
 
 ### 7.3 Plugin (`plugin/`)
