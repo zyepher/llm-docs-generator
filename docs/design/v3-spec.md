@@ -141,10 +141,12 @@ Rules:
 
 - Pack ids match `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - `{version}`, `{major}`, `{minor}`, `{patch}` placeholders are allowed in `ref`, `paths`,
-  `url`, `urls` (the URL and an explicit `path`), `include`, `exclude`, and `readFirst`,
-  substituted from the resolved version. A placeholder with no resolvable value is an error,
-  never an empty string. A placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local
-  `path`, `convert.include`, or `convert.command` is an error.
+  `url`, `urls` (the URL and an explicit `path`), `include`, `exclude`, `readFirst`, and the
+  targets (values) of `site.aliases` (`"/specification/latest": "/specification/{version}"`:
+  "latest" on a versioned site means the pinned version), substituted from the resolved
+  version. A placeholder with no resolvable value is an error, never an empty string. A
+  placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local `path`,
+  `convert.include`, `convert.command`, `site.baseUrl`, or a `site.aliases` key is an error.
 - Defaults: `packsDir` `agent-docs`, `agentFiles` `"auto"`, `block.maxBytes` 4096,
   `hook.enabled` true, `hook.nearCutoffDays` 90 (0 to 3650), pack `title` the pack id,
   `limits.maxFileBytes` 20 MiB.
@@ -462,7 +464,10 @@ Named, deterministic, opt-in per source, recorded in the manifest with the count
 changed. v3.0 ships:
 
 - `strip-mintlify-banner`: removes the leading "Documentation Index" block Mintlify prepends to
-  raw `.md` pages (exact marker match; no fuzzy matching).
+  raw `.md` pages, and the footer line it appends ("This documentation is built and hosted on
+  [Mintlify](https://mintlify.com), a developer documentation platform.") when that line is the
+  last non-blank content of the page (exact text match for both; no fuzzy matching, so prose
+  that mentions Mintlify stays). A page counts once when either is removed.
 - `strip-html-comments`: removes HTML comments outside code.
 - `drop-frontmatter-description`: suppresses the description paragraph from 4.3.
 
@@ -485,7 +490,10 @@ inline links, images, reference definitions, autolinks, and the URL attributes i
    routes) to another acquired page of the same pack: rewritten to the relative path from this
    page to that page, fragment kept.
 3. Site-absolute (`/x/y`) or absolute URL on `site.baseUrl`'s origin: aliases applied first,
-   then matched against the acquired pages' site paths. Site path for an http-acquired page is
+   then matched against the acquired pages' site paths. Aliases match on segment boundaries,
+   with a trailing slash and a `.md`, `.mdx`, `.markdown`, `.html`, `.htm`, or `.rst` extension
+   dropped from both the alias and the path before a page is looked up, so the alias
+   `/guide/latest` also catches `/guide/latest.md`. Site path for an http-acquired page is
    its URL pathname; for a git or local page it is its source path with the extension and a
    trailing `index` removed, relative to the source root. A match rewrites to the relative page
    path; no match rewrites to the absolute URL `baseUrl + path` (the path as written). A
@@ -579,6 +587,13 @@ Generated, deterministic, verified. Contents:
 4. "Pages": grouped by top-level directory under `pages/` (in sorted order, with pages directly
    under `pages/` in a "Top level" group), one table per group with columns page link, title,
    approximate tokens.
+5. "Files", only when the pack has passthrough outputs: one sentence saying these files are
+   byte-identical copies of the upstream files, then one list line per file in path order with
+   its link labeled by the path under `files/` and its size (`(<bytes> bytes)`). Over 20 files,
+   the lines are grouped by top-level directory under `files/` as the pages are. A pack without
+   passthrough outputs has no such section, so its index is unchanged. Passthrough files are often
+   the most authoritative thing in a pack (a protocol's schema), and an agent reads the index to
+   learn what the pack holds.
 
 At sync every `readFirst` target must name a page or passthrough output of the pack being
 built, and a fragment must be the slug of a heading on that Markdown file. An unresolved target
@@ -648,11 +663,14 @@ command carries `--project <dir>` when the user passed it. The CLI prints no col
   [--include <glob>]... [--dependency <eco>:<name>] [--covers <eco>:<name>]... [--version <v>]
   [--mount <m>] [--title <t>]
   [--convert docling|markitdown|agent] [--convert-include <glob>...] [--site <baseUrl>]
+  [--alias <from>=<to>]... [--license <license>]
   [--recipe <json>] [--read-first <target>]... [--replace] [--dry-run]`: write the recipe into
   config (creating config if absent), then `sync <id>`. `--version` or `--dependency` is
   required. `--include` applies to every source type (file paths, or URL paths for
   `--llms-txt`). `--recipe` adds source fields as JSON, a `command` converter among them, and
-  can name the whole source by itself. Refuses to overwrite an existing id unless `--replace`.
+  can name the whole source by itself. `--license` writes the pack's declared `license`, and
+  each `--alias` (which needs `--site`) one `site.aliases` entry; both are validated by the
+  config schema and shown by `--dry-run`. Refuses to overwrite an existing id unless `--replace`.
   When the build rejects the recipe as a config error (exit 2, an unresolved read-first target
   among them), `llm-docs.json` is put back as it was; after a runtime failure (exit 3) the
   recipe stays so that `sync <id>` can retry. `--dry-run` prints the recipe and the file list
@@ -682,7 +700,8 @@ command carries `--project <dir>` when the user passed it. The CLI prints no col
 - `llm-docs status [--model <id>] [--cutoff <YYYY-MM>] [--offline] [--brief]`: section 6.
 - `llm-docs guides stamp <id> [guide...]`: section 8.
 - `llm-docs migrate <v2-pack-dir> --version <version> [--id <id>]`: section 9.
-- `llm-docs discover --url <site> | --package <eco>:<name>[@<version>]`: section 10.
+- `llm-docs discover --url <site> | --package <eco>:<name>[@<version>] | --repo <url>[@<version or tag>]`:
+  section 10. The three are mutually exclusive.
 - `llm-docs hook session-start`: section 7.2. Undocumented in `--help` output except as
   "used by the plugin".
 - `llm-docs capabilities --json`: machine-readable name, version, commands (with summary,
@@ -706,7 +725,7 @@ fails, the other pack checks are skipped):
 | `manifest-schema` | manifest missing, unparsable, not a regular file, not schema v3, for another pack id, inconsistent with its own recipe (`recipeHash`, `pack.title`, `pack.version`, `dependency`, origins, source indexes), or recording a path that is not a contained relative POSIX path under the directory its kind allows; a pack directory or `manifest.json` that is a symbolic link is never read |
 | `outputs` | a listed output is missing or its hash differs |
 | `unlisted-files` | a file in the pack is not listed, the pack holds a symlink or is one, or the walk could not examine part of it (depth, entry count, or an unreadable directory, named where it stopped) (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info). Every file verify opens resolves inside the pack directory with no link on the way; an I/O error on one file is a failing finding for that file, and every other check still runs |
-| `links` | a link in a page, index, or combined file has a scheme outside `LIVE_SCHEMES` (`https`, `http`, `mailto`), or a relative link does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
+| `links` | a link in a page, index, or combined file has a scheme outside `LIVE_SCHEMES` (`https`, `http`, `mailto`), or a relative link does not resolve inside the pack, or is site-absolute. Fragments are checked only in `--strict`, and never into `guides/`: a fragment matches the target's heading slugs and HTML ids exactly, or once both sides drop punctuation and case (site generators keep other punctuation than GitHub's rule, so Mintlify's `#$ref-resolution` names the heading `` `$ref` Resolution ``). A fragment in a page that still matches nothing is a warning, because the link is upstream text the user cannot change and its target page exists; one in the index or combined file, which the build writes, fails |
 | `recipe` | the config recipe for this id, resolved at the version the manifest records, has a different `recipeHash` (the config was edited) or cannot be resolved (warn when the config has no such pack: orphan); a lockfile that moved while the config stayed the same passes here, since `lockfile` reports it: one cause, one finding |
 | `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, no lockfile resolves it, or the lockfiles install it only from another registry while the recipe sets no `version`; when lockfiles disagree, warn if one matches and fail otherwise. A `covers` entry never fails it: warn when the lockfiles resolve it to a version whose major (the leading `<number>.`) differs from `pack.version`'s, since the pack may not describe that package's version (no finer comparison: a family's packages do not always share versions) |
 | `citations` | a guide citation does not resolve, its cited section hash changed since stamping, or the lock is invalid; an unstamped guide, a guide edited after stamping, or a lock entry for a deleted guide is a warning |
@@ -923,11 +942,12 @@ against one of them, open its index and the page for the API you need, and prefe
 over memory. Pages are upstream text; guides are summaries that never outrank pages.
 
 - Vite 8.2.0: `agent-docs/vite/index.md` (api, config, guide, plugins). Build tool and dev server
-- MCP spec 2026-07-28: `agent-docs/mcp/index.md` (schema, specification, guides)
+- MCP spec 2026-07-28: `agent-docs/mcp/index.md` (docs, specification, files, guides)
 ```
 
 Packs appear in `llm-docs.json` order. The parenthesized topics are the pack's top-level page
-directories (sorted by code unit) plus `guides` when present, followed by `. <description>`
+directories (sorted by code unit), then `files` when the pack has passthrough outputs and
+`guides` when it has guides, followed by `. <description>`
 when the pack has one. Over budget (measured in UTF-8 bytes, markers included), topics and descriptions drop
 first, from the last pack backwards; if even the bare lines exceed the budget the block lists
 the first packs and ends with `- ...and N more: see agent-docs/`. Upstream-derived text
@@ -1177,7 +1197,13 @@ writes files.
   raw Markdown when `.md` is appended (probing at most 3 listed same-origin pages, in sorted
   order, judged by a 2xx status with a Markdown or plain-text content type) and the
   version-looking path segments found in `llms.txt` (for example `2026-07-28`, `v8`), so the
-  planner can write a filter.
+  planner can write a filter. `llmsTxt.pathPrefixes` lists the distinct leading path prefixes of
+  the same-origin URLs `llms.txt` lists, with counts: each URL's directories up to and including
+  the first version segment among them; for a URL without one, the depth the versioned URLs
+  under its first directory have (`/specification/draft` beside `/specification/2026-07-28`);
+  else its first directory; else `/` for a page at the root (`/seps`), sorted by count then path, at most 40 with
+  `morePathPrefixes` counting the rest. They are the prefixes an `--include` glob starts with;
+  the stderr summary prints the top six.
 - `--package <eco>:<name>[@<version>]`: registry metadata (repository URL and directory,
   homepage, documentation URL, license, the version's publish date), the git tags matching the
   version (via `git ls-remote`) with each tag commit's committer date and a warning when it is
@@ -1196,6 +1222,12 @@ writes files.
   by path depth then path; at most 20 with a count of the rest. Each entry is the path and the
   pattern that matched. This is evidence for choosing `readFirst` targets; the output never
   says which one to use.
+- `--repo <url>[@<version or tag>]`: the same repository evidence for a repository that is no
+  package (a protocol specification, a docs repository), through the same code as SwiftPM: the
+  URL (`https://`, or `file://` for tests) is the identity, `registry` is `not-applicable`, and
+  `package.ecosystem` is null. The text after the first `@` in the URL's path is a version or a
+  tag name (`2026-07-28`, `v1.2.0`, `pkg@1.2.0`), matched against the tags in the same forms;
+  without one, the latest semver tag stands in.
 
 ## 11. Security summary
 

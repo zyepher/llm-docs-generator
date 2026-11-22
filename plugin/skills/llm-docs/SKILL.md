@@ -28,7 +28,7 @@ Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/.
 | `llm-docs status` | Lists the packs with their state and the direct dependencies released after or near the model's training data cutoff. Works without `llm-docs.json`. |
 | `llm-docs guides stamp <id> [guides...]` | Records the hash of every section each guide cites in `guides/citations.lock.json`. Fails on a citation that does not resolve. |
 | `llm-docs migrate <v2-pack-dir>` | Writes a recipe for a v2 pack into `llm-docs.json`. `--id <id>` names the pack and `--version <version>` sets the version, since v2 manifests record none. Never touches the v2 pack. |
-| `llm-docs discover` | Prints read-only evidence for writing a recipe, always as JSON on stdout. `--package <ecosystem>:<name>[@<version>]` reports registry metadata, the git tags that match the version, and the Markdown folders at that tag. `--url <site>` reports the site's `llms.txt`, sitemap, whether pages serve raw Markdown, and version segments. |
+| `llm-docs discover` | Prints read-only evidence for writing a recipe, always as JSON on stdout. `--package <ecosystem>:<name>[@<version>]` reports registry metadata, the git tags that match the version, and the Markdown folders at that tag. `--repo <url>[@<version or tag>]` reports the same for a repository that is not a package, such as a protocol specification. `--url <site>` reports the site's `llms.txt`, sitemap, whether pages serve raw Markdown, version segments, and the path prefixes to filter on. |
 | `llm-docs capabilities` | Lists the commands. With `--json`, describes everything this build supports. |
 | `llm-docs hook session-start` | The plugin's session-start hook. Reads the harness payload on stdin and prints the session-start note. Not for direct use. |
 
@@ -46,15 +46,17 @@ Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/.
 | `--version <version>` | The docs version. Required unless `--dependency` is set. |
 | `--include <glob>` | Files a source takes (repeatable). For `--llms-txt`, URL paths. |
 | `--mount <dir>` | Subfolder under `pages/` and `files/` for this source. |
-| `--title <title>` | Pack title. The id by default. |
+| `--title <title>` | Pack title: the library's name without the version, which the index and the managed block add after it. The id by default. |
 | `--site <baseUrl>` | The docs website, so absolute links to it resolve to pack pages. |
+| `--alias <from>=<to>` | A path on the `--site` website that stands for another, such as `/guide/latest=/guide/{version}` (repeatable). |
+| `--license <license>` | The docs license: an SPDX expression such as `CC-BY-4.0`, or `proprietary`. Set it for pages fetched from a website, which have no license file. |
 | `--convert <tool>` | Converts documents with `docling`, `markitdown`, or `agent`. `--convert-include <glob...>` names the documents. |
 | `--recipe <json>` | Extra source fields as JSON, such as `exclude`, `passthrough`, `transforms`, or a `command` converter. |
 | `--read-first <target>` | A page to read first, `pages/...` or `files/...` with an optional `#fragment` (repeatable, at most 5). The index lists it at the top and the session-start note names it. |
 | `--replace` | Overwrites an existing pack with the same id. |
 | `--dry-run` | Prints the recipe and every output path with its source. Writes nothing. |
 
-`{version}`, `{major}`, `{minor}`, and `{patch}` in `ref`, `paths`, `url`, `urls`, `include`, and `exclude` are replaced from the resolved version. A recipe whose ref is `v{version}` follows the lockfile to the next version.
+`{version}`, `{major}`, `{minor}`, and `{patch}` in `ref`, `paths`, `url`, `urls`, `include`, `exclude`, and `--alias` targets are replaced from the resolved version. A recipe whose ref is `v{version}` follows the lockfile to the next version.
 
 ### Options of `sync` and `refresh`
 
@@ -80,7 +82,7 @@ A CI runner has no plugin, so the workflow downloads the CLI from the GitHub Rel
 | Step | Command | Fails when |
 |---|---|---|
 | Packs match config and lockfiles | `llm-docs sync --check` | A pack or managed block would change. |
-| Packs are intact | `llm-docs verify` | Any check fails. Add `--strict` to also fail on link fragments and unknown licenses. |
+| Packs are intact | `llm-docs verify` | Any check fails. Add `--strict` to also check link fragments and fail on unknown licenses. |
 | Upstream still matches, on a schedule | `llm-docs refresh --check` | Upstream changed. It needs the network, so keep it out of the per-commit gate. |
 
 ## Verify checks
@@ -92,7 +94,7 @@ Each check reports `pass`, `fail`, or `warn`, one line per problem with the pack
 | `manifest-schema` | `manifest.json` is missing, unreadable, not a regular file, not schema 3, disagrees with its own recipe, or records a path that could leave the pack. | Run `llm-docs sync <id>`. For a v2 pack, run `llm-docs migrate <v2-pack-dir>` first. |
 | `outputs` | A file the manifest lists is missing or its hash differs. | Someone edited a tool-written file. Run `llm-docs sync <id>` to rebuild it. Put your own notes in `guides/` instead. |
 | `unlisted-files` | A file in the pack is not in the manifest, the pack holds a symbolic link, or part of the pack could not be examined. `guides/` and operating system files such as `.DS_Store` are reported as info only. | Move the file out of the pack, or into `guides/` if it is agent-written text. |
-| `links` | A link in a page, the index, or the combined file has a scheme other than `https`, `http`, or `mailto`, or a relative link does not resolve inside the pack. Under `--strict`, also a fragment with no matching heading. | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
+| `links` | A link in a page, the index, or the combined file has a scheme other than `https`, `http`, or `mailto`, or a relative link does not resolve inside the pack. Under `--strict`, also a fragment in the index or combined file with no matching heading. A page's fragment with no matching heading only warns: it is upstream text and its target page exists. | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
 | `recipe` | The recipe in `llm-docs.json` changed since the last sync. Warns when the config has no pack with this id (an orphan). | Run `llm-docs sync <id>`. For an orphan, run `llm-docs sync --prune` or add the pack back to the config. |
 | `lockfile` | The lockfile resolves the bound dependency to another version than the pack's, or no lockfile resolves it. When the lockfiles install it only from another registry, it fails unless the recipe sets `version`. | Run `llm-docs sync <id>`. If the recipe pins `version`, change it first, because an explicit version wins. For a dependency from another registry, set `version`. |
 | `citations` | A guide citation no longer resolves, or a cited section changed since stamping. Warns for an unstamped guide or one edited after stamping. | Re-review the guide with the `write-docs-guide` skill, then run `llm-docs guides stamp <id> <guide>`. |

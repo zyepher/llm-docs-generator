@@ -45,6 +45,7 @@ function input(overrides: Partial<IndexPageInput> = {}): IndexPageInput {
       { path: 'pages/readme.md', title: 'Readme', tokens: 10 },
       { path: 'pages/api/a b.md', title: 'A', tokens: 4 },
     ],
+    files: [],
     readFirst: [],
     ...overrides,
   };
@@ -88,6 +89,57 @@ describe('renderIndexPage', () => {
       ].join('\n')
     );
     expect(renderIndexPage(input({ pages: [...input().pages].reverse() }))).toBe(text);
+  });
+
+  it('lists passthrough files with their sizes after the pages, and nothing when there are none', () => {
+    const files = [
+      { path: 'files/schema/schema.ts', bytes: 98765 },
+      { path: 'files/a [b].json', bytes: 2 },
+      { path: 'files/schema/schema.json', bytes: 123456 },
+    ];
+    const text = renderIndexPage(input({ files }));
+
+    expect(text.slice(text.indexOf('## Files'))).toBe(
+      [
+        '## Files',
+        '',
+        'These files are byte-identical copies of the upstream files, kept as they are rather than converted to pages.',
+        '',
+        '- [a \\[b\\].json](files/a%20%5Bb%5D.json) (2 bytes)',
+        '- [schema/schema.json](files/schema/schema.json) (123456 bytes)',
+        '- [schema/schema.ts](files/schema/schema.ts) (98765 bytes)',
+        '',
+      ].join('\n')
+    );
+    expect(text.indexOf('## Files')).toBeGreaterThan(text.indexOf('## Pages'));
+    expect(renderIndexPage(input({ files: [...files].reverse() }))).toBe(text);
+    expect(renderIndexPage(input())).not.toContain('## Files');
+  });
+
+  it('groups the files by top-level directory when there are more than twenty', () => {
+    const files = [
+      ...Array.from({ length: 20 }, (_, index) => ({
+        path: `files/schema/part-${String(index).padStart(2, '0')}.json`,
+        bytes: index,
+      })),
+      { path: 'files/notes.txt', bytes: 5 },
+    ];
+    const text = renderIndexPage(input({ files }));
+    const section = text.slice(text.indexOf('## Files'));
+
+    expect(section.split('\n').slice(0, 9)).toEqual([
+      '## Files',
+      '',
+      'These files are byte-identical copies of the upstream files, kept as they are rather than converted to pages.',
+      '',
+      '### Top level',
+      '',
+      '- [notes.txt](files/notes.txt) (5 bytes)',
+      '',
+      '### schema',
+    ]);
+    expect(section).toContain('- [schema/part-19.json](files/schema/part-19.json) (19 bytes)\n');
+    expect(renderIndexPage(input({ files: files.slice(1) }))).not.toContain('### schema');
   });
 
   it('puts a Read first section between the reading notes and the pages, in recipe order', () => {

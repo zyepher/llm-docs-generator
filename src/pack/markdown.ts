@@ -1236,6 +1236,26 @@ export function headingAnchors(text: string, options: MarkdownSyntaxOptions = {}
   return anchors;
 }
 
+/** Letters, digits, and marks of an anchor, lowercased: every punctuation and space dropped. */
+function looseAnchorKey(anchor: string): string {
+  return anchor.toLowerCase().replace(/[^\p{L}\p{N}\p{M}]/gu, '');
+}
+
+/**
+ * Whether `fragment` names one of `anchors` (from `headingAnchors`): exactly,
+ * or once both sides drop punctuation and case. Site generators keep other
+ * punctuation than GitHub's rule does (Mintlify writes `#$ref-resolution` for
+ * the heading `` `$ref` Resolution ``, which GitHub slugs `ref-resolution`),
+ * and upstream pages link with their site's anchors.
+ */
+export function fragmentMatchesAnchor(fragment: string, anchors: ReadonlySet<string>): boolean {
+  if (anchors.has(fragment)) {
+    return true;
+  }
+  const key = looseAnchorKey(fragment);
+  return key !== '' && [...anchors].some((anchor) => looseAnchorKey(anchor) === key);
+}
+
 // ---------------------------------------------------------------------------
 // Frontmatter
 // ---------------------------------------------------------------------------
@@ -1670,6 +1690,9 @@ type PageTransform = (draft: PageDraft) => boolean;
 
 const MINTLIFY_BANNER =
   /^(?:[ \t]*\n)*> ## Documentation Index\n> Fetch the complete documentation index at: [^\n]*\n> Use this file to discover all available pages before exploring further\.\n(?:[ \t]*\n)?/;
+/** The footer line Mintlify appends to raw `.md` pages, matched only as the page's last line. */
+const MINTLIFY_FOOTER =
+  /\n(?:[ \t]*\n)*This documentation is built and hosted on \[Mintlify\]\(https:\/\/mintlify\.com\), a developer documentation platform\.[ \t]*\n*$/;
 
 const HTML_COMMENT_LINE = /^[ \t]*<!--(?:(?!-->)[\s\S])*-->[ \t]*(?:\n|$)/gm;
 const HTML_COMMENT = /<!--(?:(?!-->)[\s\S])*-->/g;
@@ -1677,7 +1700,7 @@ const HTML_COMMENT = /<!--(?:(?!-->)[\s\S])*-->/g;
 /** Every named transform; `TransformName` (src/config/project.ts) keeps this exhaustive. */
 const PAGE_TRANSFORMS: Readonly<Record<TransformName, PageTransform>> = {
   'strip-mintlify-banner': (draft) => {
-    const stripped = draft.body.replace(MINTLIFY_BANNER, '');
+    const stripped = draft.body.replace(MINTLIFY_BANNER, '').replace(MINTLIFY_FOOTER, '\n');
     const changed = stripped !== draft.body;
     draft.body = stripped;
     return changed;

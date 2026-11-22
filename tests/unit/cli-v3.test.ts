@@ -19,6 +19,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -200,7 +201,7 @@ describe('llm-docs v3 CLI', () => {
 
     expect(add.code).toBe(0);
     expect(add.stdout).toBe('');
-    expect(add.stderr).toContain('demo: built (not built yet)');
+    expect(add.stderr).toContain('demo: built (first build)');
     expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs).toEqual({
       demo: { title: 'Demo', version: '1.0.0', sources: [{ type: 'local', path: 'docs' }] },
     });
@@ -1086,7 +1087,7 @@ describe('llm-docs v3 CLI', () => {
       env
     );
     expect(add.code, add.stderr).toBe(0);
-    expect(add.stderr).toContain('manuals: built (not built yet)');
+    expect(add.stderr).toContain('manuals: built (first build)');
     expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs.manuals).toEqual({
       version: '1.0.0',
       sources: [{ type: 'local', path: 'docs', convert: { tool: 'markitdown' } }],
@@ -1221,15 +1222,27 @@ describe('llm-docs v3 CLI', () => {
       expect(result.stderr).not.toContain('{');
     }
 
+    const plain = await runCli(root, ['discover', '--repo', `${repo.url}@v1.0.0`]);
+    expect(plain.code, plain.stderr).toBe(0);
+    expect(JSON.parse(plain.stdout)).toMatchObject({
+      package: { ecosystem: null, name: repo.url, version: 'v1.0.0' },
+      registry: { status: 'not-applicable' },
+      tags: { status: 'matched', matches: [{ tag: 'v1.0.0', form: 'v-prefixed' }] },
+      docDirectories: { status: 'listed', tag: 'v1.0.0', commit: repo.head },
+    });
+    expect(plain.stderr).toContain(`repository ${repo.url}@v1.0.0 (requested)`);
+
     for (const args of [
       ['discover'],
       ['discover', '--url', 'https://example.com', '--package', 'npm:hono'],
+      ['discover', '--package', 'npm:hono', '--repo', 'https://github.com/honojs/hono'],
+      ['discover', '--url', 'https://example.com', '--repo', 'https://github.com/honojs/hono'],
     ]) {
       const result = await runCli(root, args);
       expect(result.code).toBe(2);
       expect(result.stdout).toBe('');
       expect(result.stderr).toContain(
-        "discover needs exactly one of --url <site> and --package <ecosystem>:<name>[@<version>]; for example 'llm-docs discover --package npm:vite'."
+        "discover needs exactly one of --url <site>, --package <ecosystem>:<name>[@<version>], and --repo <url>[@<version or tag>]; for example 'llm-docs discover --package npm:vite'."
       );
     }
 
@@ -1250,12 +1263,66 @@ describe('llm-docs v3 CLI', () => {
     const discover = capabilities.commands.find(
       (command: { name: string }) => command.name === 'discover'
     );
-    expect(discover.summary).toMatch(/--url: .*--package: /);
+    expect(discover.summary).toMatch(/--url: .*--package: .*--repo: /);
     expect(discover.options.map((option: { flags: string }) => option.flags)).toEqual([
       '--url <site>',
       '--package <ecosystem:name[@version]>',
+      '--repo <url[@version]>',
       '--json',
     ]);
+  });
+
+  it('discovers a website: the path prefixes to write in --include, in the JSON and the summary', async () => {
+    const pages = [
+      ...Array.from({ length: 3 }, (_, index) => `/specification/2026-07-28/basic/p${index}.md`),
+      ...Array.from({ length: 2 }, (_, index) => `/seps/${index}-sep.md`),
+      '/docs/2026-07-28/intro.md',
+      '/registry/about.md',
+      '/registry/publish.md',
+      '/a/x.md',
+      '/b/x.md',
+      '/examples.md',
+    ];
+    const server = createServer((request, response) => {
+      const origin = `http://${request.headers.host ?? ''}`;
+      if (request.url === '/llms.txt') {
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end(pages.map((path) => `- [Page](${origin}${path})`).join('\n'));
+        return;
+      }
+      response.writeHead(404, { 'content-type': 'text/plain' });
+      response.end('not found');
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        throw new Error('the test server has no port');
+      }
+      const result = await runCli(
+        await makeProject({}),
+        ['discover', '--url', `http://127.0.0.1:${address.port}/`],
+        { LLM_DOCS_ALLOW_PRIVATE_NETWORK: '1' }
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).llmsTxt).toMatchObject({
+        pathPrefixes: [
+          { prefix: '/specification/2026-07-28', urls: 3 },
+          { prefix: '/registry', urls: 2 },
+          { prefix: '/seps', urls: 2 },
+          { prefix: '/', urls: 1 },
+          { prefix: '/a', urls: 1 },
+          { prefix: '/b', urls: 1 },
+          { prefix: '/docs/2026-07-28', urls: 1 },
+        ],
+        morePathPrefixes: 0,
+      });
+      expect(result.stderr).toContain(
+        '  path prefixes for --include: /specification/2026-07-28 (3), /registry (2), /seps (2), / (1), /a (1), /b (1), and 1 more.\n'
+      );
+    } finally {
+      await new Promise((done) => server.close(done));
+    }
   });
 
   it('adds a git pack, syncs and verifies it, and reports upstream changes with refresh', async () => {
@@ -1277,7 +1344,7 @@ describe('llm-docs v3 CLI', () => {
     ]);
 
     expect(add.code, add.stderr).toBe(0);
-    expect(add.stderr).toContain('demo: built (not built yet)');
+    expect(add.stderr).toContain('demo: built (first build)');
     expect(add.stderr).toContain('is a branch, so the pin floats');
     expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs.demo).toEqual({
       version: '1.0.0',
@@ -1443,7 +1510,7 @@ describe('llm-docs v3 CLI', () => {
 
     const sync = await runCli(root, ['sync', 'vite-8']);
     expect(sync.code, sync.stderr).toBe(0);
-    expect(sync.stderr).toContain('vite-8: built (not built yet)');
+    expect(sync.stderr).toContain('vite-8: built (first build)');
     expect(await readdir(join(root, 'agent-docs', 'vite-8', 'pages', 'guide'))).toEqual([
       'start.md',
     ]);
@@ -1570,6 +1637,83 @@ describe('--json: one document on stdout when the command runs, nothing when it 
     expect(result.code, result.stderr).toBe(0);
     expect(expectJsonDocument(result)).toMatchObject({ id: 'other', dryRun: true });
     expectJsonFailure(await runCli(root, ['add', 'Bad', '--local', 'docs', '--json']), 2);
+  });
+
+  it('add --license and --alias', async () => {
+    const flags = [
+      'add',
+      'other',
+      '--local',
+      'docs',
+      '--version',
+      '2026-07-28',
+      '--site',
+      'https://docs.example.com',
+      '--alias',
+      '/spec/latest=/spec/{version}',
+      '--alias',
+      '/old=/new',
+      '--license',
+      'Apache-2.0 AND CC-BY-4.0',
+      '--dry-run',
+    ];
+    const json = await runCli(root, [...flags, '--json']);
+    expect(json.code, json.stderr).toBe(0);
+    expect(expectJsonDocument(json)).toMatchObject({
+      recipe: {
+        license: 'Apache-2.0 AND CC-BY-4.0',
+        site: {
+          baseUrl: 'https://docs.example.com',
+          aliases: { '/spec/latest': '/spec/2026-07-28', '/old': '/new' },
+        },
+      },
+    });
+    const human = await runCli(root, flags);
+    expect(human.code, human.stderr).toBe(0);
+    expect(human.stderr).toContain(
+      '"aliases": {\n        "/spec/latest": "/spec/{version}",\n        "/old": "/new"\n      }'
+    );
+    expect(human.stderr).toContain('"license": "Apache-2.0 AND CC-BY-4.0"');
+
+    const titled = await runCli(root, [
+      ...flags.slice(0, 6),
+      '--title',
+      'Demo Spec 2026-07-28',
+      '--dry-run',
+    ]);
+    expect(titled.code, titled.stderr).toBe(0);
+    expect(titled.stderr).toContain(
+      '  warning: The title "Demo Spec 2026-07-28" already holds the version 2026-07-28, and the index and the managed block add the version after the title, so they show it twice; set packs.other.title to the library\'s name alone, such as "Demo Spec".\n'
+    );
+    expect(human.stderr).not.toContain('already holds the version');
+
+    const noSite = await runCli(root, [
+      'add',
+      'other',
+      '--local',
+      'docs',
+      '--version',
+      '1',
+      '--alias',
+      '/a=/b',
+    ]);
+    expect(noSite.code).toBe(2);
+    expect(noSite.stderr).toContain('--alias needs --site <baseUrl>');
+    const malformed = await runCli(root, [...flags.slice(0, 8), '--alias', '/a']);
+    expect(malformed.code).toBe(2);
+    expect(malformed.stderr).toContain('--alias must be <from>=<to>');
+    const empty = await runCli(root, [
+      'add',
+      'other',
+      '--local',
+      'docs',
+      '--version',
+      '1',
+      '--license',
+      '',
+    ]);
+    expect(empty.code).toBe(2);
+    expect(empty.stderr).toContain('--license needs an SPDX expression');
   });
 
   it('sync', async () => {

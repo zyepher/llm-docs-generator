@@ -339,7 +339,7 @@ export interface BlockPack {
   /** Project-relative POSIX path of the pack's index.md. */
   indexPath: string;
   description: string | null;
-  /** Top-level page directories, then `guides` when the pack has any. */
+  /** Top-level page directories, then `files` and `guides` when the pack has any. */
   topics: readonly string[];
 }
 
@@ -387,6 +387,10 @@ function blockPack(
   const topics = [...new Set(directories.filter((topic) => topic !== ''))].sort(
     compareStringsByCodeUnit
   );
+  const extra = [
+    ...(manifest.outputs.some((output) => output.kind === 'passthrough') ? ['files'] : []),
+    ...(hasGuides ? ['guides'] : []),
+  ].filter((topic) => !topics.includes(topic));
   const description =
     manifest.recipe.description === null ? '' : escapeBlockText(manifest.recipe.description);
 
@@ -394,7 +398,7 @@ function blockPack(
     label: `${escapeBlockText(manifest.pack.title)} ${escapeBlockText(manifest.pack.version)}`,
     indexPath: `${packsDirRelative}/${manifest.pack.id}/index.md`,
     description: description === '' ? null : description,
-    topics: hasGuides && !topics.includes('guides') ? [...topics, 'guides'] : topics,
+    topics: [...topics, ...extra],
   };
 }
 

@@ -433,8 +433,34 @@ describe('resolvePackRecipe', () => {
         PINNED
       )
     ).rejects.toThrow(
-      /placeholders are only allowed in ref, paths, url, urls, include, exclude, and readFirst/
+      /placeholders are only allowed in ref, paths, url, urls, include, exclude, readFirst, and the targets of site\.aliases/
     );
+  });
+
+  it('substitutes placeholders in site.aliases targets and refuses them in alias keys and baseUrl', async () => {
+    const site = (aliases: Record<string, string>, baseUrl = 'https://x.dev') => ({
+      ...localPack,
+      version: '2026-07-28',
+      site: { baseUrl, aliases },
+    });
+    const resolved = await resolvePackRecipe(
+      config(site({ '/specification/latest': '/specification/{version}', '/docs': '/docs' })),
+      'vite',
+      PINNED
+    );
+    expect(resolved.recipe.site).toEqual({
+      baseUrl: 'https://x.dev',
+      aliases: { '/specification/latest': '/specification/2026-07-28', '/docs': '/docs' },
+    });
+
+    await expect(
+      resolvePackRecipe(config(site({ '/spec/{version}': '/spec' })), 'vite', PINNED)
+    ).rejects.toThrow(
+      /packs\.vite\.site\.aliases\["\/spec\/\{version\}"\]: placeholders are only allowed in/
+    );
+    await expect(
+      resolvePackRecipe(config(site({}, 'https://x.dev/{version}')), 'vite', PINNED)
+    ).rejects.toThrow(/packs\.vite\.site\.baseUrl: placeholders are only allowed in/);
   });
 
   it('derives URL stored paths and rejects duplicates naming both URLs', async () => {
@@ -567,6 +593,20 @@ describe('resolvePackRecipe', () => {
   // change here would report every existing pack as recipe-changed.
   const LOCAL_PACK_HASH_BEFORE_READ_FIRST =
     'sha256:3b753a53f683da7844197fdd72fa481be5f4316afbaa906d200147f65dab17ea';
+
+  it('keeps the recipe hash of a pack whose aliases hold no placeholder', async () => {
+    const aliases = { '/guide/latest': '/guide/v1', '/api/next': '/api' };
+    const resolved = await resolvePackRecipe(
+      config({ ...localPack, site: { baseUrl: 'https://x.dev', aliases } }),
+      'vite',
+      PINNED
+    );
+
+    // Recorded from the code before alias targets took placeholders (commit 8971a52).
+    expect(resolved.recipeHash).toBe(
+      'sha256:cf3a2f57c871b8037253f4f2f91bbbee0723d2c5d5c2ea10564d61a1f9271a7b'
+    );
+  });
 
   it('keeps the recipe hash of a pack without readFirst, and changes it with the field', async () => {
     const without = await resolvePackRecipe(config(localPack), 'vite', PINNED);

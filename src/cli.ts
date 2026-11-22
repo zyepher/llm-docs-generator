@@ -40,6 +40,7 @@ import {
   describePackageDiscovery,
   discoverPackage,
   parsePackageSpec,
+  parseRepositorySpec,
 } from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
@@ -132,6 +133,28 @@ const COMMANDS = [
           'npm:vite',
         ],
         note: "Pin Vite's docs at the version the lockfile resolves, and follow it on every sync",
+      },
+      {
+        argv: [
+          'add',
+          'mcp',
+          '--llms-txt',
+          'https://modelcontextprotocol.io/llms.txt',
+          '--include',
+          '/specification/{version}/**',
+          '--version',
+          '2026-07-28',
+          '--title',
+          'Model Context Protocol',
+          '--site',
+          'https://modelcontextprotocol.io',
+          '--alias',
+          '/specification/latest=/specification/{version}',
+          '--license',
+          'Apache-2.0 AND MIT AND CC-BY-4.0',
+          '--dry-run',
+        ],
+        note: 'Preview a protocol revision from a site index, with links to "latest" kept in the pack',
       },
       {
         argv: ['add', 'mylib', '--local', 'docs/mylib', '--version', '2.1.0', '--json'],
@@ -237,7 +260,7 @@ const COMMANDS = [
   {
     name: 'discover',
     summary:
-      'Print read-only evidence for writing a recipe, as JSON on stdout: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments) or a package (--package: registry metadata, matching git tags, Markdown directories, change documents). Run it before add to choose a source.',
+      'Print read-only evidence for writing a recipe, as JSON on stdout: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments, path prefixes), a package (--package: registry metadata, matching git tags, Markdown directories, change documents), or a repository with no package (--repo: the same evidence without the registry). Run it before add to choose a source.',
     status: 'implemented',
     examples: [
       { argv: ['discover', '--package', 'npm:vite'], note: 'Evidence for the latest Vite release' },
@@ -246,6 +269,14 @@ const COMMANDS = [
         note: 'Evidence for one version, with its git tags and docs directories',
       },
       { argv: ['discover', '--url', 'https://vite.dev'], note: "The site's llms.txt and sitemap" },
+      {
+        argv: [
+          'discover',
+          '--repo',
+          'https://github.com/modelcontextprotocol/modelcontextprotocol@2026-07-28',
+        ],
+        note: 'A protocol repository at a tag: its docs directories and change documents',
+      },
     ],
   },
   {
@@ -425,6 +456,8 @@ interface AddOptions extends ProjectOptions {
   include?: string[];
   stripPrefix?: string;
   site?: string;
+  alias?: string[];
+  license?: string;
   dependency?: string;
   covers?: string[];
   version?: string;
@@ -616,6 +649,29 @@ function parseDependency(
   return { ecosystem, name };
 }
 
+/** `--alias <from>=<to>` values as `site.aliases`, in the order given. */
+function parseAliases(values: readonly string[]): Record<string, string> {
+  const aliases: Record<string, string> = {};
+
+  for (const value of values) {
+    const separator = value.indexOf('=');
+    const from = value.slice(0, separator);
+    const to = value.slice(separator + 1);
+
+    if (separator <= 0 || to === '') {
+      throw new UsageError(
+        `--alias must be <from>=<to>, two site paths such as /guide/latest=/guide/{version}; got "${value}".`
+      );
+    }
+    if (Object.hasOwn(aliases, from)) {
+      throw new UsageError(`--alias ${from} is given twice; pass one --alias per site path.`);
+    }
+    aliases[from] = to;
+  }
+
+  return aliases;
+}
+
 function parseRecipeJson(value: string): Record<string, unknown> {
   let parsed: unknown;
 
@@ -719,8 +775,24 @@ function buildPackRecipe(options: AddOptions): PackConfig {
   if (pack.version === undefined && pack.dependency === undefined) {
     throw new UsageError('Pass --version <v> or --dependency <ecosystem>:<name>.');
   }
+  if (options.alias !== undefined && options.site === undefined) {
+    throw new UsageError(
+      '--alias needs --site <baseUrl>: an alias maps one path on that website to another.'
+    );
+  }
   if (options.site !== undefined) {
-    pack.site = { baseUrl: options.site };
+    pack.site = {
+      baseUrl: options.site,
+      ...(options.alias === undefined ? {} : { aliases: parseAliases(options.alias) }),
+    };
+  }
+  if (options.license !== undefined) {
+    if (options.license.trim() === '') {
+      throw new UsageError(
+        '--license needs an SPDX expression such as CC-BY-4.0 or "Apache-2.0 AND MIT", or "proprietary".'
+      );
+    }
+    pack.license = options.license;
   }
   // Keep the source exactly as the user wrote it (not the parsed copy) so the config stays minimal.
   pack.sources = [source];
@@ -813,7 +885,9 @@ function printSyncReport(report: SyncReport): void {
         say(`${pack.id}: up to date`);
         break;
       case 'built':
-        say(`${pack.id}: built (${pack.detail ?? 'rebuilt'})`);
+        say(
+          `${pack.id}: built (${pack.reason === 'not-built' ? 'first build' : (pack.detail ?? 'rebuilt')})`
+        );
         break;
       case 'would-build':
         say(`${pack.id}: would rebuild (${pack.detail ?? 'out of date'})`);
@@ -1115,6 +1189,15 @@ function buildProgram(): Command {
     '--site <baseUrl>',
     'The docs website, so links to it resolve to pack pages (default: none)'
   );
+  add.option(
+    '--alias <from=to>',
+    'A path on the --site website that stands for another, such as /guide/latest=/guide/{version}; the target may use {version} (repeatable; default: none)',
+    collect
+  );
+  add.option(
+    '--license <license>',
+    'The license of these docs: an SPDX expression such as CC-BY-4.0, or "proprietary"; recorded next to the license detected from license files, and it wins for the license status (default: none)'
+  );
 
   withProjectOptions(
     add
@@ -1135,7 +1218,10 @@ function buildProgram(): Command {
         '--mount <dir>',
         'Subdirectory under pages/ and files/ for this source (default: the pack root)'
       )
-      .option('--title <title>', 'Pack title (default: the id)')
+      .option(
+        '--title <title>',
+        "Pack title: the library's name without the version, which the index and the managed block add after it (default: the id)"
+      )
       .option(
         '--recipe <json>',
         'More source fields as a JSON object, such as {"exclude": ["**/blog/**"], "passthrough": ["**/*.csv"]} (default: none)'
@@ -1490,16 +1576,27 @@ function buildProgram(): Command {
       '--package <ecosystem:name[@version]>',
       `Package to inspect, such as npm:vite@7.1.0; ecosystems: ${ECOSYSTEMS.join(', ')} (swiftpm:<repository url>) (default version: the latest)`
     )
+    .option(
+      '--repo <url[@version]>',
+      'Repository with no package to inspect, such as a protocol specification: an https:// URL, optionally @<version or tag> (default version: the latest release tag)'
+    )
     .option('--json', 'Accepted for consistency: discover always prints JSON on stdout')
-    .action(async (options: { url?: string; package?: string }) => {
-      if ((options.url === undefined) === (options.package === undefined)) {
+    .action(async (options: { url?: string; package?: string; repo?: string }) => {
+      const given = [options.url, options.package, options.repo].filter(
+        (value) => value !== undefined
+      );
+      if (given.length !== 1) {
         throw new UsageError(
-          "discover needs exactly one of --url <site> and --package <ecosystem>:<name>[@<version>]; for example 'llm-docs discover --package npm:vite'."
+          "discover needs exactly one of --url <site>, --package <ecosystem>:<name>[@<version>], and --repo <url>[@<version or tag>]; for example 'llm-docs discover --package npm:vite'."
         );
       }
 
-      if (options.package !== undefined) {
-        const discovery = await discoverPackage(parsePackageSpec(options.package));
+      if (options.package !== undefined || options.repo !== undefined) {
+        const discovery = await discoverPackage(
+          options.repo === undefined
+            ? parsePackageSpec(options.package ?? '')
+            : parseRepositorySpec(options.repo)
+        );
         writeJson(discovery);
         for (const line of describePackageDiscovery(discovery)) {
           say(line);
@@ -1524,8 +1621,18 @@ function buildProgram(): Command {
           `${inspection.candidates.length} candidate URLs, ${inspection.warnings.length} warnings.`
       );
       if (inspection.llmsTxt !== null) {
+        const { pathPrefixes, morePathPrefixes } = inspection.llmsTxt;
+        const shown = pathPrefixes.slice(0, 6);
+        const rest = pathPrefixes.length - shown.length + morePathPrefixes;
         say(
           `  llms.txt lists ${inspection.llmsTxt.listedUrls} URLs; Markdown at .md: ${markdownPages?.length ?? 0} of ${inspection.llmsTxt.markdownProbes.length} probed pages; version segments: ${segments?.length === 0 ? 'none' : segments?.join(', ')}.`
+        );
+        say(
+          `  path prefixes for --include: ${
+            shown.length === 0
+              ? 'none on this origin'
+              : `${shown.map((entry) => `${entry.prefix} (${entry.urls})`).join(', ')}${rest > 0 ? `, and ${rest} more` : ''}`
+          }.`
         );
       }
       for (const warning of inspection.warnings) {

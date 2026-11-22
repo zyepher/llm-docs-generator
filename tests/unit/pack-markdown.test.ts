@@ -324,6 +324,30 @@ describe('convertMarkdownPage', () => {
     expect(body(banner)).toContain('Documentation Index');
   });
 
+  it('strips the Mintlify footer only when it is the last line of the page', () => {
+    const footer =
+      'This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.';
+    // The live export ends with the footer after two blank lines and no final newline.
+    const page = `# Key Changes\n\nSee [GitHub](https://github.com/x).\n\n\n${footer}`;
+    const stripped = convert(page, { transforms: ['strip-mintlify-banner'] });
+    expect(stripped.text).not.toContain('Mintlify');
+    expect(stripped.text.endsWith('See [GitHub](https://github.com/x).\n')).toBe(true);
+    expect(stripped.changedBy).toEqual(['strip-mintlify-banner']);
+    expect(convert(`${page}\n  \n`, { transforms: ['strip-mintlify-banner'] }).text).toBe(
+      stripped.text
+    );
+
+    for (const kept of [
+      `# Hosting\n\n${footer}\n\nMore text after it.\n`,
+      '# Hosting\n\nThese docs are built and hosted on [Mintlify](https://mintlify.com).\n',
+      `# Hosting\n\nWe say: ${footer}\n`,
+    ]) {
+      const result = convert(kept, { transforms: ['strip-mintlify-banner'] });
+      expect(result.changedBy).toEqual([]);
+      expect(result.text).toContain('Mintlify');
+    }
+  });
+
   it('strips HTML comments outside code only', () => {
     const text =
       'a <!-- inline --> b\n\n<!-- whole\nline -->\n\nc\n\n```html\n<!-- kept -->\n```\n\n`<!-- span -->`\n';

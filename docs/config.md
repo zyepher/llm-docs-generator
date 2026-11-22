@@ -53,7 +53,7 @@ A pack id matches `^[a-z0-9][a-z0-9._-]{0,63}$`. It is the pack's directory name
 | `version` | string | the lockfile version | Required unless `dependency` is set. No whitespace, no `<` or `>`, no control characters. Need not be semver: `2026-07-28` is valid. |
 | `sources` | array | required | At least one source. See [Sources](#sources). |
 | `site.baseUrl` | string | required with `site` | An `https://` URL without credentials: the docs website, so absolute links to it resolve to pack pages. |
-| `site.aliases` | object | `{}` | Site path to site path, applied before matching, such as `{ "/guide/latest": "/guide" }`. |
+| `site.aliases` | object | `{}` | Site path to site path, applied before matching, such as `{ "/guide/latest": "/guide" }`. A target may hold placeholders; a key may not. An alias matches whole path segments, and a page extension (`.md`, `.mdx`, `.markdown`, `.html`, `.htm`, `.rst`) or trailing slash on either side is ignored when matching pages, so `/guide/latest` also catches a link to `/guide/latest.md`. |
 | `layout.combined` | boolean | `false` | Also writes `<id>.full.md`: the index and every page in one file. |
 | `license` | string or null | `null` | A declared SPDX id or expression, or `"proprietary"`. Recorded next to the detected license and wins for the license status. |
 | `limits.maxFileBytes` | integer | `20971520` (20 MiB) | 1 to `209715200` (200 MiB). The per-file download and checkout cap for this pack. |
@@ -73,7 +73,7 @@ Every source has a `type` and these common keys:
 | `mount` | string | `""` | A relative POSIX path with no `..` segment and no backslash. The source's pages go under `pages/<mount>/` and its passthrough files under `files/<mount>/`. |
 | `include` | string array | depends on the type | Globs a file must match, over the source-relative path (for `llms-txt`, over the listed URL paths). |
 | `exclude` | string array | `[]` | Globs that drop a file `include` matched. |
-| `passthrough` | string array | `[]` | Globs for files copied byte-identical to `files/<mount>/<path>`. A file matched by both `passthrough` and the converter's `include` is passthrough. |
+| `passthrough` | string array | `[]` | Globs for files copied byte-identical to `files/<mount>/<path>`. A file matched by both `passthrough` and the converter's `include` is passthrough. The pack index lists these files under "Files" with their sizes, and the managed block adds the topic `files`. |
 | `convert` | object or null | `null` | A document converter. See [`convert`](#convert). |
 | `transforms` | string array | `[]` | Distinct names from `strip-mintlify-banner`, `strip-html-comments`, `drop-frontmatter-description`. See [Transforms](#transforms). |
 
@@ -85,7 +85,19 @@ Default `include` for `git` and `local` sources is `**/*.{md,mdx,markdown,rst,ht
 |---|---|---|---|
 | `repo` | string | required | An `https://` URL without credentials: no user name or password, and no token, key, signature, or similar parameter. `file://` is accepted with a warning that the origin is not portable. `ssh://` and `git@` remotes are rejected. |
 | `ref` | string | required | A tag, a branch, or a 40-hex commit. A branch is accepted with a warning that the pin floats until the next sync records a new commit. |
-| `paths` | string array | `["."]` (the whole repository) | Repository-relative directories or files to take. No absolute paths and no `..`. |
+| `paths` | string array | `["."]` (the whole repository) | Repository-relative directories or files to take. No absolute paths and no `..`. Files are stored relative to the common root of these paths; see below. |
+
+Every taken file is stored by its path relative to the common root of `paths`: the deepest directory that holds every entry, where a file entry counts as the directory it is in. That stored path is what `include`, `exclude`, and `passthrough` match, and the file's output is `pages/<mount>/<stored path>` (or `files/<mount>/<stored path>`).
+
+| `paths` | Common root | `docs/guide/start.md` is stored as |
+|---|---|---|
+| `["."]` (the default) | the repository root | `docs/guide/start.md` |
+| `["docs"]` | `docs` | `guide/start.md` |
+| `["docs/guide", "docs/index.md"]` | `docs` | `guide/start.md` |
+| `["docs/guide/start.md"]` | `docs/guide` | `start.md` |
+| `["README.md", "docs/guide"]` | the repository root | `docs/guide/start.md` |
+
+So one file lands directly under `pages/` or `files/`, without its directories: `"paths": ["schema/2026-07-28/schema.ts"]` with a passthrough glob gives `files/schema.ts`. Set `mount` to put it in a directory, such as `"mount": "schema"` for `files/schema/schema.ts`. Write `include`, `exclude`, and `passthrough` globs against the stored path, not the repository path: with `"paths": ["docs"]`, exclude the blog with `**/blog/**` or `blog/**`, not `docs/blog/**`. The stored path, without its extension, is also the page's path on the website for [`site`](#pack-keys) links, so `paths` whose stored paths mirror the site's URL paths let links to the site resolve to pages. Stored paths are distinct within a source, and two files that would land on one output path (from two sources, or paths that differ only by case) are a config error naming both.
 
 llm-docs never sends credentials to git, and it clears git's credential helpers, so it cannot fetch a private repository. To pin docs from one, copy them into a folder in the project and use a [`local`](#local) source.
 
@@ -177,7 +189,7 @@ Transforms are deterministic, opt in per source, and recorded in the manifest wi
 
 | Name | Effect |
 |---|---|
-| `strip-mintlify-banner` | Removes the leading "Documentation Index" block that Mintlify prepends to raw `.md` pages. Exact marker match only. |
+| `strip-mintlify-banner` | Removes the leading "Documentation Index" block that Mintlify prepends to raw `.md` pages, and the "This documentation is built and hosted on Mintlify" footer line it appends, when that line ends the page. Exact text match only, so prose that mentions Mintlify stays. |
 | `strip-html-comments` | Removes HTML comments outside code. |
 | `drop-frontmatter-description` | Leaves out the paragraph the converter makes from a frontmatter `description`. |
 
@@ -190,8 +202,9 @@ Transforms are deterministic, opt in per source, and recorded in the manifest wi
 - `urls` of a `urls` source, in both the URL and an explicit `path`.
 - `include` and `exclude` of any source.
 - `readFirst`.
+- The targets (values) of `site.aliases`, so `{ "/specification/latest": "/specification/{version}" }` sends links to the latest revision to the pinned one.
 
-`{major}`, `{minor}`, and `{patch}` come from the leading numbers of the version, with an optional `v` prefix: `v8.2.0-beta.1` gives `8`, `2`, and `0`. A placeholder with no value for the version (`{minor}` of the version `2026-07-28`, for example) is a config error, never an empty string. A placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local `path`, `convert.include`, or `convert.command` is a config error. Other keys are taken literally.
+`{major}`, `{minor}`, and `{patch}` come from the leading numbers of the version, with an optional `v` prefix: `v8.2.0-beta.1` gives `8`, `2`, and `0`. A placeholder with no value for the version (`{minor}` of the version `2026-07-28`, for example) is a config error, never an empty string. A placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local `path`, `convert.include`, `convert.command`, `site.baseUrl`, or a `site.aliases` key is a config error. Other keys are taken literally.
 
 A ref of `v{version}` on a pack bound to a dependency follows the lockfile: when the lockfile moves, the next `sync` builds the pack at the new tag.
 
@@ -280,8 +293,14 @@ Text that reaches an agent file (pack titles, versions, descriptions, and top-le
           "transforms": ["strip-mintlify-banner"]
         }
       ],
-      "license": "MIT"
+      "site": {
+        "baseUrl": "https://modelcontextprotocol.io",
+        "aliases": { "/specification/latest": "/specification/{version}" }
+      },
+      "license": "Apache-2.0 AND MIT"
     }
   }
 }
 ```
+
+The `mcp` license comes from the `LICENSE` file of the specification repository at the tag `2026-07-28`: new specification contributions are Apache-2.0, contributions whose authors have not yet agreed to relicense remain MIT, and documentation other than the specification is CC-BY-4.0. This pack takes only the specification, so it declares `Apache-2.0 AND MIT`; a pack that also takes the site's `/docs/` pages declares `Apache-2.0 AND MIT AND CC-BY-4.0`.

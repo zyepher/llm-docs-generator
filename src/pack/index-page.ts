@@ -28,11 +28,15 @@ export type IndexPageInput = Pick<
 > & {
   /** Page outputs (kind `page`) with their titles and token estimates. */
   pages: readonly Pick<ManifestOutputEntry, 'path' | 'title' | 'tokens'>[];
+  /** Passthrough outputs (kind `passthrough`) with their sizes. */
+  files: readonly Pick<ManifestOutputEntry, 'path' | 'bytes'>[];
   /** `recipe.readFirst` resolved, in recipe order; empty when the recipe marks none. */
   readFirst: readonly ReadFirstLink[];
 };
 
 const TITLE_CAP = 120;
+/** Past this many passthrough files, the Files section groups them by top-level directory. */
+const UNGROUPED_FILES_MAX = 20;
 
 /** Escape upstream text for one Markdown table cell or list line. */
 export function escapeIndexText(value: string): string {
@@ -111,10 +115,32 @@ function describeLicense(license: IndexPageInput['license']): string {
   return 'License: unknown; check the upstream terms before redistributing these pages.';
 }
 
+/** The top-level directory of a path under `pages/` or `files/`, '' for one directly inside. */
 function groupOf(path: string): string {
-  const inside = path.slice('pages/'.length);
+  const inside = path.slice(path.indexOf('/') + 1);
   const slash = inside.indexOf('/');
   return slash === -1 ? '' : inside.slice(0, slash);
+}
+
+/** Entries by `groupOf`, groups in code-unit order and each group sorted by path. */
+function groupByDirectory<T extends { path: string }>(entries: readonly T[]): [string, T[]][] {
+  const groups = new Map<string, T[]>();
+
+  for (const entry of entries) {
+    const group = groupOf(entry.path);
+    groups.set(group, [...(groups.get(group) ?? []), entry]);
+  }
+
+  return [...groups.keys()]
+    .sort(compareStringsByCodeUnit)
+    .map((group) => [
+      group,
+      [...(groups.get(group) ?? [])].sort((a, b) => compareStringsByCodeUnit(a.path, b.path)),
+    ]);
+}
+
+function groupHeading(group: string): string {
+  return `### ${group === '' ? 'Top level' : escapeIndexText(group)}`;
 }
 
 /** The order pages appear in the index (and the combined file): by top-level group, then path. */
@@ -157,30 +183,33 @@ export function renderIndexPage(input: IndexPageInput): string {
 
   lines.push('', '## Pages');
 
-  const groups = new Map<string, IndexPageInput['pages'][number][]>();
-
-  for (const page of input.pages) {
-    const group = groupOf(page.path);
-    groups.set(group, [...(groups.get(group) ?? []), page]);
-  }
-
-  for (const group of [...groups.keys()].sort(compareStringsByCodeUnit)) {
-    const pages = [...(groups.get(group) ?? [])].sort((a, b) =>
-      compareStringsByCodeUnit(a.path, b.path)
-    );
-    lines.push(
-      '',
-      `### ${group === '' ? 'Top level' : escapeIndexText(group)}`,
-      '',
-      '| Page | Title | Tokens |',
-      '| --- | --- | --- |'
-    );
+  for (const [group, pages] of groupByDirectory(input.pages)) {
+    lines.push('', groupHeading(group), '', '| Page | Title | Tokens |', '| --- | --- | --- |');
 
     for (const page of pages) {
       const label = escapeIndexText(page.path.slice('pages/'.length));
       lines.push(
         `| [${label}](${linkPath(page.path)}) | ${escapeIndexText(page.title ?? '')} | ${page.tokens ?? 0} |`
       );
+    }
+  }
+
+  if (input.files.length > 0) {
+    lines.push(
+      '',
+      '## Files',
+      '',
+      'These files are byte-identical copies of the upstream files, kept as they are rather than converted to pages.'
+    );
+    const fileLine = (file: IndexPageInput['files'][number]): string =>
+      `- [${escapeIndexText(file.path.slice('files/'.length))}](${linkPath(file.path)}) (${file.bytes} bytes)`;
+    const groups: [string | null, readonly IndexPageInput['files'][number][]][] =
+      input.files.length > UNGROUPED_FILES_MAX
+        ? groupByDirectory(input.files)
+        : [[null, [...input.files].sort((a, b) => compareStringsByCodeUnit(a.path, b.path))]];
+
+    for (const [group, files] of groups) {
+      lines.push('', ...(group === null ? [] : [groupHeading(group), '']), ...files.map(fileLine));
     }
   }
 

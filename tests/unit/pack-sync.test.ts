@@ -322,6 +322,24 @@ describe('syncPacks', () => {
     ]);
   });
 
+  it('warns, without recording it, when the title already holds the version', async () => {
+    const root = await makeProject(
+      {
+        twice: { ...PACK, title: 'Demo v1.0.0', version: '1.0.0' },
+        word: { ...PACK, title: 'Web3 SDK', version: '3' },
+      },
+      DOCS
+    );
+    const report = await syncPacks(root, undefined);
+    const twice = report.packs.find((pack) => pack.id === 'twice');
+
+    expect(twice?.warnings).toContain(
+      'The title "Demo v1.0.0" already holds the version 1.0.0, and the index and the managed block add the version after the title, so they show it twice; set packs.twice.title to the library\'s name alone, such as "Demo".'
+    );
+    expect((await readPackManifest(join(root, 'agent-docs', 'twice'))).warnings).toEqual([]);
+    expect(report.packs.find((pack) => pack.id === 'word')?.warnings).toEqual([]);
+  });
+
   it('updates the managed block last, listing only the packs that built', async () => {
     const root = await makeProject(
       { demo: PACK, broken: { ...PACK, sources: [{ type: 'local', path: 'missing' }] } },
@@ -693,6 +711,18 @@ describe('syncPacks', () => {
       'Skipped 2 included files with no page handler (.png: 2); list them under "passthrough" to carry them byte-identical.',
     ]);
     expect(report.packs[0]?.warnings).toContain(manifest.warnings[0]);
+    expect(await readFile(join(root, 'agent-docs', 'demo', 'index.md'), 'utf-8')).toMatch(
+      /\n## Files\n\nThese files are byte-identical copies of the upstream files, kept as they are rather than converted to pages\.\n\n- \[schema\/s\.json\]\(files\/schema\/s\.json\) \(9 bytes\)\n$/
+    );
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '- Demo 1.0.0: `agent-docs/demo/index.md` (files)\n'
+    );
+
+    await writeFiles(join(root, 'agent-docs', 'demo'), { 'guides/notes.md': '# Notes\n' });
+    await syncPacks(root, ['demo']);
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '- Demo 1.0.0: `agent-docs/demo/index.md` (files, guides)\n'
+    );
   });
 
   it('applies mount, records transforms, and reports unsupported sources clearly', async () => {
@@ -920,7 +950,61 @@ describe('verifyPacks', () => {
       problems(await verifyPacks(root, ['demo'], { strict: true })).filter((line) =>
         line.includes('fragment')
       )
-    ).toEqual(['demo links fail: pages/index.md fragment matches no heading on this page: #nope']);
+    ).toEqual([
+      'demo links warn: pages/index.md fragment matches no heading on this page; the anchor comes from the upstream text and the link target page exists, so the link still opens that page: #nope',
+    ]);
+  });
+
+  it('under --strict, matches upstream anchors loosely and only warns for a page fragment that matches nothing', async () => {
+    const root = await makeProject(
+      {
+        demo: {
+          ...PACK,
+          sources: [{ type: 'local', path: 'docs', passthrough: ['schema.json'] }],
+        },
+      },
+      {
+        'docs/index.md': [
+          '# Home',
+          '',
+          '[ref](guide.md#$ref-resolution) [scheme](guide.md#https//) [same](#home)',
+          '[logs](guide.md#getting-logs-from-claude-desktop) [mine](#not-here)',
+          '[file](schema.json#defs)',
+          '',
+        ].join('\n'),
+        'docs/guide.md': [
+          '# Guide',
+          '',
+          '## `$ref` Resolution',
+          '',
+          '## https://',
+          '',
+          '> [accordion] Getting logs from Claude Desktop',
+          '',
+        ].join('\n'),
+        'docs/schema.json': '{}\n',
+      }
+    );
+    expect((await syncPacks(root, undefined)).packs[0]?.status).toBe('built');
+
+    const report = await verifyPacks(root, undefined, { strict: true });
+    expect(report.ok).toBe(true);
+    expect(problems(report)).toEqual([
+      'demo links warn: pages/index.md fragment matches no heading in the target page; the anchor comes from the upstream text and the link target page exists, so the link still opens that page: guide.md#getting-logs-from-claude-desktop',
+      'demo links warn: pages/index.md fragment matches no heading on this page; the anchor comes from the upstream text and the link target page exists, so the link still opens that page: #not-here',
+    ]);
+    expect(problems(await verifyPacks(root, undefined))).toEqual([]);
+
+    // The index is written by the build, so a fragment there that matches nothing fails.
+    const index = join(root, 'agent-docs', 'demo', 'index.md');
+    await writeFile(index, `${await readFile(index, 'utf-8')}\n[x](pages/guide.md#nope)\n`);
+    expect(
+      problems(await verifyPacks(root, undefined, { strict: true })).filter((line) =>
+        line.includes(' links fail')
+      )
+    ).toEqual([
+      'demo links fail: index.md fragment matches no heading in the target page: pages/guide.md#nope',
+    ]);
   });
 
   it('fails recipe when the config changes and warns for an orphan', async () => {
