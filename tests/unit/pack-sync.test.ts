@@ -322,6 +322,24 @@ describe('syncPacks', () => {
     ]);
   });
 
+  it('warns, without recording it, when the title already holds the version', async () => {
+    const root = await makeProject(
+      {
+        twice: { ...PACK, title: 'Demo v1.0.0', version: '1.0.0' },
+        word: { ...PACK, title: 'Web3 SDK', version: '3' },
+      },
+      DOCS
+    );
+    const report = await syncPacks(root, undefined);
+    const twice = report.packs.find((pack) => pack.id === 'twice');
+
+    expect(twice?.warnings).toContain(
+      'The title "Demo v1.0.0" already holds the version 1.0.0, and the index and the managed block add the version after the title, so they show it twice; set packs.twice.title to the library\'s name alone, such as "Demo".'
+    );
+    expect((await readPackManifest(join(root, 'agent-docs', 'twice'))).warnings).toEqual([]);
+    expect(report.packs.find((pack) => pack.id === 'word')?.warnings).toEqual([]);
+  });
+
   it('updates the managed block last, listing only the packs that built', async () => {
     const root = await makeProject(
       { demo: PACK, broken: { ...PACK, sources: [{ type: 'local', path: 'missing' }] } },

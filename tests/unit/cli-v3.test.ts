@@ -201,7 +201,7 @@ describe('llm-docs v3 CLI', () => {
 
     expect(add.code).toBe(0);
     expect(add.stdout).toBe('');
-    expect(add.stderr).toContain('demo: built (not built yet)');
+    expect(add.stderr).toContain('demo: built (first build)');
     expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs).toEqual({
       demo: { title: 'Demo', version: '1.0.0', sources: [{ type: 'local', path: 'docs' }] },
     });
@@ -1087,7 +1087,7 @@ describe('llm-docs v3 CLI', () => {
       env
     );
     expect(add.code, add.stderr).toBe(0);
-    expect(add.stderr).toContain('manuals: built (not built yet)');
+    expect(add.stderr).toContain('manuals: built (first build)');
     expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs.manuals).toEqual({
       version: '1.0.0',
       sources: [{ type: 'local', path: 'docs', convert: { tool: 'markitdown' } }],
@@ -1344,7 +1344,7 @@ describe('llm-docs v3 CLI', () => {
     ]);
 
     expect(add.code, add.stderr).toBe(0);
-    expect(add.stderr).toContain('demo: built (not built yet)');
+    expect(add.stderr).toContain('demo: built (first build)');
     expect(add.stderr).toContain('is a branch, so the pin floats');
     expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs.demo).toEqual({
       version: '1.0.0',
@@ -1510,7 +1510,7 @@ describe('llm-docs v3 CLI', () => {
 
     const sync = await runCli(root, ['sync', 'vite-8']);
     expect(sync.code, sync.stderr).toBe(0);
-    expect(sync.stderr).toContain('vite-8: built (not built yet)');
+    expect(sync.stderr).toContain('vite-8: built (first build)');
     expect(await readdir(join(root, 'agent-docs', 'vite-8', 'pages', 'guide'))).toEqual([
       'start.md',
     ]);
@@ -1674,6 +1674,18 @@ describe('--json: one document on stdout when the command runs, nothing when it 
       '"aliases": {\n        "/spec/latest": "/spec/{version}",\n        "/old": "/new"\n      }'
     );
     expect(human.stderr).toContain('"license": "Apache-2.0 AND CC-BY-4.0"');
+
+    const titled = await runCli(root, [
+      ...flags.slice(0, 6),
+      '--title',
+      'Demo Spec 2026-07-28',
+      '--dry-run',
+    ]);
+    expect(titled.code, titled.stderr).toBe(0);
+    expect(titled.stderr).toContain(
+      '  warning: The title "Demo Spec 2026-07-28" already holds the version 2026-07-28, and the index and the managed block add the version after the title, so they show it twice; set packs.other.title to the library\'s name alone, such as "Demo Spec".\n'
+    );
+    expect(human.stderr).not.toContain('already holds the version');
 
     const noSite = await runCli(root, [
       'add',

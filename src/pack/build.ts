@@ -1253,6 +1253,7 @@ async function buildPack(
       ...movedRefWarnings(previous, origins),
       ...[...new Set(warnings)].sort(compareStringsByCodeUnit),
       ...(statusWarning === undefined ? [] : [statusWarning]),
+      ...titleVersionWarnings(resolved),
     ];
   } finally {
     if (!swapped) {
@@ -1610,9 +1611,28 @@ export async function previewPack(
       warnings: [
         ...acquisitions.flatMap((acquisition) => acquisition.warnings),
         ...selection.warnings,
+        ...titleVersionWarnings(resolved),
       ],
     };
   } finally {
     await rm(workRoot, { recursive: true, force: true });
   }
+}
+
+/**
+ * The index and the managed block write `<title> <version>`, so a title that
+ * already holds the version (as a word, optionally after a `v`) shows it twice.
+ * Printed with the build's output, never recorded in the manifest.
+ */
+function titleVersionWarnings({ id, recipe }: ResolvedPack): string[] {
+  const escaped = recipe.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`(?:^|[^\\p{L}\\p{N}])v?${escaped}(?![\\p{L}\\p{N}])`, 'iu');
+
+  if (!pattern.test(recipe.title)) {
+    return [];
+  }
+  const name = recipe.title.replace(pattern, '').replace(/\s+/g, ' ').trim();
+  return [
+    `The title "${recipe.title}" already holds the version ${recipe.version}, and the index and the managed block add the version after the title, so they show it twice; set packs.${id}.title to the library's name alone${name === '' ? '' : `, such as "${name}"`}.`,
+  ];
 }

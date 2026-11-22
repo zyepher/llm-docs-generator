@@ -49,6 +49,7 @@ Writes one pack recipe into `llm-docs.json` and builds that pack. It takes exact
 Use it to create a pack. The [`add-docs` skill](../plugin/skills/add-docs/SKILL.md) is the procedure an agent follows to choose the source and version.
 
 - An existing pack id is refused unless `--replace` is given.
+- `--title` is the library's name without the version: the index and the managed block write `<title> <version>`. A build whose title already holds the version as a word (`Model Context Protocol 2026-07-28`, `Vite v8.2.0`) prints a warning naming the title to set; the manifest does not record it.
 - `--covers <ecosystem>:<name>` (repeatable) lists another package the same docs describe, such as the client package next to a server SDK. It writes `covers` (see [`covers`](config.md#covers)) and binds no version; `--dry-run` shows it in the recipe.
 - `--license <license>` declares the docs license, an SPDX expression such as `CC-BY-4.0` or `"Apache-2.0 AND MIT"`, or `proprietary`. It writes `license`, which is recorded next to the license detected from license files and wins for the license status. Pages fetched from a website have no license file, so set it there.
 - `--alias <from>=<to>` (repeatable, needs `--site`) writes one entry of `site.aliases`: a path on the website that stands for another, such as `/specification/latest=/specification/{version}`. The target may use placeholders.

@@ -46,7 +46,7 @@ Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/.
 | `--version <version>` | The docs version. Required unless `--dependency` is set. |
 | `--include <glob>` | Files a source takes (repeatable). For `--llms-txt`, URL paths. |
 | `--mount <dir>` | Subfolder under `pages/` and `files/` for this source. |
-| `--title <title>` | Pack title. The id by default. |
+| `--title <title>` | Pack title: the library's name without the version, which the index and the managed block add after it. The id by default. |
 | `--site <baseUrl>` | The docs website, so absolute links to it resolve to pack pages. |
 | `--alias <from>=<to>` | A path on the `--site` website that stands for another, such as `/guide/latest=/guide/{version}` (repeatable). |
 | `--license <license>` | The docs license: an SPDX expression such as `CC-BY-4.0`, or `proprietary`. Set it for pages fetched from a website, which have no license file. |

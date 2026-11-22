@@ -885,7 +885,9 @@ function printSyncReport(report: SyncReport): void {
         say(`${pack.id}: up to date`);
         break;
       case 'built':
-        say(`${pack.id}: built (${pack.detail ?? 'rebuilt'})`);
+        say(
+          `${pack.id}: built (${pack.reason === 'not-built' ? 'first build' : (pack.detail ?? 'rebuilt')})`
+        );
         break;
       case 'would-build':
         say(`${pack.id}: would rebuild (${pack.detail ?? 'out of date'})`);
@@ -1216,7 +1218,10 @@ function buildProgram(): Command {
         '--mount <dir>',
         'Subdirectory under pages/ and files/ for this source (default: the pack root)'
       )
-      .option('--title <title>', 'Pack title (default: the id)')
+      .option(
+        '--title <title>',
+        "Pack title: the library's name without the version, which the index and the managed block add after it (default: the id)"
+      )
       .option(
         '--recipe <json>',
         'More source fields as a JSON object, such as {"exclude": ["**/blog/**"], "passthrough": ["**/*.csv"]} (default: none)'
