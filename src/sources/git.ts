@@ -38,7 +38,7 @@ export class GitError extends Error {
 
 export type RefKind = 'tag' | 'branch' | 'commit';
 
-type GitRunner = (args: readonly string[], options?: { cwd?: string }) => Promise<string>;
+export type GitRunner = (args: readonly string[], options?: { cwd?: string }) => Promise<string>;
 
 /** Environment variables kept from the parent: TLS trust settings a corporate network needs. */
 const KEPT_GIT_ENV = new Set(['GIT_SSL_CAINFO', 'GIT_SSL_CAPATH']);
@@ -48,7 +48,7 @@ const KEPT_GIT_ENV = new Set(['GIT_SSL_CAINFO', 'GIT_SSL_CAPATH']);
  * parent is dropped (GIT_DIR, GIT_CONFIG_PARAMETERS, GIT_ALLOW_PROTOCOL, and
  * friends would otherwise steer git), and config flags pin the policy.
  */
-async function createGitRunner(workDir: string, repo: URL): Promise<GitRunner> {
+export async function createGitRunner(workDir: string, repo: URL): Promise<GitRunner> {
   const emptyConfig = join(workDir, 'git-empty-config');
   const emptyHooks = join(workDir, 'git-empty-hooks');
   await writeFile(emptyConfig, '');
@@ -239,13 +239,14 @@ function sparsePatterns(paths: readonly string[]): string {
   return `${patterns.join('\n')}\n`;
 }
 
-interface TreeEntry {
+export interface TreeEntry {
   mode: string;
   type: string;
   path: string;
 }
 
-function parseTree(output: string): TreeEntry[] {
+/** Parse `git ls-tree -z` output. */
+export function parseTree(output: string): TreeEntry[] {
   return output
     .split('\0')
     .filter((record) => record !== '')
@@ -293,35 +294,33 @@ function sample(paths: readonly string[]): string {
   return `${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', ...' : ''}`;
 }
 
-export async function acquireGit(
-  source: ResolvedSourceOfType<'git'>,
-  context: AcquireContext
-): Promise<SourceAcquisition> {
-  const repoUrl = new URL(source.repo);
-  const warnings: string[] = [];
-
+/**
+ * Refuse a repository URL that is neither https:// nor file://, and vet an
+ * https host against the network policy: git resolves the host itself, so
+ * without this a URL could reach a private network.
+ */
+export async function assertRepositoryAllowed(repoUrl: URL): Promise<void> {
   if (repoUrl.protocol === 'https:') {
-    // git resolves the host itself; vet it first so a recipe cannot reach a private network.
     await resolveAllowedAddress(repoUrl, process.env[ALLOW_PRIVATE_NETWORK_ENV] === '1');
-  } else if (repoUrl.protocol === 'file:') {
-    warnings.push(
-      `git source ${source.repo} is a file:// repository: a non-portable origin that only this machine can refresh.`
-    );
-  } else {
-    throw new ConfigError(
-      `git repo "${redactUrl(source.repo)}" must be an https:// or file:// URL.`
-    );
+  } else if (repoUrl.protocol !== 'file:') {
+    throw new ConfigError(`git repo "${redactUrl(repoUrl)}" must be an https:// or file:// URL.`);
   }
+}
 
-  assertRefName(source.ref);
-  const paths = normalizeTakenPaths(source.paths);
-  const git = await createGitRunner(context.workDir, repoUrl);
-  const checkout = join(context.workDir, 'checkout');
-  const resolved = await resolveRef(git, source.repo, source.ref);
-
+/**
+ * Create a repository at `checkout` and fetch only `refspec`'s commit
+ * (shallow, blobless: trees but no file contents, no tags, no submodules).
+ * Returns the fetched commit.
+ */
+export async function fetchCommit(
+  git: GitRunner,
+  checkout: string,
+  repo: string,
+  refspec: string
+): Promise<string> {
   await mkdir(checkout);
   await git(['init', '--quiet', '--template=', checkout]);
-  await git(['remote', 'add', 'origin', source.repo], { cwd: checkout });
+  await git(['remote', 'add', 'origin', repo], { cwd: checkout });
   await git(
     [
       'fetch',
@@ -332,7 +331,7 @@ export async function acquireGit(
       '--no-tags',
       '--no-recurse-submodules',
       'origin',
-      resolved.refspec,
+      refspec,
     ],
     { cwd: checkout }
   );
@@ -341,10 +340,32 @@ export async function acquireGit(
   ).trim();
 
   if (!COMMIT_PATTERN.test(commit)) {
-    throw new GitError(
-      `git fetch of ${redactUrl(source.repo)} at ${source.ref} returned no commit.`
+    throw new GitError(`git fetch of ${redactUrl(repo)} at ${refspec} returned no commit.`);
+  }
+
+  return commit;
+}
+
+export async function acquireGit(
+  source: ResolvedSourceOfType<'git'>,
+  context: AcquireContext
+): Promise<SourceAcquisition> {
+  const repoUrl = new URL(source.repo);
+  const warnings: string[] = [];
+
+  await assertRepositoryAllowed(repoUrl);
+  if (repoUrl.protocol === 'file:') {
+    warnings.push(
+      `git source ${source.repo} is a file:// repository: a non-portable origin that only this machine can refresh.`
     );
   }
+
+  assertRefName(source.ref);
+  const paths = normalizeTakenPaths(source.paths);
+  const git = await createGitRunner(context.workDir, repoUrl);
+  const checkout = join(context.workDir, 'checkout');
+  const resolved = await resolveRef(git, source.repo, source.ref);
+  const commit = await fetchCommit(git, checkout, source.repo, resolved.refspec);
 
   const sparse = !paths.includes('.');
   if (sparse) {
