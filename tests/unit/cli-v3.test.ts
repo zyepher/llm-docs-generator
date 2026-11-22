@@ -1272,6 +1272,60 @@ describe('llm-docs v3 CLI', () => {
     expect((await runCli(root, ['refresh', '--check'])).code).toBe(0);
   });
 
+  it('warns, in human and JSON output, when a rebuild picks up a tag or branch that moved upstream', async () => {
+    const repo = await makeGitRepo();
+    const repoDir = fileURLToPath(repo.url);
+    await execFileAsync('git', ['tag', 'v1.0.0'], { cwd: repoDir });
+    const recipe = (ref: string, description: string) => ({
+      version: '1.0.0',
+      description,
+      sources: [{ type: 'git', repo: repo.url, ref, paths: ['docs'] }],
+    });
+    const configure = (description: string) =>
+      writeFile(
+        join(root, 'llm-docs.json'),
+        JSON.stringify({
+          schemaVersion: 3,
+          agentFiles: [],
+          packs: {
+            tagged: recipe('v{version}', description),
+            branch: recipe('main', description),
+          },
+        })
+      );
+    const root = await makeProject({});
+    await configure('first');
+    expect((await runCli(root, ['sync'])).code).toBe(0);
+
+    await repo.commit({ 'docs/index.md': '# Home, rewritten\n' });
+    await execFileAsync('git', ['tag', '-f', 'v1.0.0'], { cwd: repoDir });
+    const moved = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoDir })
+    ).stdout.trim();
+    await configure('second');
+    const result = await runCli(root, ['sync', '--json']);
+
+    expect(result.code, result.stderr).toBe(0);
+    const warnings = (id: string): string[] =>
+      JSON.parse(result.stdout).packs.find((pack: { id: string }) => pack.id === id).warnings;
+    const tag = `git tag v1.0.0 of ${repo.url} now resolves to commit ${moved}; the previous build recorded ${repo.head}. The tag was moved upstream, so the pack's content may differ from what was reviewed; check why upstream moved it before relying on the pack, and pin the commit as the ref to stop it moving.`;
+    const branch = `git branch main of ${repo.url} now resolves to commit ${moved}; the previous build recorded ${repo.head}. A branch is expected to move, but the pack's content may differ from what was reviewed; pin a tag or a commit as the ref to build a fixed version.`;
+    expect(warnings('tagged')).toContain(tag);
+    expect(warnings('branch')).toContain(branch);
+    expect(result.stderr).toContain(`  warning: ${tag}\n`);
+    expect(result.stderr).toContain(`  warning: ${branch}\n`);
+    expect(
+      JSON.parse(await readFile(join(root, 'agent-docs', 'tagged', 'manifest.json'), 'utf-8'))
+        .warnings
+    ).not.toContain(tag);
+
+    await configure('third');
+    const again = await runCli(root, ['sync']);
+    expect(again.code, again.stderr).toBe(0);
+    expect(again.stderr).toContain('tagged: built');
+    expect(again.stderr).not.toContain('now resolves to commit');
+  });
+
   it('migrates a v2 git pack into a recipe that syncs and verifies', async () => {
     const repo = await makeGitRepo();
     const root = await makeProject({});

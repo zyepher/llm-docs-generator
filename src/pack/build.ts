@@ -800,6 +800,36 @@ async function writeStagedFile(
   await write(target);
 }
 
+/**
+ * A git ref that now resolves to another commit than the previous build of
+ * this pack recorded for the same repository and ref. A moved tag means the
+ * upstream rewrote a version, so it is called out on every build that picks
+ * it up, not only under `refresh`. Never recorded in the manifest, which
+ * stays a function of the recipe and the upstream bytes.
+ */
+function movedRefWarnings(
+  previous: PackManifest | undefined,
+  origins: PackManifest['origins']
+): string[] {
+  return origins.flatMap((origin) => {
+    if (origin.type !== 'git') {
+      return [];
+    }
+    const before = previous?.origins.find(
+      (entry) => entry.type === 'git' && entry.repo === origin.repo && entry.ref === origin.ref
+    );
+    if (before?.type !== 'git' || before.commit === origin.commit) {
+      return [];
+    }
+    const moved = `git ${origin.refKind} ${origin.ref} of ${origin.repo} now resolves to commit ${origin.commit}; the previous build recorded ${before.commit}`;
+    return [
+      origin.refKind === 'branch'
+        ? `${moved}. A branch is expected to move, but the pack's content may differ from what was reviewed; pin a tag or a commit as the ref to build a fixed version.`
+        : `${moved}. The tag was moved upstream, so the pack's content may differ from what was reviewed; check why upstream moved it before relying on the pack, and pin the commit as the ref to stop it moving.`,
+    ];
+  });
+}
+
 function summarizeVerification(failures: readonly { path?: string; message: string }[]): string {
   const shown = failures
     .slice(0, 3)
@@ -1145,6 +1175,7 @@ async function buildPack(
           : undefined;
 
     return [
+      ...movedRefWarnings(previous, origins),
       ...[...new Set(warnings)].sort(compareStringsByCodeUnit),
       ...(statusWarning === undefined ? [] : [statusWarning]),
     ];
