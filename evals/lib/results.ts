@@ -1,7 +1,12 @@
 import { isRecord } from '../../src/utils/guards.js';
 import type { Arm, CaseKind } from './cases.js';
-import type { TranscriptSummary } from './transcript.js';
-import type { CheckResult } from './workspace.js';
+import {
+  describeOutcome,
+  type SessionOutcome,
+  type SessionStartHook,
+  type TranscriptSummary,
+} from './transcript.js';
+import type { ArmAssertion, CheckResult } from './workspace.js';
 
 export interface RunRow {
   runId: string;
@@ -11,8 +16,10 @@ export interface RunRow {
   repeat: number;
   model: string;
   startedAt: string;
-  /** How the agent process ended: the result subtype, or timeout / no-result / spawn-error. */
-  agentOutcome: string;
+  /** How the session ended; null when it never started (setup failure, claude missing). */
+  outcome: SessionOutcome | null;
+  /** Sessions started for this run: more than 1 when a rate limit or overload was retried in place. */
+  attempts: number;
   agentExitCode: number | null;
   wallMs: number;
   passed: boolean;
@@ -28,9 +35,15 @@ export interface RunRow {
   webTargets: string[];
   toolCalls: Record<string, number>;
   permissionDenials: string[];
-  sessionStartHookOutput: string[];
+  sessionStartHooks: SessionStartHook[];
   session: TranscriptSummary['session'];
-  /** Set when the run could not be carried out (workspace setup, missing CLI); excluded from rates. */
+  /** Evidence that the session ran the arm it claims; any failure makes the row an infra error. */
+  armAssertions: ArmAssertion[];
+  /**
+   * Set when the run could not be carried out or did not measure its arm (workspace setup, claude
+   * missing, a session the service or account ended, a failed arm assertion, an interrupt). These
+   * rows are never graded, are excluded from rates, and are retried by --resume.
+   */
   infraError: string | null;
 }
 
@@ -44,6 +57,8 @@ export function isRunRow(value: unknown): value is RunRow {
     typeof value.model === 'string' &&
     typeof value.passed === 'boolean' &&
     Array.isArray(value.checks) &&
+    (value.outcome === null ||
+      (isRecord(value.outcome) && typeof value.outcome.kind === 'string')) &&
     (value.costUsd === null || typeof value.costUsd === 'number') &&
     (value.infraError === null || typeof value.infraError === 'string')
   );
@@ -120,6 +135,25 @@ function cell(agg: Aggregate | undefined): string {
   return `${agg.passed}/${agg.runs} (${pct(agg.passRate)})`;
 }
 
+/** One invocation of `run` (or `smoke`) over a results directory; `--resume` adds another. */
+export interface Segment {
+  startedAt: string;
+  endedAt: string;
+  /** Rows this segment wrote, graded or not. */
+  runsRecorded: number;
+  stoppedBecause: string | null;
+}
+
+export function isSegment(value: unknown): value is Segment {
+  return (
+    isRecord(value) &&
+    typeof value.startedAt === 'string' &&
+    typeof value.endedAt === 'string' &&
+    typeof value.runsRecorded === 'number' &&
+    (value.stoppedBecause === null || typeof value.stoppedBecause === 'string')
+  );
+}
+
 export interface SummaryMeta {
   timestamp: string;
   model: string;
@@ -127,6 +161,7 @@ export interface SummaryMeta {
   runsPerCell: number;
   arms: readonly Arm[];
   gitCommit: string;
+  segments: Segment[];
 }
 
 /** Human-readable summary. Plain Markdown tables, no em-dashes. */
@@ -139,6 +174,25 @@ export function renderSummary(meta: SummaryMeta, rows: RunRow[], aggregates: Agg
     `Model \`${meta.model}\`, Claude Code ${meta.claudeVersion}, ${meta.runsPerCell} run(s) per case and arm, repository commit \`${meta.gitCommit}\`.`
   );
   lines.push('');
+  if (
+    meta.segments.length > 1 ||
+    meta.segments.some((segment) => segment.stoppedBecause !== null)
+  ) {
+    lines.push('## Segments');
+    lines.push('');
+    lines.push(
+      'This run was carried out in more than one sitting (or stopped early). Cells run in a later segment ran later in wall-clock time than the rest.'
+    );
+    lines.push('');
+    lines.push('| Segment | Started | Ended | Runs recorded | Stopped because |');
+    lines.push('|---|---|---|---|---|');
+    for (const [index, segment] of meta.segments.entries()) {
+      lines.push(
+        `| ${index + 1} | ${segment.startedAt} | ${segment.endedAt} | ${segment.runsRecorded} | ${segment.stoppedBecause ?? 'finished'} |`
+      );
+    }
+    lines.push('');
+  }
   lines.push('## Pass rate by arm');
   lines.push('');
   lines.push(`| Scope | ${arms.join(' | ')} |`);
@@ -179,7 +233,7 @@ export function renderSummary(meta: SummaryMeta, rows: RunRow[], aggregates: Agg
   for (const row of rows) {
     const failed = row.checks.filter((check) => !check.passed).map((check) => check.name);
     lines.push(
-      `| ${row.runId} | ${row.infraError === null ? row.agentOutcome : 'infra error'} | ${row.passed ? 'yes' : 'no'} | ${failed.join(', ') || 'none'} | ${usd(row.costUsd)} | ${row.numTurns ?? 'n/a'} | ${row.docsConsulted ? 'yes' : 'no'} | ${row.webUsed ? `${row.webSearches}s/${row.webFetches}f` : 'no'} |`
+      `| ${row.runId} | ${row.infraError === null ? describeOutcome(row.outcome) : `infra error: ${row.infraError.slice(0, 120).replace(/[|\n]/g, ' ')}`} | ${row.passed ? 'yes' : 'no'} | ${failed.join(', ') || 'none'} | ${usd(row.costUsd)} | ${row.numTurns ?? 'n/a'} | ${row.docsConsulted ? 'yes' : 'no'} | ${row.webUsed ? `${row.webSearches}s/${row.webFetches}f` : 'no'} |`
     );
   }
   lines.push('');

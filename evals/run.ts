@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
-import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { errorMessage, isRecord } from '../src/utils/guards.js';
@@ -20,14 +21,31 @@ import {
   RESULTS_DIR,
 } from './lib/cases.js';
 import { installSignalHandlers, isShuttingDown, runProcess } from './lib/proc.js';
-import { buildAggregates, isRunRow, renderSummary, type RunRow } from './lib/results.js';
-import { summarizeTranscript } from './lib/transcript.js';
 import {
+  buildAggregates,
+  isRunRow,
+  isSegment,
+  renderSummary,
+  type RunRow,
+  type Segment,
+} from './lib/results.js';
+import {
+  ACCOUNT_STOP_REASONS,
+  type CouldNotRunReason,
+  classifyOutcome,
+  describeOutcome,
+  summarizeTranscript,
+  TRANSIENT_REASONS,
+} from './lib/transcript.js';
+import {
+  assertArm,
   copyTree,
   createWorkspace,
   ensureTemplate,
   gradeWorkspace,
+  inspectWorkspace,
   overlay,
+  type WorkspaceFacts,
 } from './lib/workspace.js';
 
 const USAGE = `Usage: npx tsx evals/run.ts <command> [options]
@@ -46,7 +64,13 @@ Commands:
                  [--plugin-dir <path>] [--effort <level>] [--resume <results dir>]
                  [--keep-workspaces]
                  Run claude -p per case, arm, and repeat, grade with the hidden checks, and write
-                 evals/results/<timestamp>/results.json and summary.md.
+                 evals/results/<timestamp>/results.json and summary.md. Stops with exit 4 when
+                 the account runs out of quota or loses its login; continue with --resume.
+  smoke          [--case <id>] [--arms ...] [--model M] [--plugin-dir <path>]
+                 [--max-budget-usd-per-run X] [--effort <level>] [--resume <dir>]
+                 One case (default zod-4-6) once per arm with the run invocation. Prints each
+                 session's outcome, cost, hook output, and arm assertions; exits non-zero if any
+                 session could not run or any assertion failed. Writes evals/results/smoke-<ts>/.
 `;
 
 const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -413,7 +437,7 @@ async function assertPacksPrepared(cases: EvalCase[]): Promise<void> {
 /* plan                                                                                       */
 /* ------------------------------------------------------------------------------------------ */
 
-interface PlannedRun {
+export interface PlannedRun {
   runId: string;
   evalCase: EvalCase;
   arm: Arm;
@@ -421,7 +445,7 @@ interface PlannedRun {
 }
 
 /** Repeat-major order interleaves arms in time, so drift in the model service hits all arms alike. */
-function planRuns(cases: EvalCase[], arms: Arm[], runs: number): PlannedRun[] {
+export function planRuns(cases: EvalCase[], arms: Arm[], runs: number): PlannedRun[] {
   const planned: PlannedRun[] = [];
   for (let repeat = 1; repeat <= runs; repeat += 1) {
     for (const evalCase of cases) {
@@ -518,6 +542,12 @@ async function plan(argv: string[]): Promise<number> {
   } else {
     process.stdout.write(`No previous ${model} runs in evals/results to estimate from.\n`);
   }
+  process.stdout.write(
+    `\nBefore a full run, prove the pipeline with \`npm run eval -- smoke\`: case ${SMOKE_CASE} (or --case <id>) ` +
+      `once per arm (${arms.join(', ')}) = ${arms.length} session(s) with the same invocation as run, ` +
+      `at most $${(arms.length * cap).toFixed(2)}. It prints every arm assertion and exits non-zero if any fails ` +
+      'or any session could not run. Note your usage meter before and after it.\n'
+  );
   return 0;
 }
 
@@ -556,6 +586,8 @@ interface RunSettings {
   model: string;
   perRunUsd: number;
   pluginDir: string | null;
+  /** `name` from the plugin's manifest, which the plugin arm asserts the session loaded. */
+  pluginName: string | null;
   effort: string | null;
 }
 
@@ -672,6 +704,20 @@ async function readRows(resultsDir: string): Promise<Map<string, RunRow>> {
   return rows;
 }
 
+async function readSegments(resultsDir: string): Promise<Segment[]> {
+  const file = join(resultsDir, 'results.json');
+  if (!existsSync(file)) {
+    return [];
+  }
+  const data = await readJsonFile(file);
+  const segments = isRecord(data) && isRecord(data.meta) ? data.meta.segments : undefined;
+  return Array.isArray(segments) ? segments.filter(isSegment) : [];
+}
+
+/**
+ * One session for one planned run. Every way a session can fail to measure its arm becomes an
+ * `infraError` row, which is never graded.
+ */
 async function executeRun(
   run: PlannedRun,
   settings: RunSettings,
@@ -694,7 +740,8 @@ async function executeRun(
     repeat,
     model: settings.model,
     startedAt,
-    agentOutcome: 'not-started',
+    outcome: null,
+    attempts: 1,
     agentExitCode: null,
     wallMs: 0,
     passed: false,
@@ -710,136 +757,318 @@ async function executeRun(
     webTargets: [],
     toolCalls: {},
     permissionDenials: [],
-    sessionStartHookOutput: [],
+    sessionStartHooks: [],
     session: null,
+    armAssertions: [],
     infraError: null,
   };
 
+  let facts: WorkspaceFacts;
   try {
     await createWorkspace(evalCase, template, dir);
     if (arm !== 'baseline') {
       await copyPackInto(evalCase, dir);
     }
+    facts = await inspectWorkspace(dir, evalCase.pack.id);
   } catch (error) {
     return { ...base, infraError: `workspace setup failed: ${errorMessage(error)}` };
   }
 
-  const transcriptPath = join(runDir, 'transcript.jsonl');
-  const agent = await runProcess('claude', claudeArgs(evalCase, arm, settings), {
-    cwd: dir,
-    env: agentEnv(),
-    timeoutMs: evalCase.timeoutSeconds * 1000,
-    stdoutFile: transcriptPath,
-  });
-  await writeFile(join(runDir, 'stderr.log'), agent.stderr);
-  if (agent.spawnError !== null) {
-    return {
+  try {
+    const transcriptPath = join(runDir, 'transcript.jsonl');
+    const agent = await runProcess('claude', claudeArgs(evalCase, arm, settings), {
+      cwd: dir,
+      env: agentEnv(),
+      timeoutMs: evalCase.timeoutSeconds * 1000,
+      stdoutFile: transcriptPath,
+    });
+    await writeFile(join(runDir, 'stderr.log'), agent.stderr);
+    if (agent.spawnError !== null) {
+      return {
+        ...base,
+        wallMs: agent.durationMs,
+        infraError: `claude could not start: ${agent.spawnError}`,
+      };
+    }
+    if (isShuttingDown()) {
+      return { ...base, wallMs: agent.durationMs, infraError: 'interrupted' };
+    }
+
+    const summary = summarizeTranscript(await readFile(transcriptPath, 'utf8'));
+    const outcome = classifyOutcome(summary, agent);
+    const armAssertions =
+      outcome.kind === 'could-not-run'
+        ? []
+        : assertArm(arm, facts, summary, {
+            model: settings.model,
+            packId: evalCase.pack.id,
+            pluginName: settings.pluginName,
+          });
+    const observed: RunRow = {
       ...base,
+      outcome,
+      agentExitCode: agent.exitCode,
       wallMs: agent.durationMs,
-      infraError: `claude could not start: ${agent.spawnError}`,
+      costUsd: summary.result?.totalCostUsd ?? null,
+      numTurns: summary.result?.numTurns ?? null,
+      durationMs: summary.result?.durationMs ?? null,
+      docsConsulted: summary.docsConsulted,
+      docsPaths: summary.docsPaths,
+      webUsed: summary.webSearches + summary.webFetches > 0,
+      webSearches: summary.webSearches,
+      webFetches: summary.webFetches,
+      webTargets: summary.webTargets,
+      toolCalls: summary.toolCalls,
+      permissionDenials: summary.result?.permissionDenials ?? [],
+      sessionStartHooks: summary.sessionStartHooks,
+      session: summary.session,
+      armAssertions,
     };
-  }
+    await saveAgentFiles(evalCase, dir, join(runDir, 'files.json'));
 
-  const summary = summarizeTranscript(await readFile(transcriptPath, 'utf8'));
-  let agentOutcome = summary.result?.subtype ?? 'no-result';
-  if (agent.timedOut) {
-    agentOutcome = 'timeout';
+    if (outcome.kind === 'could-not-run') {
+      return { ...observed, infraError: `could not run (${outcome.reason}): ${outcome.detail}` };
+    }
+    const violated = armAssertions.filter((assertion) => !assertion.passed);
+    if (violated.length > 0) {
+      return {
+        ...observed,
+        infraError: `arm-invalid: ${violated.map((assertion) => assertion.detail).join('; ')}`,
+      };
+    }
+    const checks = await gradeWorkspace(evalCase, dir);
+    return { ...observed, passed: checks.every((check) => check.passed), checks };
+  } finally {
+    if (!keepWorkspace) {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
-  if (isShuttingDown()) {
-    return { ...base, wallMs: agent.durationMs, infraError: 'interrupted' };
-  }
-
-  await saveAgentFiles(evalCase, dir, join(runDir, 'files.json'));
-  const checks = await gradeWorkspace(evalCase, dir);
-  if (!keepWorkspace) {
-    await rm(dir, { recursive: true, force: true });
-  }
-
-  return {
-    ...base,
-    agentOutcome,
-    agentExitCode: agent.exitCode,
-    wallMs: agent.durationMs,
-    passed: checks.every((check) => check.passed),
-    checks,
-    costUsd: summary.result?.totalCostUsd ?? null,
-    numTurns: summary.result?.numTurns ?? null,
-    durationMs: summary.result?.durationMs ?? null,
-    docsConsulted: summary.docsConsulted,
-    docsPaths: summary.docsPaths,
-    webUsed: summary.webSearches + summary.webFetches > 0,
-    webSearches: summary.webSearches,
-    webFetches: summary.webFetches,
-    webTargets: summary.webTargets,
-    toolCalls: summary.toolCalls,
-    permissionDenials: summary.result?.permissionDenials ?? [],
-    sessionStartHookOutput: summary.sessionStartHookOutput,
-    session: summary.session,
-  };
 }
 
-async function runCommandMain(argv: string[]): Promise<number> {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      cases: { type: 'string' },
-      arms: { type: 'string' },
-      runs: { type: 'string' },
-      model: { type: 'string' },
-      concurrency: { type: 'string' },
-      'max-budget-usd-per-run': { type: 'string' },
-      'max-total-usd': { type: 'string' },
-      'plugin-dir': { type: 'string' },
-      effort: { type: 'string' },
-      resume: { type: 'string' },
-      'keep-workspaces': { type: 'boolean', default: false },
-    },
-  });
-  const cases = await loadCases(values.cases);
-  const arms = parseArms(values.arms);
-  const runs = Math.floor(parsePositiveNumber(values.runs, '--runs', 1));
-  const concurrency = Math.floor(parsePositiveNumber(values.concurrency, '--concurrency', 2));
-  const perRunUsd = parsePositiveNumber(
-    values['max-budget-usd-per-run'],
-    '--max-budget-usd-per-run',
-    3
-  );
-  const maxTotalUsd = parsePositiveNumber(
-    values['max-total-usd'],
-    '--max-total-usd',
-    Number.POSITIVE_INFINITY
-  );
-  const settings: RunSettings = {
-    model: values.model ?? DEFAULT_MODEL,
-    perRunUsd,
-    pluginDir: values['plugin-dir'] === undefined ? null : resolve(values['plugin-dir']),
-    effort: values.effort ?? null,
-  };
+/** In-place retries for a rate limit or an overload: wait 30 s, retry, wait 120 s, retry, give up. */
+export const TRANSIENT_BACKOFF_MS = [30_000, 120_000] as const;
 
+/** Exit code when the account ran out of quota or lost its login partway through. */
+const EXIT_ACCOUNT_STOP = 4;
+
+export interface AccountStop {
+  reason: CouldNotRunReason;
+  runId: string;
+  detail: string;
+  resetsAt: string | null;
+}
+
+export interface Scheduler {
+  /** One session for the run, returned as a row (graded or infra error). */
+  runSession: (run: PlannedRun) => Promise<RunRow>;
+  /** Persists a run's final row. */
+  record: (row: RunRow) => Promise<void>;
+  /** Asked before a run starts; false skips it (the spending cap). */
+  canStart: () => boolean;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/** Runs still owed by a results directory: no row yet, or an infra-error row. Plan order is kept. */
+export function pendingRuns(
+  planned: readonly PlannedRun[],
+  existing: ReadonlyMap<string, RunRow>
+): PlannedRun[] {
+  return planned.filter((run) => {
+    const row = existing.get(run.runId);
+    return row === undefined || row.infraError !== null;
+  });
+}
+
+function couldNotRunReason(row: RunRow): CouldNotRunReason | null {
+  return row.outcome?.kind === 'could-not-run' ? row.outcome.reason : null;
+}
+
+/**
+ * Runs `todo` in order on `concurrency` lanes. A rate limit or overload is retried in place with
+ * backoff. The first usage-limit, auth, or billing outcome stops the schedule: no new run starts,
+ * runs already in flight finish and are recorded. Returns that stop, or null when every run got
+ * its turn.
+ */
+export async function runSchedule(
+  todo: readonly PlannedRun[],
+  concurrency: number,
+  scheduler: Scheduler
+): Promise<AccountStop | null> {
+  let stop: AccountStop | null = null;
+  await pool([...todo], concurrency, async (run) => {
+    if (stop !== null || !scheduler.canStart()) {
+      return;
+    }
+    let row = await scheduler.runSession(run);
+    let attempts = 1;
+    for (const backoffMs of TRANSIENT_BACKOFF_MS) {
+      const reason = couldNotRunReason(row);
+      if (stop !== null || reason === null || !TRANSIENT_REASONS.has(reason)) {
+        break;
+      }
+      await scheduler.sleep(backoffMs);
+      row = await scheduler.runSession(run);
+      attempts += 1;
+    }
+    // Set before recording: another lane must not start a run while this row is being written.
+    const outcome = row.outcome;
+    if (
+      stop === null &&
+      outcome?.kind === 'could-not-run' &&
+      ACCOUNT_STOP_REASONS.has(outcome.reason)
+    ) {
+      stop = {
+        reason: outcome.reason,
+        runId: row.runId,
+        detail: outcome.detail,
+        resetsAt: outcome.resetsAt,
+      };
+    }
+    await scheduler.record({ ...row, attempts });
+  });
+  return stop;
+}
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolveSleep) => {
+    setTimeout(resolveSleep, ms);
+  });
+
+function shellQuote(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The command that continues this results directory: the same options plus `--resume <dir>`. */
+function resumeCommand(
+  command: 'run' | 'smoke',
+  argv: readonly string[],
+  resultsDir: string
+): string {
+  const kept: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index] ?? '';
+    if (arg === '--resume') {
+      index += 1;
+    } else if (!arg.startsWith('--resume=')) {
+      kept.push(arg);
+    }
+  }
+  return [
+    'npm',
+    'run',
+    'eval',
+    '--',
+    command,
+    ...kept,
+    '--resume',
+    relative(process.cwd(), resultsDir),
+  ]
+    .map(shellQuote)
+    .join(' ');
+}
+
+const ACCOUNT_STOP_TEXT: Record<string, string> = {
+  'usage-limit': 'the account reached its usage limit',
+  auth: 'Claude Code is not logged in or its login was rejected (run `claude` and /login, then resume)',
+  billing: 'the account has a billing or credit problem',
+};
+
+const RUN_OPTIONS = {
+  arms: { type: 'string' },
+  model: { type: 'string' },
+  'max-budget-usd-per-run': { type: 'string' },
+  'max-total-usd': { type: 'string' },
+  'plugin-dir': { type: 'string' },
+  effort: { type: 'string' },
+  resume: { type: 'string' },
+  'keep-workspaces': { type: 'boolean', default: false },
+} as const;
+
+interface EvalPlan {
+  command: 'run' | 'smoke';
+  argv: readonly string[];
+  cases: EvalCase[];
+  arms: Arm[];
+  runs: number;
+  concurrency: number;
+  settings: RunSettings;
+  maxTotalUsd: number;
+  resultsDir: string;
+  keepWorkspaces: boolean;
+}
+
+/** Checks the options `run` and `smoke` share and resolves the plugin and the results directory. */
+async function resolveSettings(
+  values: {
+    arms?: string | undefined;
+    model?: string | undefined;
+    'max-budget-usd-per-run'?: string | undefined;
+    'max-total-usd'?: string | undefined;
+    'plugin-dir'?: string | undefined;
+    effort?: string | undefined;
+    resume?: string | undefined;
+  },
+  cases: EvalCase[],
+  freshResultsDir: string
+): Promise<{ arms: Arm[]; settings: RunSettings; maxTotalUsd: number; resultsDir: string }> {
+  const arms = parseArms(values.arms);
+  const pluginDir = values['plugin-dir'] === undefined ? null : resolve(values['plugin-dir']);
+  let pluginName: string | null = null;
   if (arms.includes('plugin')) {
-    if (settings.pluginDir === null) {
+    if (pluginDir === null) {
       throw new UsageError('the plugin arm needs --plugin-dir <path to the llm-docs plugin>');
     }
-    if (!existsSync(join(settings.pluginDir, '.claude-plugin', 'plugin.json'))) {
-      throw new UsageError(`${settings.pluginDir} has no .claude-plugin/plugin.json`);
+    const manifestPath = join(pluginDir, '.claude-plugin', 'plugin.json');
+    if (!existsSync(manifestPath)) {
+      throw new UsageError(`${pluginDir} has no .claude-plugin/plugin.json`);
     }
+    const manifest = await readJsonFile(manifestPath);
+    if (!isRecord(manifest) || typeof manifest.name !== 'string' || manifest.name.length === 0) {
+      throw new UsageError(
+        `${manifestPath} has no "name"; the plugin arm asserts the session loaded it by name`
+      );
+    }
+    pluginName = manifest.name;
   }
   if (arms.some((arm) => arm !== 'baseline')) {
     await assertPacksPrepared(cases);
   }
-
-  const resultsDir =
-    values.resume === undefined ? join(RESULTS_DIR, timestamp()) : resolve(values.resume);
+  const resultsDir = values.resume === undefined ? freshResultsDir : resolve(values.resume);
   if (values.resume !== undefined && !existsSync(resultsDir)) {
     throw new UsageError(`--resume directory ${resultsDir} does not exist`);
   }
+  return {
+    arms,
+    settings: {
+      model: values.model ?? DEFAULT_MODEL,
+      perRunUsd: parsePositiveNumber(
+        values['max-budget-usd-per-run'],
+        '--max-budget-usd-per-run',
+        3
+      ),
+      pluginDir,
+      pluginName,
+      effort: values.effort ?? null,
+    },
+    maxTotalUsd: parsePositiveNumber(
+      values['max-total-usd'],
+      '--max-total-usd',
+      Number.POSITIVE_INFINITY
+    ),
+    resultsDir,
+  };
+}
+
+/**
+ * Shared by `run` and `smoke`: runs the pending part of the plan, writes results.json and
+ * summary.md after every run, and reports an account stop. Returns the rows in plan order.
+ */
+async function executePlan(plan: EvalPlan): Promise<{ rows: RunRow[]; exitCode: number }> {
+  const { cases, arms, runs, settings, resultsDir } = plan;
   await mkdir(join(resultsDir, 'runs'), { recursive: true });
   const existing = await readRows(resultsDir);
   const planned = planRuns(cases, arms, runs);
-  const todo = planned.filter((run) => {
-    const row = existing.get(run.runId);
-    return row === undefined || row.infraError !== null;
-  });
+  const todo = pendingRuns(planned, existing);
   log(`results: ${relative(process.cwd(), resultsDir)}`);
   log(
     `${planned.length} planned run(s), ${planned.length - todo.length} already done, ${todo.length} to run`
@@ -852,13 +1081,24 @@ async function runCommandMain(argv: string[]): Promise<number> {
     templates.set(evalCase.id, await ensureTemplate(evalCase, log));
   }
 
-  const workspaceRoot = join(tmpdir(), 'llm-docs-evals', timestamp());
+  // Unique per process: a smoke check and a run started in the same millisecond must not share
+  // workspaces.
+  await mkdir(join(tmpdir(), 'llm-docs-evals'), { recursive: true });
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'llm-docs-evals', `${timestamp()}-`));
   const rows = new Map(existing);
+  const priorSegments = await readSegments(resultsDir);
+  const segment: Segment = {
+    startedAt: new Date().toISOString(),
+    endedAt: new Date().toISOString(),
+    runsRecorded: 0,
+    stoppedBecause: null,
+  };
   let spent = [...existing.values()].reduce((sum, row) => sum + (row.costUsd ?? 0), 0);
   let inFlight = 0;
   let skippedForBudget = 0;
 
   const writeResults = async (): Promise<void> => {
+    segment.endedAt = new Date().toISOString();
     const ordered = planned
       .map((run) => rows.get(run.runId))
       .filter((row): row is RunRow => row !== undefined);
@@ -870,6 +1110,7 @@ async function runCommandMain(argv: string[]): Promise<number> {
       runsPerCell: runs,
       arms,
       gitCommit: commit,
+      segments: [...priorSegments, segment],
     };
     await writeJsonFileSafely(join(resultsDir, 'results.json'), {
       meta: {
@@ -879,8 +1120,8 @@ async function runCommandMain(argv: string[]): Promise<number> {
           kind: evalCase.kind,
           library: evalCase.library,
         })),
-        maxBudgetUsdPerRun: perRunUsd,
-        maxTotalUsd: Number.isFinite(maxTotalUsd) ? maxTotalUsd : null,
+        maxBudgetUsdPerRun: settings.perRunUsd,
+        maxTotalUsd: Number.isFinite(plan.maxTotalUsd) ? plan.maxTotalUsd : null,
         allowedTools: ALLOWED_TOOLS,
         pluginDir: settings.pluginDir,
         effort: settings.effort,
@@ -891,44 +1132,60 @@ async function runCommandMain(argv: string[]): Promise<number> {
     await writeFile(join(resultsDir, 'summary.md'), renderSummary(meta, ordered, aggregates));
   };
 
-  await pool(todo, concurrency, async (run) => {
-    if (spent + (inFlight + 1) * perRunUsd > maxTotalUsd) {
-      skippedForBudget += 1;
-      return;
-    }
-    const template = templates.get(run.evalCase.id);
-    if (template === undefined) {
-      return;
-    }
-    inFlight += 1;
-    log(`start ${run.runId}`);
-    let row: RunRow;
-    try {
-      row = await executeRun(
-        run,
-        settings,
-        template,
-        workspaceRoot,
-        resultsDir,
-        values['keep-workspaces']
+  const stop = await runSchedule(todo, plan.concurrency, {
+    canStart: () => {
+      if (spent + (inFlight + 1) * settings.perRunUsd > plan.maxTotalUsd) {
+        skippedForBudget += 1;
+        return false;
+      }
+      return true;
+    },
+    runSession: async (run) => {
+      const template = templates.get(run.evalCase.id) ?? '';
+      inFlight += 1;
+      log(`start ${run.runId}`);
+      try {
+        const row = await executeRun(
+          run,
+          settings,
+          template,
+          workspaceRoot,
+          resultsDir,
+          plan.keepWorkspaces
+        );
+        spent += row.costUsd ?? 0;
+        const reason = couldNotRunReason(row);
+        if (reason !== null) {
+          log(`      ${run.runId}: ${row.infraError ?? ''}`);
+        }
+        return row;
+      } finally {
+        inFlight -= 1;
+      }
+    },
+    sleep: async (ms) => {
+      log(`      waiting ${ms / 1000} s before retrying in place`);
+      await sleep(ms);
+    },
+    record: async (row) => {
+      rows.set(row.runId, row);
+      segment.runsRecorded += 1;
+      await writeJsonFileSafely(join(resultsDir, 'runs', row.runId, 'run.json'), row);
+      await writeResults();
+      const failed = row.checks.filter((check) => !check.passed).map((check) => check.name);
+      log(
+        `done  ${row.runId}: ${row.infraError ?? describeOutcome(row.outcome)}, ${row.infraError === null ? (row.passed ? 'PASS' : `FAIL (${failed.join(', ') || 'no checks'})`) : 'not graded'}, ` +
+          `$${(row.costUsd ?? 0).toFixed(2)}, docs ${row.docsConsulted ? 'yes' : 'no'}, web ${row.webUsed ? 'yes' : 'no'} ` +
+          `(spent $${spent.toFixed(2)})`
       );
-    } finally {
-      inFlight -= 1;
-    }
-    spent += row.costUsd ?? 0;
-    rows.set(run.runId, row);
-    await writeJsonFileSafely(join(resultsDir, 'runs', run.runId, 'run.json'), row);
-    await writeResults();
-    const failed = row.checks.filter((check) => !check.passed).map((check) => check.name);
-    log(
-      `done  ${run.runId}: ${row.infraError ?? row.agentOutcome}, ${row.passed ? 'PASS' : `FAIL (${failed.join(', ') || 'no checks'})`}, ` +
-        `$${(row.costUsd ?? 0).toFixed(2)}, docs ${row.docsConsulted ? 'yes' : 'no'}, web ${row.webUsed ? 'yes' : 'no'} ` +
-        `(spent $${spent.toFixed(2)})`
-    );
+    },
   });
 
+  if (stop !== null) {
+    segment.stoppedBecause = `${stop.reason} at ${stop.runId}`;
+  }
   await writeResults();
-  if (!values['keep-workspaces']) {
+  if (!plan.keepWorkspaces) {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
   if (skippedForBudget > 0) {
@@ -937,7 +1194,130 @@ async function runCommandMain(argv: string[]): Promise<number> {
     );
   }
   log(`wrote ${relative(process.cwd(), join(resultsDir, 'summary.md'))}`);
-  return isShuttingDown() ? 130 : 0;
+
+  const ordered = planned
+    .map((run) => rows.get(run.runId))
+    .filter((row): row is RunRow => row !== undefined);
+  if (stop !== null) {
+    const graded = ordered.filter((row) => row.infraError === null).length;
+    log(
+      `STOPPED: ${ACCOUNT_STOP_TEXT[stop.reason] ?? stop.reason} (run ${stop.runId}: ${stop.detail})`
+    );
+    if (stop.resetsAt !== null) {
+      log(`The limit resets at ${stop.resetsAt}.`);
+    }
+    log(
+      `${graded} of ${planned.length} planned run(s) have a graded result; ${planned.length - graded} remain (not started, or infra errors that will be retried).`
+    );
+    log(
+      `No new run was started after the stop. Continue with:\n  ${resumeCommand(plan.command, plan.argv, resultsDir)}`
+    );
+    return { rows: ordered, exitCode: EXIT_ACCOUNT_STOP };
+  }
+  return { rows: ordered, exitCode: isShuttingDown() ? 130 : 0 };
+}
+
+async function runCommandMain(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      ...RUN_OPTIONS,
+      cases: { type: 'string' },
+      runs: { type: 'string' },
+      concurrency: { type: 'string' },
+    },
+  });
+  const cases = await loadCases(values.cases);
+  const resolved = await resolveSettings(values, cases, join(RESULTS_DIR, timestamp()));
+  const { exitCode } = await executePlan({
+    command: 'run',
+    argv,
+    cases,
+    ...resolved,
+    runs: Math.floor(parsePositiveNumber(values.runs, '--runs', 1)),
+    concurrency: Math.floor(parsePositiveNumber(values.concurrency, '--concurrency', 2)),
+    keepWorkspaces: values['keep-workspaces'],
+  });
+  return exitCode;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* smoke                                                                                      */
+/* ------------------------------------------------------------------------------------------ */
+
+const SMOKE_CASE = 'zod-4-6';
+
+/**
+ * One case, once per arm, with exactly the `run` invocation: proves the pipeline end to end and
+ * lets the operator read their usage meter before and after.
+ */
+async function smoke(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: { ...RUN_OPTIONS, case: { type: 'string' } },
+  });
+  const caseId = values.case ?? SMOKE_CASE;
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(caseId)) {
+    throw new UsageError(`--case takes one case id, got "${caseId}"`);
+  }
+  const cases = await loadCases(caseId);
+  const resolved = await resolveSettings(values, cases, join(RESULTS_DIR, `smoke-${timestamp()}`));
+  process.stdout.write(
+    'Note your current Claude usage now (claude.ai Settings > Usage, or /usage in Claude Code), then compare it after this smoke check.\n'
+  );
+  process.stdout.write(
+    `Smoke check: case ${caseId}, arms ${resolved.arms.join(', ')}, model ${resolved.settings.model}, at most $${(resolved.arms.length * resolved.settings.perRunUsd).toFixed(2)}.\n\n`
+  );
+  const { rows, exitCode } = await executePlan({
+    command: 'smoke',
+    argv,
+    cases,
+    ...resolved,
+    runs: 1,
+    concurrency: 1,
+    keepWorkspaces: values['keep-workspaces'],
+  });
+
+  let problems = 0;
+  for (const row of rows) {
+    const graded = row.infraError === null;
+    const verdict = graded ? (row.passed ? 'checks PASS' : 'checks FAIL') : 'not graded';
+    process.stdout.write(
+      `${row.arm}: ${describeOutcome(row.outcome)}, ${verdict}, $${(row.costUsd ?? 0).toFixed(2)}, ` +
+        `${row.numTurns ?? 'n/a'} turn(s), ${(row.wallMs / 1000).toFixed(1)} s wall, ` +
+        `docs consulted ${row.docsConsulted ? 'yes' : 'no'}, attempts ${row.attempts}\n`
+    );
+    if (row.infraError !== null) {
+      problems += 1;
+      process.stdout.write(`  infra error: ${row.infraError}\n`);
+    }
+    if (row.arm === 'plugin') {
+      const outputs = row.sessionStartHooks
+        .map((hook) => hook.output)
+        .filter((text) => text.length > 0);
+      process.stdout.write(
+        row.sessionStartHooks.length === 0
+          ? '  hook: did not run\n'
+          : `  hook output: ${outputs.length === 0 ? '(ran, no output)' : outputs.join('\n  ')}\n`
+      );
+    }
+    for (const assertion of row.armAssertions) {
+      process.stdout.write(
+        `  [${assertion.passed ? 'pass' : 'FAIL'}] ${assertion.name}: ${assertion.detail}\n`
+      );
+    }
+  }
+  if (exitCode !== 0) {
+    return exitCode;
+  }
+  if (problems > 0 || rows.length < resolved.arms.length) {
+    process.stdout.write(
+      `\nSmoke check FAILED: ${problems} session(s) could not run or did not measure their arm.\n`
+    );
+    return 1;
+  }
+  process.stdout.write('\nSmoke check passed: every session ran and every arm assertion held.\n');
+  return 0;
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -954,23 +1334,30 @@ async function main(): Promise<number> {
       return plan(rest);
     case 'run':
       return runCommandMain(rest);
+    case 'smoke':
+      return smoke(rest);
     default:
       process.stderr.write(USAGE);
       return command === undefined || command === '--help' ? 0 : 2;
   }
 }
 
-main().then(
-  (code) => {
-    process.exitCode = code;
-  },
-  (error: unknown) => {
-    if (error instanceof UsageError || isCaseError(error)) {
-      log(error.message);
-      process.exitCode = 2;
-    } else {
-      log(error instanceof Error && error.stack !== undefined ? error.stack : errorMessage(error));
-      process.exitCode = 3;
+// Imported by the unit tests for the scheduling logic; only a direct invocation runs a command.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error: unknown) => {
+      if (error instanceof UsageError || isCaseError(error)) {
+        log(error.message);
+        process.exitCode = 2;
+      } else {
+        log(
+          error instanceof Error && error.stack !== undefined ? error.stack : errorMessage(error)
+        );
+        process.exitCode = 3;
+      }
     }
-  }
-);
+  );
+}
