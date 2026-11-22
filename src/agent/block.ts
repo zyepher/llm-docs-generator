@@ -10,8 +10,8 @@
  * `syncAgentBlocks`; the pure helpers are exported for tests.
  */
 
-import { lstat, mkdir, readFile } from 'node:fs/promises';
-import { dirname, join, posix } from 'node:path';
+import { lstat, mkdir, readFile, stat } from 'node:fs/promises';
+import { dirname, join, posix, resolve } from 'node:path';
 
 import { CONFIG_FILE_NAME, ConfigError, type LoadedProjectConfig } from '../config/project.js';
 import { listGuides } from '../pack/guides.js';
@@ -51,56 +51,143 @@ const BLOCK_INTRO = [
 export const HARNESSES = ['claude-code', 'codex', 'cursor'] as const;
 export type Harness = (typeof HARNESSES)[number];
 
-const ROOT_AGENT_FILES = ['AGENTS.md', 'CLAUDE.md'] as const;
-type RootAgentFileName = (typeof ROOT_AGENT_FILES)[number];
+type ProjectAgentFileName = 'AGENTS.md' | 'CLAUDE.md' | 'CLAUDE.local.md';
+const CLAUDE_FILES = ['CLAUDE.md', 'CLAUDE.local.md'] as const;
 
-/** The text of each root agent file, or null when it does not exist. */
-type RootAgentFiles = Readonly<Record<RootAgentFileName, string | null>>;
+/** Bounds the walk up from the project root; real paths are far shallower. */
+const MAX_ANCESTOR_DIRECTORIES = 64;
 
-function claudeImportsAgents(files: RootAgentFiles): boolean {
-  const claude = files['CLAUDE.md'];
-  return claude !== null && AGENTS_IMPORT_LINE.test(claude);
+/** An agent file as read from disk, never a thrown error, so one bad file cannot stop another. */
+type AgentFileRead =
+  { kind: 'absent' } | { kind: 'text'; text: string } | { kind: 'unreadable'; error: Error };
+
+// ignoreBOM keeps a byte order mark in the decoded text, so writing the text back keeps it.
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/**
+ * Read an agent file as bytes and decode it strictly. A lenient decode would
+ * turn invalid bytes into replacement characters, and writing that text back
+ * would corrupt the user's file outside the markers.
+ */
+async function readAgentFile(absolutePath: string, path: string): Promise<AgentFileRead> {
+  let bytes: Buffer;
+
+  try {
+    bytes = await readFile(absolutePath);
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return { kind: 'absent' };
+    }
+    const isDirectory = error instanceof Error && 'code' in error && error.code === 'EISDIR';
+    return {
+      kind: 'unreadable',
+      error: isDirectory
+        ? new ConfigError(
+            `${path} is a directory, not a file; rename it, or set "agentFiles" in ${CONFIG_FILE_NAME} to the files the llm-docs block goes into.`
+          )
+        : new Error(`${path} could not be read: ${errorMessage(error)}`),
+    };
+  }
+
+  try {
+    return { kind: 'text', text: STRICT_UTF8.decode(bytes) };
+  } catch {
+    return {
+      kind: 'unreadable',
+      error: new ConfigError(
+        `${path} is not valid UTF-8, so llm-docs will not rewrite it; save it as UTF-8, or leave it out of "agentFiles" in ${CONFIG_FILE_NAME}.`
+      ),
+    };
+  }
+}
+
+function importsAgents(file: AgentFileRead): boolean {
+  return file.kind === 'text' && AGENTS_IMPORT_LINE.test(file.text);
+}
+
+/** What decides which project-root agent files a harness puts in context. */
+interface AgentFilesView {
+  files: Readonly<Record<ProjectAgentFileName, AgentFileRead>>;
+  /** A CLAUDE.md or CLAUDE.local.md exists in some directory above the project root. */
+  claudeFileAbove: boolean;
 }
 
 /**
- * Which root agent files each harness puts in context. The auto rule below
- * reads the same import evaluation, so "where must the block go" and "does
- * this harness see it" cannot drift apart. Claude Code reads CLAUDE.md when
- * it exists (and AGENTS.md too when CLAUDE.md imports it), else AGENTS.md.
+ * Which project-root agent files each harness reads. Claude Code reads its
+ * own CLAUDE.md and CLAUDE.local.md, and AGENTS.md only when neither exists
+ * in the project root or any directory above it, unless one of the project's
+ * own files imports it. The auto rule in resolveAgentFiles shares
+ * `importsAgents`, so "where must the block go" and "does this harness see
+ * it" cannot drift apart.
  */
-const HARNESS_READS: Readonly<Record<Harness, (files: RootAgentFiles) => RootAgentFileName[]>> = {
-  'claude-code': (files) =>
-    files['CLAUDE.md'] === null
-      ? ['AGENTS.md']
-      : claudeImportsAgents(files)
-        ? ['CLAUDE.md', 'AGENTS.md']
-        : ['CLAUDE.md'],
+const HARNESS_READS: Readonly<Record<Harness, (view: AgentFilesView) => ProjectAgentFileName[]>> = {
+  'claude-code': ({ files, claudeFileAbove }) => {
+    const own = CLAUDE_FILES.filter((name) => files[name].kind !== 'absent');
+    const readsAgents =
+      (own.length === 0 && !claudeFileAbove) || own.some((name) => importsAgents(files[name]));
+    return readsAgents ? [...own, 'AGENTS.md'] : own;
+  },
   codex: () => ['AGENTS.md'],
   cursor: () => ['AGENTS.md'],
 };
 
-async function readTextIfExists(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, 'utf-8');
-  } catch (error) {
-    if (isFileNotFoundError(error)) {
-      return null;
-    }
-    throw error;
-  }
-}
+async function isClaudeFileAbove(projectRoot: string): Promise<boolean> {
+  let current = resolve(projectRoot);
 
-async function readRootAgentFiles(projectRoot: string): Promise<RootAgentFiles> {
-  const [agents, claude] = await Promise.all(
-    ROOT_AGENT_FILES.map((name) => readTextIfExists(join(projectRoot, name)))
-  );
-  return { 'AGENTS.md': agents ?? null, 'CLAUDE.md': claude ?? null };
+  for (let depth = 0; depth < MAX_ANCESTOR_DIRECTORIES; depth += 1) {
+    const parent = dirname(current);
+    if (parent === current) {
+      return false;
+    }
+    current = parent;
+    const found = await Promise.all(
+      CLAUDE_FILES.map((name) =>
+        stat(join(parent, name)).then(
+          (entry) => entry.isFile(),
+          () => false
+        )
+      )
+    );
+    if (found.includes(true)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** One agent file the block goes into, or why it cannot. */
 type AgentFileTarget =
   | { path: string; kind: 'file'; absolutePath: string }
-  | { path: string; kind: 'invalid'; error: ConfigError };
+  | { path: string; kind: 'invalid'; error: Error };
+
+/** Where one agent file is written: its real path, which must stay inside the project. */
+async function resolveAgentFile(projectRoot: string, path: string): Promise<AgentFileTarget> {
+  const realRoot = await resolveEffectiveOutputPath(projectRoot);
+  const absolutePath = await resolveEffectiveOutputPath(join(projectRoot, ...path.split('/')));
+
+  if (!isSameOrDescendant(realRoot, absolutePath)) {
+    return {
+      path,
+      kind: 'invalid',
+      error: new ConfigError(
+        `${path} resolves through a symbolic link to ${absolutePath}, outside the project; replace the link with a file inside the project, or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}.`
+      ),
+    };
+  }
+
+  // resolveEffectiveOutputPath stops at a link whose target is missing.
+  if ((await lstat(absolutePath).catch(() => undefined))?.isSymbolicLink() === true) {
+    return {
+      path,
+      kind: 'invalid',
+      error: new ConfigError(
+        `${path} is a symbolic link to a file that does not exist; create the target or replace the link with a file.`
+      ),
+    };
+  }
+
+  return { path, kind: 'file', absolutePath };
+}
 
 /**
  * Resolve `agentFiles` to the files the block goes into: `[]` is none, a list
@@ -108,55 +195,41 @@ type AgentFileTarget =
  * exists, CLAUDE.md when it exists without an `@AGENTS.md` import, and
  * AGENTS.md when neither qualifies. Two paths naming one real file (a
  * `CLAUDE.md -> AGENTS.md` symlink) collapse to the first, because the file
- * is written through its real path; a link leading outside the project is
- * an invalid target.
+ * is written through its real path; a link leading outside the project, or a
+ * path that cannot be resolved, is an invalid target. Never throws.
  */
 async function resolveAgentFiles(loaded: LoadedProjectConfig): Promise<AgentFileTarget[]> {
   const setting = loaded.config.agentFiles ?? 'auto';
   let candidates: string[];
 
   if (setting === 'auto') {
-    const root = await readRootAgentFiles(loaded.projectRoot);
-    const claude = root['CLAUDE.md'] !== null && !claudeImportsAgents(root);
-    const agents = root['AGENTS.md'] !== null || !claude;
+    const [agentsFile, claudeFile] = await Promise.all([
+      readAgentFile(join(loaded.projectRoot, 'AGENTS.md'), 'AGENTS.md'),
+      readAgentFile(join(loaded.projectRoot, 'CLAUDE.md'), 'CLAUDE.md'),
+    ]);
+    const claude = claudeFile.kind !== 'absent' && !importsAgents(claudeFile);
+    const agents = agentsFile.kind !== 'absent' || !claude;
     candidates = [...(agents ? ['AGENTS.md'] : []), ...(claude ? ['CLAUDE.md'] : [])];
   } else {
     candidates = setting.map((path) => posix.normalize(path.replace(/\\/g, '/')));
   }
 
-  const realRoot = await resolveEffectiveOutputPath(loaded.projectRoot);
   const targets: AgentFileTarget[] = [];
 
   for (const path of candidates) {
-    const absolutePath = await resolveEffectiveOutputPath(
-      join(loaded.projectRoot, ...path.split('/'))
+    const target = await resolveAgentFile(loaded.projectRoot, path).catch(
+      (error: unknown): AgentFileTarget => ({
+        path,
+        kind: 'invalid',
+        error: new Error(`${path} could not be resolved: ${errorMessage(error)}`),
+      })
     );
 
-    if (!isSameOrDescendant(realRoot, absolutePath)) {
-      targets.push({
-        path,
-        kind: 'invalid',
-        error: new ConfigError(
-          `${path} resolves through a symbolic link to ${absolutePath}, outside the project; replace the link with a file inside the project, or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}.`
-        ),
-      });
-      continue;
-    }
-
-    // resolveEffectiveOutputPath stops at a link whose target is missing.
-    if ((await lstat(absolutePath).catch(() => undefined))?.isSymbolicLink() === true) {
-      targets.push({
-        path,
-        kind: 'invalid',
-        error: new ConfigError(
-          `${path} is a symbolic link to a file that does not exist; create the target or replace the link with a file.`
-        ),
-      });
-      continue;
-    }
-
-    if (!targets.some((target) => target.kind === 'file' && target.absolutePath === absolutePath)) {
-      targets.push({ path, kind: 'file', absolutePath });
+    if (
+      target.kind === 'invalid' ||
+      !targets.some((known) => known.kind === 'file' && known.absolutePath === target.absolutePath)
+    ) {
+      targets.push(target);
     }
   }
 
@@ -166,24 +239,29 @@ async function resolveAgentFiles(loaded: LoadedProjectConfig): Promise<AgentFile
 /**
  * Whether a file this harness reads holds a block (markers present, content
  * possibly stale), read from disk regardless of `agentFiles`. A harness that
- * could not be identified sees the block only when every known harness does,
- * so doubt resolves toward injecting the pack list. Never throws.
+ * could not be identified is assumed not to see it, so doubt resolves toward
+ * injecting the pack list. Never throws.
  */
 export async function harnessSeesBlock(
   projectRoot: string,
   harness: Harness | 'unknown'
 ): Promise<boolean> {
-  try {
-    const files = await readRootAgentFiles(projectRoot);
-    const sees = (known: Harness): boolean =>
-      HARNESS_READS[known](files).some((name) => {
-        const text = files[name];
-        return text !== null && locateBlock(text).kind === 'present';
-      });
-    return harness === 'unknown' ? HARNESSES.every(sees) : sees(harness);
-  } catch {
+  if (harness === 'unknown') {
     return false;
   }
+
+  const [agents, claude, claudeLocal, claudeFileAbove] = await Promise.all([
+    readAgentFile(join(projectRoot, 'AGENTS.md'), 'AGENTS.md'),
+    readAgentFile(join(projectRoot, 'CLAUDE.md'), 'CLAUDE.md'),
+    readAgentFile(join(projectRoot, 'CLAUDE.local.md'), 'CLAUDE.local.md'),
+    isClaudeFileAbove(projectRoot),
+  ]);
+  const files = { 'AGENTS.md': agents, 'CLAUDE.md': claude, 'CLAUDE.local.md': claudeLocal };
+
+  return HARNESS_READS[harness]({ files, claudeFileAbove }).some((name) => {
+    const file = files[name];
+    return file.kind === 'text' && locateBlock(file.text).kind === 'present';
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -203,15 +281,17 @@ export interface BlockPack {
 
 /**
  * Upstream or lockfile text made safe for an agent file (spec 7.1 and 11):
- * control characters become spaces, backticks and `@` are removed, `<` and
- * `>` become entities, whitespace collapses to one line, and the result is
- * capped at 80 characters (code points, so a cut never splits one).
- * `@` goes because Claude Code expands `@path` in CLAUDE.md into that file's
- * contents.
+ * control characters become spaces, format characters (zero-width and
+ * bidirectional overrides, which can make text read differently than it is),
+ * backticks, and `@` are removed, `<` and `>` become entities, whitespace
+ * collapses to one line, and the result is capped at 80 characters (code
+ * points, so a cut never splits one). `@` goes because Claude Code expands
+ * `@path` in CLAUDE.md into that file's contents.
  */
 export function escapeBlockText(value: string): string {
   const escaped = value
     .replace(/\p{Cc}/gu, ' ')
+    .replace(/\p{Cf}/gu, '')
     .replace(/[`@]/g, '')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -356,11 +436,13 @@ export function locateBlock(text: string): BlockLocation {
 
   for (const [index, raw] of text.split('\n').entries()) {
     const end = Math.min(text.length, start + raw.length + 1);
-    const content = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    // A byte order mark belongs to the file, not to a marker on its first line.
+    const bom = index === 0 && raw.startsWith('﻿') ? 1 : 0;
+    const content = (raw.endsWith('\r') ? raw.slice(0, -1) : raw).slice(bom);
 
-    if (!inCode(start)) {
+    if (!inCode(start + bom)) {
       if (BEGIN_LINE.test(content)) {
-        begins.push({ line: index + 1, start });
+        begins.push({ line: index + 1, start: start + bom });
       } else if (END_LINE.test(content)) {
         ends.push({ line: index + 1, end });
       }
@@ -446,8 +528,10 @@ export type AgentBlockPlan =
  * The single derivation of "what sync would write": resolve the agent files,
  * render the body for the built packs within `block.maxBytes` (markers
  * included), and splice it into each file. A problem with one file
- * (mismatched markers, a link out of the project, an unreadable file)
- * becomes an `invalid` entry, so it never stops another file's block.
+ * (mismatched markers, a link out of the project, an unreadable file, a file
+ * that is not UTF-8) becomes an `invalid` entry, so it never stops another
+ * file's block. Never throws: an unreadable pack list makes every file
+ * `invalid`, so a sync that built packs still reports them.
  */
 export async function planAgentBlocks(loaded: LoadedProjectConfig): Promise<AgentBlockPlan[]> {
   const targets = await resolveAgentFiles(loaded);
@@ -458,7 +542,18 @@ export async function planAgentBlocks(loaded: LoadedProjectConfig): Promise<Agen
 
   const maxBytes = loaded.config.block?.maxBytes ?? DEFAULT_MAX_BYTES;
   const markerBytes = Buffer.byteLength(`${BLOCK_BEGIN}\n${BLOCK_END}\n`, 'utf-8');
-  const body = await blockBody(loaded, await readProjectPacks(loaded), maxBytes - markerBytes);
+  let body: string | null;
+
+  try {
+    body = await blockBody(loaded, await readProjectPacks(loaded), maxBytes - markerBytes);
+  } catch (error) {
+    const failure = new Error(
+      `the pack list for the llm-docs block could not be read: ${errorMessage(error)}`
+    );
+    return targets.map((target) =>
+      target.kind === 'invalid' ? target : { path: target.path, kind: 'invalid', error: failure }
+    );
+  }
 
   return Promise.all(
     targets.map(async (target): Promise<AgentBlockPlan> => {
@@ -475,13 +570,12 @@ export async function planAgentBlocks(loaded: LoadedProjectConfig): Promise<Agen
         };
       }
 
-      let current: string | null;
-      try {
-        current = await readTextIfExists(target.absolutePath);
-      } catch (error) {
-        return { path: target.path, kind: 'invalid', error: new Error(errorMessage(error)) };
+      const file = await readAgentFile(target.absolutePath, target.path);
+      if (file.kind === 'unreadable') {
+        return { path: target.path, kind: 'invalid', error: file.error };
       }
 
+      const current = file.kind === 'text' ? file.text : null;
       const location = locateBlock(current ?? '');
       if (location.kind === 'mismatched') {
         return {

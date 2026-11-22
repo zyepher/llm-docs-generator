@@ -622,12 +622,15 @@ directories (sorted) plus `guides` when present, followed by the pack's `descrip
 has one. Over budget (measured in UTF-8 bytes, markers included), topics and descriptions drop
 first, from the last pack backwards; if even the bare lines exceed the budget the block lists
 the first packs and ends with `- ...and N more: see agent-docs/`. Upstream-derived text
-(titles, descriptions, directory names) is escaped: control characters and backticks removed,
-`@` removed (Claude Code expands `@path` in `CLAUDE.md`), `<`/`>` replaced, single line, 80
-character cap. Blocks are inserted at the end of the file when absent, with one blank line
-before, in the file's own line endings. Text outside the markers is never touched. Marker lines
-inside fenced or indented code are not markers. A file with mismatched markers is an error,
-never a guess.
+(titles, descriptions, directory names) is escaped: control characters, Unicode format
+characters (zero-width and bidirectional controls), and backticks removed, `@` removed (Claude
+Code expands `@path` in `CLAUDE.md`), `<`/`>` replaced, single line, 80 character cap. Blocks
+are inserted at the end of the file when absent, with one blank line before, in the file's own
+line endings. Text outside the markers is never touched: agent files are read as bytes and
+decoded strictly, a byte order mark is kept, and a file that is not valid UTF-8 is an error
+(exit 2), never rewritten. Marker lines inside fenced or indented code are not markers. A file
+with mismatched markers is an error, never a guess. A problem with one agent file is reported
+for that file and never stops the others or loses the sync's pack report.
 
 ### 7.2 Session-start hook
 
@@ -655,7 +658,13 @@ context for the agent. Behavior:
      window) without a pack, most recent first, at most 8, with their release dates, and the
      suggestion to read their docs or create a pack with the `add-docs` skill.
   3. When packs exist and the managed block is missing from the agent file the harness reads,
-     the pack list itself (so the hook covers projects that gitignore AGENTS.md).
+     the pack list itself (so the hook covers projects that gitignore AGENTS.md). Codex and
+     Cursor read `AGENTS.md`. Claude Code reads the project's `CLAUDE.md` and
+     `CLAUDE.local.md`, and reads `AGENTS.md` only when no `CLAUDE.md` or `CLAUDE.local.md`
+     exists in the project root or any directory above it, unless one of the project's own
+     files imports `@AGENTS.md`; so an ancestor `CLAUDE.md` hides the block in `AGENTS.md`,
+     and the hook injects the list instead (the `agentFiles: "auto"` writing rule in 7.1 is
+     unchanged). A harness the hook cannot identify is assumed not to see the block.
 - Performance: total wall time under 1.5 s. Release dates come from the cache; missing entries
   get at most a 1,000 ms network budget, and anything still missing is fetched by a detached
   background `status` process (at most one per project per 6 hours, tracked in the cache dir)
