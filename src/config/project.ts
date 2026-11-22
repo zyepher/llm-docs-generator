@@ -879,7 +879,7 @@ export async function resolvePackRecipe(
   const forbid = (value: string, path: string): string => {
     if (new RegExp(PLACEHOLDER_PATTERN.source).test(value)) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${where(path)}: placeholders are only allowed in ref, paths, url, urls, include, exclude, and readFirst.`
+        `${CONFIG_FILE_NAME} ${where(path)}: placeholders are only allowed in ref, paths, url, urls, include, exclude, readFirst, and the targets of site.aliases.`
       );
     }
     return value;
@@ -913,7 +913,16 @@ export async function resolvePackRecipe(
     site:
       pack.site === undefined
         ? null
-        : { baseUrl: pack.site.baseUrl, aliases: pack.site.aliases ?? {} },
+        : {
+            baseUrl: forbid(pack.site.baseUrl, 'site.baseUrl'),
+            // "latest" on a versioned site means the pinned version, so a target may name it.
+            aliases: Object.fromEntries(
+              Object.entries(pack.site.aliases ?? {}).map(([from, to]) => [
+                forbid(from, `site.aliases["${from}"]`),
+                substitute(to, `site.aliases["${from}"]`),
+              ])
+            ),
+          },
     layout: { combined: pack.layout?.combined ?? false },
     license: pack.license ?? null,
     limits: { maxFileBytes: pack.limits?.maxFileBytes ?? PACK_LIMITS.defaultMaxFileBytes },

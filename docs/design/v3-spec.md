@@ -141,10 +141,12 @@ Rules:
 
 - Pack ids match `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - `{version}`, `{major}`, `{minor}`, `{patch}` placeholders are allowed in `ref`, `paths`,
-  `url`, `urls` (the URL and an explicit `path`), `include`, `exclude`, and `readFirst`,
-  substituted from the resolved version. A placeholder with no resolvable value is an error,
-  never an empty string. A placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local
-  `path`, `convert.include`, or `convert.command` is an error.
+  `url`, `urls` (the URL and an explicit `path`), `include`, `exclude`, `readFirst`, and the
+  targets (values) of `site.aliases` (`"/specification/latest": "/specification/{version}"`:
+  "latest" on a versioned site means the pinned version), substituted from the resolved
+  version. A placeholder with no resolvable value is an error, never an empty string. A
+  placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local `path`,
+  `convert.include`, `convert.command`, `site.baseUrl`, or a `site.aliases` key is an error.
 - Defaults: `packsDir` `agent-docs`, `agentFiles` `"auto"`, `block.maxBytes` 4096,
   `hook.enabled` true, `hook.nearCutoffDays` 90 (0 to 3650), pack `title` the pack id,
   `limits.maxFileBytes` 20 MiB.

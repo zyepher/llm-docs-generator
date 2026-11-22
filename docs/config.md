@@ -53,7 +53,7 @@ A pack id matches `^[a-z0-9][a-z0-9._-]{0,63}$`. It is the pack's directory name
 | `version` | string | the lockfile version | Required unless `dependency` is set. No whitespace, no `<` or `>`, no control characters. Need not be semver: `2026-07-28` is valid. |
 | `sources` | array | required | At least one source. See [Sources](#sources). |
 | `site.baseUrl` | string | required with `site` | An `https://` URL without credentials: the docs website, so absolute links to it resolve to pack pages. |
-| `site.aliases` | object | `{}` | Site path to site path, applied before matching, such as `{ "/guide/latest": "/guide" }`. |
+| `site.aliases` | object | `{}` | Site path to site path, applied before matching, such as `{ "/guide/latest": "/guide" }`. A target may hold placeholders; a key may not. |
 | `layout.combined` | boolean | `false` | Also writes `<id>.full.md`: the index and every page in one file. |
 | `license` | string or null | `null` | A declared SPDX id or expression, or `"proprietary"`. Recorded next to the detected license and wins for the license status. |
 | `limits.maxFileBytes` | integer | `20971520` (20 MiB) | 1 to `209715200` (200 MiB). The per-file download and checkout cap for this pack. |
@@ -190,8 +190,9 @@ Transforms are deterministic, opt in per source, and recorded in the manifest wi
 - `urls` of a `urls` source, in both the URL and an explicit `path`.
 - `include` and `exclude` of any source.
 - `readFirst`.
+- The targets (values) of `site.aliases`, so `{ "/specification/latest": "/specification/{version}" }` sends links to the latest revision to the pinned one.
 
-`{major}`, `{minor}`, and `{patch}` come from the leading numbers of the version, with an optional `v` prefix: `v8.2.0-beta.1` gives `8`, `2`, and `0`. A placeholder with no value for the version (`{minor}` of the version `2026-07-28`, for example) is a config error, never an empty string. A placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local `path`, `convert.include`, or `convert.command` is a config error. Other keys are taken literally.
+`{major}`, `{minor}`, and `{patch}` come from the leading numbers of the version, with an optional `v` prefix: `v8.2.0-beta.1` gives `8`, `2`, and `0`. A placeholder with no value for the version (`{minor}` of the version `2026-07-28`, for example) is a config error, never an empty string. A placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local `path`, `convert.include`, `convert.command`, `site.baseUrl`, or a `site.aliases` key is a config error. Other keys are taken literally.
 
 A ref of `v{version}` on a pack bound to a dependency follows the lockfile: when the lockfile moves, the next `sync` builds the pack at the new tag.
 
