@@ -24,14 +24,15 @@ import { canCreateSymlinks } from '../helpers/symlinks.js';
 import {
   readRegularFile,
   RefusedFileError,
+  removeTreeWithRetry,
   writeTextFileSafely,
 } from '../../src/utils/safe-write.js';
 
-// The only way to make a real filesystem refuse the final rename on demand is to inject the
-// refusal at the fs boundary; every assertion still reads the real files back.
+// The only way to make a real filesystem refuse a rename or a removal on demand is to inject
+// the refusal at the fs boundary; every assertion still reads the real files back.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, rename: vi.fn(actual.rename) };
+  return { ...actual, rename: vi.fn(actual.rename), rm: vi.fn(actual.rm) };
 });
 
 const tempDirs: string[] = [];
@@ -44,6 +45,7 @@ async function makeTempDir(): Promise<string> {
 
 afterEach(async () => {
   vi.mocked(rename).mockReset();
+  vi.mocked(rm).mockReset();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -214,6 +216,43 @@ describe('writeTextFileSafely', () => {
     expect(observed.has('partial')).toBe(false);
     expect(await readFile(path, 'utf-8')).toBe(next);
     expect(await readdir(dir)).toEqual(['big.txt']);
+  });
+});
+
+describe('removeTreeWithRetry', () => {
+  it('retries while a process that was just stopped still holds a directory in the tree', async () => {
+    const dir = await makeTempDir();
+    const tree = join(dir, 'convert');
+    await mkdir(join(tree, 'document-1'), { recursive: true });
+    await writeFile(join(tree, 'document-1', 'out.md'), 'x');
+    // What Windows answers while a killed converter's working directory is not yet released.
+    for (const code of ['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY']) {
+      vi.mocked(rm).mockRejectedValueOnce(Object.assign(new Error(code), { code }));
+    }
+
+    await removeTreeWithRetry(tree);
+
+    expect(await readdir(dir)).toEqual([]);
+    expect(vi.mocked(rm)).toHaveBeenCalledTimes(5);
+  });
+
+  it('throws any other error at once', async () => {
+    const dir = await makeTempDir();
+    const tree = join(dir, 'convert');
+    await mkdir(tree);
+    vi.mocked(rm).mockRejectedValueOnce(
+      Object.assign(new Error('EIO: i/o error'), { code: 'EIO' })
+    );
+
+    await expect(removeTreeWithRetry(tree)).rejects.toMatchObject({ code: 'EIO' });
+    expect(vi.mocked(rm)).toHaveBeenCalledTimes(1);
+    expect(await readdir(dir)).toEqual(['convert']);
+  });
+
+  it('accepts a tree that does not exist', async () => {
+    const dir = await makeTempDir();
+
+    await expect(removeTreeWithRetry(join(dir, 'missing'))).resolves.toBeUndefined();
   });
 });
 

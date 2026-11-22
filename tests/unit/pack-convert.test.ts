@@ -10,6 +10,7 @@ import { verifyPacks, type VerifyReport } from '../../src/pack/verify.js';
 import { ALLOW_TEMP_SOURCES_ENV, type SelectedConversion } from '../../src/sources/acquire.js';
 import { createDocumentConverter } from '../../src/sources/convert.js';
 import { sha256Prefixed } from '../../src/utils/hash.js';
+import { removeTreeWithRetry } from '../../src/utils/safe-write.js';
 import { installFakeConverters, writeCommandConverter } from '../helpers/fake-converters.js';
 
 const tempDirs: string[] = [];
@@ -60,7 +61,7 @@ afterEach(async () => {
       process.env[key] = value;
     }
   }
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(tempDirs.splice(0).map((dir) => removeTreeWithRetry(dir)));
 });
 
 async function writeFiles(root: string, files: Record<string, string>): Promise<void> {

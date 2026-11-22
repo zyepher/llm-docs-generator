@@ -55,6 +55,7 @@ import { sha256Prefixed } from '../utils/hash.js';
 import {
   readRegularFile,
   RefusedFileError,
+  removeTreeWithRetry,
   renameWithRetry,
   writeTextFileSafely,
 } from '../utils/safe-write.js';
@@ -324,7 +325,7 @@ async function recoverStaging(packsDir: string): Promise<StagingRecovery> {
       continue;
     }
     if (id === undefined) {
-      await rm(dir, { recursive: true, force: true });
+      await removeTreeWithRetry(dir);
       continue;
     }
 
@@ -366,7 +367,7 @@ async function recoverStaging(packsDir: string): Promise<StagingRecovery> {
         });
       }
 
-      await rm(dir, { recursive: true, force: true });
+      await removeTreeWithRetry(dir);
     } catch (error) {
       recovery.kept.push({
         id,
@@ -410,7 +411,7 @@ async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): 
   if (await isRealDirectory(join(oldDir, 'guides'))) {
     await renameWithRetry(join(oldDir, 'guides'), join(target, 'guides'));
   }
-  await rm(oldDir, { recursive: true, force: true });
+  await removeTreeWithRetry(oldDir);
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +730,7 @@ export async function packOfflineStaleness(
   try {
     return (await offlineStaleReason(context, resolved, existing, workRoot)).stale;
   } finally {
-    await rm(workRoot, { recursive: true, force: true });
+    await removeTreeWithRetry(workRoot);
   }
 }
 
@@ -1257,7 +1258,7 @@ async function buildPack(
     ];
   } finally {
     if (!swapped) {
-      await rm(stagingDir, { recursive: true, force: true });
+      await removeTreeWithRetry(stagingDir);
     }
   }
 }
@@ -1402,7 +1403,7 @@ async function syncOnePack(
       ...(review === undefined ? {} : { guideReview: review }),
     };
   } finally {
-    await rm(workRoot, { recursive: true, force: true });
+    await removeTreeWithRetry(workRoot);
   }
 }
 
@@ -1462,7 +1463,7 @@ async function handleOrphans(
       continue;
     }
 
-    await rm(dir, { recursive: true, force: true });
+    await removeTreeWithRetry(dir);
     results.push({ id, status: 'pruned' });
   }
 
@@ -1615,7 +1616,7 @@ export async function previewPack(
       ],
     };
   } finally {
-    await rm(workRoot, { recursive: true, force: true });
+    await removeTreeWithRetry(workRoot);
   }
 }
 

@@ -154,13 +154,35 @@ const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
  * About three seconds in total; any other error, or the last attempt's, is thrown.
  */
 export async function renameWithRetry(from: string, to: string): Promise<void> {
+  await retryWhileBusy(RETRYABLE_RENAME_CODES, () => rename(from, to));
+}
+
+const RETRYABLE_REMOVE_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY']);
+
+/**
+ * Remove a directory tree (a missing one is fine), retried with backoff on the
+ * codes Windows returns while a process that was just stopped still holds a
+ * directory inside it. About three seconds in total.
+ */
+export async function removeTreeWithRetry(path: string): Promise<void> {
+  await retryWhileBusy(RETRYABLE_REMOVE_CODES, () => rm(path, { recursive: true, force: true }));
+}
+
+/**
+ * Up to eight attempts, 25 ms doubling between them; an error with any other
+ * code, or the last attempt's error, is thrown.
+ */
+async function retryWhileBusy(
+  codes: ReadonlySet<string>,
+  operation: () => Promise<void>
+): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await rename(from, to);
+      await operation();
       return;
     } catch (error) {
       const code = error instanceof Error && 'code' in error ? String(error.code) : '';
-      if (!RETRYABLE_RENAME_CODES.has(code) || attempt >= 7) {
+      if (!codes.has(code) || attempt >= 7) {
         throw error;
       }
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 * 2 ** attempt));
