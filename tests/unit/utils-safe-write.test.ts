@@ -201,6 +201,12 @@ describe('writeTextFileSafely', () => {
       const text = await readFile(path, 'utf-8');
       reads++;
       observed.add(text === previous ? 'previous' : text === next ? 'next' : 'partial');
+      if (process.platform === 'win32') {
+        // Windows refuses to replace a file while a handle to it is open, and the write
+        // retries only for a few seconds. A reader that reopens the file with no gap at
+        // all would hold it for the whole of that time; a real reader does not.
+        await new Promise((resolveGap) => setTimeout(resolveGap, 20));
+      }
     }
     await write;
 
