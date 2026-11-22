@@ -49,15 +49,8 @@ export type {
 } from './config/project.js';
 export { syncPacks } from './pack/build.js';
 export { SyncLockedError } from './pack/lock.js';
-export type {
-  AfterSyncContext,
-  AfterSyncResult,
-  AfterSyncStep,
-  OrphanResult,
-  PackSyncResult,
-  SyncOptions,
-  SyncReport,
-} from './pack/build.js';
+export type { AgentBlockOutcome, AgentBlockStatus } from './agent/block.js';
+export type { OrphanResult, PackSyncResult, SyncOptions, SyncReport } from './pack/build.js';
 export type {
   RefreshFileChange,
   RefreshFileStatus,

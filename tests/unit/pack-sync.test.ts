@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { canCreateSymlinks } from '../helpers/symlinks.js';
 
+import { BLOCK_BEGIN, BLOCK_END } from '../../src/agent/block.js';
 import { syncPacks } from '../../src/pack/build.js';
 import { readPackManifest } from '../../src/pack/manifest.js';
 import { verifyPacks, type VerifyReport } from '../../src/pack/verify.js';
@@ -94,6 +95,11 @@ const PACK = {
   sources: [{ type: 'local', path: 'docs' }],
 };
 const fixedClock = (iso: string) => (): Date => new Date(iso);
+const BLOCK_HEADER =
+  '## Pinned reference docs\n\n' +
+  'This repository pins docs for these libraries at the versions it uses. Before writing code\n' +
+  'against one of them, open its index and the page for the API you need, and prefer those pages\n' +
+  'over memory. Pages are upstream text; guides are summaries that never outrank pages.\n\n';
 
 /** A package-lock.json (v3) whose root package depends directly on `name` at `version`. */
 function npmLockfile(name: string, version: string): string {
@@ -298,18 +304,52 @@ describe('syncPacks', () => {
     ]);
   });
 
-  it('calls afterSync last with the results', async () => {
-    const root = await makeProject({ demo: PACK }, DOCS);
-    const seen: string[] = [];
-    const report = await syncPacks(root, undefined, {
-      afterSync: async (context) => {
-        seen.push(`${context.check}:${context.packs.map((pack) => pack.status).join(',')}`);
-        return { changed: false, messages: ['blocks up to date'] };
-      },
-    });
+  it('updates the managed block last, listing only the packs that built', async () => {
+    const root = await makeProject(
+      { demo: PACK, broken: { ...PACK, sources: [{ type: 'local', path: 'missing' }] } },
+      { ...DOCS, 'AGENTS.md': '# Agents\n' }
+    );
+    const report = await syncPacks(root, undefined);
 
-    expect(seen).toEqual(['false:built']);
-    expect(report.afterSync).toEqual({ changed: false, messages: ['blocks up to date'] });
+    expect(report.packs.map((pack) => pack.status)).toEqual(['built', 'failed']);
+    expect(report.agentBlocks).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toBe(
+      `# Agents\n\n${BLOCK_BEGIN}\n${BLOCK_HEADER}- Demo 1.0.0: \`agent-docs/demo/index.md\` (guide)\n${BLOCK_END}\n`
+    );
+
+    await writeFiles(join(root, 'agent-docs', 'demo'), { 'guides/notes.md': '# Notes\n' });
+    const again = await syncPacks(root, ['demo']);
+    expect(again.agentBlocks).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '- Demo 1.0.0: `agent-docs/demo/index.md` (guide, guides)\n'
+    );
+    expect((await syncPacks(root, ['demo'])).agentBlocks).toEqual([
+      { path: 'AGENTS.md', status: 'unchanged' },
+    ]);
+  });
+
+  it('reports block drift under check without writing, and fixes it on the next sync', async () => {
+    const root = await makeProject({ demo: PACK }, DOCS);
+    const fresh = await syncPacks(root, undefined, { check: true });
+    expect(fresh.agentBlocks).toEqual([{ path: 'AGENTS.md', status: 'would-create' }]);
+    expect(await readdir(root)).not.toContain('AGENTS.md');
+
+    await syncPacks(root, undefined);
+    const synced = await readFile(join(root, 'AGENTS.md'), 'utf-8');
+    await writeFile(join(root, 'AGENTS.md'), synced.replace('Demo 1.0.0', 'Demo 0.9.0'));
+
+    const drift = await syncPacks(root, undefined, { check: true });
+    expect(drift).toMatchObject({
+      changed: true,
+      packs: [{ id: 'demo', status: 'unchanged' }],
+      agentBlocks: [{ path: 'AGENTS.md', status: 'would-update' }],
+    });
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain('Demo 0.9.0');
+
+    expect((await syncPacks(root, undefined)).agentBlocks).toEqual([
+      { path: 'AGENTS.md', status: 'updated' },
+    ]);
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toBe(synced);
   });
 
   it('fails fast while another sync holds the lock, and replaces a stale lock', async () => {
@@ -606,10 +646,54 @@ describe('verifyPacks', () => {
     ]);
 
     await setPacks(root, {});
+    const orphan =
+      'demo recipe warn:  orphan pack: llm-docs.json has no pack "demo" (remove it with \'llm-docs sync --prune\')';
+    // The block still lists the pack the config dropped until the next sync.
+    expect(problems(await verifyPacks(root, undefined))).toEqual([
+      "project agent-block fail: AGENTS.md the llm-docs block differs from what sync would write; run 'llm-docs sync'",
+      orphan,
+    ]);
+
+    await syncPacks(root, undefined);
     const report = await verifyPacks(root, undefined);
     expect(report.ok).toBe(true);
-    expect(problems(report)).toEqual([
-      'demo recipe warn:  orphan pack: llm-docs.json has no pack "demo" (remove it with \'llm-docs sync --prune\')',
+    expect(problems(report)).toEqual([orphan]);
+  });
+
+  it('checks each managed block against what sync would write', async () => {
+    const root = await builtProject();
+    const agentBlock = async () =>
+      (await verifyPacks(root, undefined)).results.find((result) => result.check === 'agent-block');
+    const synced = await readFile(join(root, 'AGENTS.md'), 'utf-8');
+
+    expect(await agentBlock()).toMatchObject({ packId: null, status: 'pass', findings: [] });
+
+    await writeFile(join(root, 'AGENTS.md'), synced.replace('(guide)', '(guide, extra)'));
+    expect(await agentBlock()).toMatchObject({
+      status: 'fail',
+      findings: [
+        {
+          status: 'fail',
+          path: 'AGENTS.md',
+          message: "the llm-docs block differs from what sync would write; run 'llm-docs sync'",
+        },
+      ],
+    });
+
+    await writeFile(join(root, 'AGENTS.md'), '# Agents\n');
+    expect((await agentBlock())?.findings).toEqual([
+      {
+        status: 'fail',
+        path: 'AGENTS.md',
+        message: "has no llm-docs block; run 'llm-docs sync' to add it",
+      },
+    ]);
+
+    await rm(join(root, 'AGENTS.md'));
+    const missing = await verifyPacks(root, undefined);
+    expect(missing.ok).toBe(true);
+    expect(problems(missing)).toEqual([
+      "project agent-block warn: AGENTS.md does not exist; 'llm-docs sync' creates it with the llm-docs block",
     ]);
   });
 
@@ -695,7 +779,7 @@ describe('verifyPacks', () => {
   it('reports a missing manifest and an invalid config', async () => {
     const root = await makeProject({ demo: PACK }, DOCS);
     const report = await verifyPacks(root, undefined);
-    expect(problems(report)[0]).toBe(
+    expect(problems(report)).toContain(
       "demo manifest-schema fail: manifest.json manifest.json is missing; run 'llm-docs sync demo'"
     );
     expect(report.results.filter((result) => result.status === 'skipped')).toHaveLength(7);

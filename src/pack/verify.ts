@@ -2,15 +2,15 @@
  * `verify` (spec 5.1): named checks with pass, fail, warn, info, or skipped
  * results, per pack and per project. Read-only and offline.
  *
- * Implemented here: config-schema, manifest-schema, outputs, unlisted-files,
- * links, recipe, lockfile, conversion, license. The remaining checks register in
- * PACK_CHECKS and PROJECT_CHECKS: `citations`
- * (Phase 5), `agent-block` (Phase 4).
+ * Implemented here: config-schema, agent-block (from src/agent/block.ts),
+ * manifest-schema, outputs, unlisted-files, links, recipe, lockfile,
+ * conversion, license. `citations` (Phase 5) registers in PACK_CHECKS.
  */
 
 import { lstat, readFile, stat } from 'node:fs/promises';
 import { join, posix, sep } from 'node:path';
 
+import { checkAgentBlocks } from '../agent/block.js';
 import {
   ConfigError,
   loadProjectConfig,
@@ -569,7 +569,7 @@ export async function verifyPacks(
     return { ok: false, strict, results };
   }
 
-  // Phase 4 registers `agent-block` here: each managed block matches what sync would write.
+  results.push(result('agent-block', null, await checkAgentBlocks(loaded)));
 
   const resolveDependencyVersion =
     options.resolveDependencyVersion ??

@@ -6,8 +6,7 @@
  * sources are unchanged; otherwise acquire, select, convert, and write a
  * staging pack, verify it in place, and swap it in atomically, carrying the
  * agent-owned `guides/` across. The whole run holds an advisory lock in the
- * packs directory, and `afterSync` (Phase 4: managed agent-file blocks) runs
- * last.
+ * packs directory, and the managed agent-file blocks are updated last.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -16,6 +15,7 @@ import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from '
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 
+import { syncAgentBlocks, type AgentBlockOutcome } from '../agent/block.js';
 import {
   ConfigError,
   loadProjectConfig,
@@ -99,21 +99,6 @@ export interface OrphanResult {
   reason?: string;
 }
 
-export interface AfterSyncResult {
-  changed: boolean;
-  messages: string[];
-}
-
-export interface AfterSyncContext {
-  loaded: LoadedProjectConfig;
-  packs: readonly PackSyncResult[];
-  /** Report what would change, write nothing. */
-  check: boolean;
-}
-
-/** Runs last in every sync, under the lock. Phase 4 writes the managed agent-file blocks here. */
-export type AfterSyncStep = (context: AfterSyncContext) => Promise<AfterSyncResult>;
-
 export interface SyncOptions {
   /** Write nothing; report what would change. */
   check?: boolean;
@@ -130,7 +115,6 @@ export interface SyncOptions {
   refresh?: boolean;
   /** Overrides the project's lockfile scan (tests pin a lockfile answer with it). */
   resolveDependencyVersion?: DependencyVersionResolver | undefined;
-  afterSync?: AfterSyncStep | undefined;
   /** Clock for `acquiredAt` (tests pin it). */
   now?: () => Date;
   /** Recorded in the lock file. */
@@ -143,7 +127,8 @@ export interface SyncReport {
   changed: boolean;
   packs: PackSyncResult[];
   orphans: OrphanResult[];
-  afterSync: AfterSyncResult | null;
+  /** One entry per resolved agent file; empty with `agentFiles: []`. */
+  agentBlocks: AgentBlockOutcome[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,9 +1006,10 @@ async function handleOrphans(
 }
 
 /**
- * Sync `ids` (default: every configured pack). Per-pack failures are
- * reported in the result, not thrown; an invalid config, an unknown id, or a
- * held lock throws.
+ * Sync `ids` (default: every configured pack), then update the managed
+ * blocks in the agent files from every built pack. Per-pack and per-file
+ * failures are reported in the result, not thrown; an invalid config, an
+ * unknown id, or a held lock throws.
  */
 export async function syncPacks(
   projectRoot: string,
@@ -1079,14 +1065,13 @@ export async function syncPacks(
       await rm(join(loaded.packsDir, STAGING_DIR), { recursive: true, force: true });
     }
 
-    const afterSync =
-      options.afterSync === undefined ? null : await options.afterSync({ loaded, packs, check });
+    const agentBlocks = await syncAgentBlocks(loaded, { check });
     const changed =
       packs.some((pack) => pack.status === 'built' || pack.status === 'would-build') ||
       orphans.some((orphan) => orphan.status === 'pruned' || orphan.status === 'would-prune') ||
-      afterSync?.changed === true;
+      agentBlocks.some((block) => block.status !== 'unchanged' && block.status !== 'failed');
 
-    return { check, changed, packs, orphans, afterSync };
+    return { check, changed, packs, orphans, agentBlocks };
   };
 
   if (check) {

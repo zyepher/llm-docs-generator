@@ -501,7 +501,9 @@ Per pack, each a named check with pass, fail, or warn:
 | `license` | warn for `unknown` and `proprietary`; fail under `--strict` |
 
 Plus project-level checks: `config-schema`, and `agent-block` (each managed block matches what
-`sync` would write). Output lists one line per problem with the pack id, check name, and path.
+`sync` would write; an agent file that does not exist yet is a warning, so a project that
+gitignores it can still run `verify` in CI). Output lists one line per problem with the pack id,
+check name, and path.
 
 ## 6. Dependencies, release dates, and model cutoffs
 
