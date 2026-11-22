@@ -3,10 +3,10 @@
  *
  * Per pack: resolve the recipe; skip when the manifest's recipeHash matches,
  * the pack files verify, and local sources are unchanged; otherwise acquire,
- * select, convert, and write a
- * staging pack, verify it in place, and swap it in atomically, carrying the
- * agent-owned `guides/` across. The whole run holds an advisory lock in the
- * packs directory, and the managed agent-file blocks are updated last.
+ * select, convert, and write a staging pack, verify it in place, and swap it
+ * in atomically, carrying the agent-owned `guides/` across. The whole run
+ * holds an advisory lock in the packs directory, and the managed agent-file
+ * blocks are updated last.
  */
 
 import { randomBytes } from 'node:crypto';
