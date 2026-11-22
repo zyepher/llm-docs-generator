@@ -1,6 +1,9 @@
 # llm-docs v3 specification
 
-Status: approved direction, implementation in progress on branch `v3/redesign`.
+Status: implemented in 3.0.0. This document is the design record: it says what v3 does and
+why, and it was amended during the build so that it matches what shipped. The reference pages
+in `docs/` (config, manifest, commands, security, plugin) are the user-facing source for exact
+behavior.
 Owner decisions (2026-11-05): package and command `llm-docs`; remove source-truth mode, the
 Supabase `--sdk` catalog with the OpenRef parser, and the semantic chunks export; keep a
 combined single-file layout as an opt-in; build and run an eval suite; ship converter
@@ -66,8 +69,10 @@ explicitly named index (`llms.txt`) lists after an explicit planner-written filt
 ```
 
 The project root is the nearest ancestor of the working directory containing `llm-docs.json`.
-Commands that create config (`init`, `add`) use the git top-level directory when inside a git
-repository, else the working directory. `--project <dir>` overrides discovery everywhere.
+Commands that create config (`init`, `add`, `migrate`) use that project when one exists, else
+the git top-level directory when inside a git repository, else the working directory.
+`--project <dir>` names the root on every command that reads a project (section 5);
+`status --project <dir>` starts the upward search at `<dir>`.
 
 ### 2.2 `llm-docs.json`
 
@@ -112,6 +117,7 @@ never silently disable behavior.
       },
       "layout": { "combined": false },
       "license": null,                     // optional declared SPDX id, "proprietary", or null
+      "limits": { "maxFileBytes": 20971520 },  // optional per-file cap, 1 to 200 MiB
       "readFirst": ["pages/guide/migration.md"]  // optional, 1 to 5 targets: see 4.8
     }
   }
@@ -122,14 +128,20 @@ Rules:
 
 - Pack ids match `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - `{version}`, `{major}`, `{minor}`, `{patch}` placeholders are allowed in `ref`, `paths`,
-  `url`, `urls`, `include`, `exclude`, and `readFirst`, substituted from the resolved version. A
-  placeholder with no resolvable value is an error, never an empty string.
+  `url`, `urls` (the URL and an explicit `path`), `include`, `exclude`, and `readFirst`,
+  substituted from the resolved version. A placeholder with no resolvable value is an error,
+  never an empty string. A placeholder in `repo`, `mount`, `passthrough`, `stripPrefix`, a local
+  `path`, `convert.include`, or `convert.command` is an error.
+- Defaults: `packsDir` `agent-docs`, `agentFiles` `"auto"`, `block.maxBytes` 4096,
+  `hook.enabled` true, `hook.nearCutoffDays` 90 (0 to 3650), pack `title` the pack id,
+  `limits.maxFileBytes` 20 MiB.
 - `readFirst` entries are pack-relative POSIX paths starting with `pages/` or `files/` (no
   absolute paths, no `..` segments, no backslashes, normalized), each optionally followed by
   `#<heading slug>`, the target form guide citations use (section 8). Duplicates are an error,
   checked again after placeholder substitution. The planner decides which pages these are; the
   engine records, validates, and shows them, and never guesses which page describes a change.
-- `version` must be a non-empty string without whitespace. It need not be semver (`2026-07-28`
+- `version` must be a non-empty string without whitespace, `<`, `>`, or control characters. It
+  need not be semver (`2026-07-28`
   is a valid version for a protocol revision).
 - `dependency.ecosystem` is one of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`.
 - `packsDir`, `agentFiles` entries, and local `path`s must be project-relative and stay inside
@@ -179,24 +191,33 @@ Given the same recipe and the same upstream bytes, `sync` produces byte-identica
 including `manifest.json`. Consequences:
 
 - `manifest.acquiredAt` is carried over from the previous manifest when no source hash changed.
-- All arrays in the manifest are sorted by a stable key; objects are written with sorted keys.
+- Unordered arrays in the manifest are sorted by a stable key (`sources` by source index and
+  path, `outputs` by path, `links.unresolved` by page, target, and reason, `transforms` by
+  name, `warnings` sorted and deduplicated); `origins` and everything inside `recipe` keep
+  recipe order, because both are indexed by source. Objects are written with sorted keys.
 - Generated text uses `\n` line endings and ends with exactly one newline.
 - Nothing machine-specific is recorded: no absolute paths, no hostnames, no usernames. Paths
-  are POSIX and relative (to the project root, the pack, or the origin root).
+  are POSIX and relative (to the project root, the pack, or the origin root). The one
+  exception is opt-in: a `file://` git repository is recorded as its URL, with a warning that
+  the origin is not portable.
 
 ### 2.6 Atomic builds and locking
 
 A pack is built in `<packsDir>/.staging/<id>-<random>/`, verified in place, and swapped in:
 `guides/` is moved from the old pack into the staging pack, the old pack is renamed to
 `<packsDir>/.staging/<id>-old-<random>`, the staging pack is renamed into place, and the old
-pack is removed. Windows `EPERM`/`EBUSY` on rename is retried with backoff (bounded). A crash at
-any point leaves either the old pack or the new pack in place, never a mix; leftover staging
-directories are removed by the next sync. `.staging/` and `.llm-docs.lock` are created with a
+pack is removed. `EPERM`, `EBUSY`, and `EACCES` on rename (Windows holds files open) are
+retried with exponential backoff, at most 7 times. A crash never leaves a mix of old and new
+files: between the two renames no pack is at the target path, and the next sync recovers by
+moving the old pack (and any guides moved into the staging pack) back before it does anything
+else; other leftover staging directories are removed. `.staging/` and `.llm-docs.lock` are created with a
 `.gitignore` in `packsDir` that ignores them.
 
 `.llm-docs.lock` is created with exclusive create, holds `{pid, startedAt, command}`, and is
-considered stale when the pid is not alive or it is older than 1 hour. A second sync fails fast
-with a clear message instead of waiting.
+considered stale when the pid is not alive, it is older than 1 hour, `pid` or `startedAt` is
+missing, or it cannot be read and is older than 5 seconds; a stale lock is replaced once. A
+second sync fails fast (exit 3) with a clear message instead of waiting. `sync --check` takes
+no lock.
 
 ## 3. Manifest v3
 
@@ -217,9 +238,9 @@ with a clear message instead of waiting.
   "origins": [                          // one per source, same order as recipe.sources
     { "type": "git", "repo": "https://github.com/vitejs/vite", "ref": "v8.2.0",
       "commit": "<40 hex>", "refKind": "tag" },
-    { "type": "llms-txt", "url": "https://x.dev/llms.txt", "sha256": "sha256:..." },
+    { "type": "llms-txt", "url": "https://x.dev/llms.txt", "sha256": "sha256:..." },  // + "finalUrl" after a redirect
     { "type": "urls" },
-    { "type": "local", "path": "manuals", "hostCommit": "<hex>|null", "hostDirty": false }
+    { "type": "local", "path": "manuals", "hostCommit": "<hex>|null", "hostDirty": false }  // both null outside git
   ],
   "license": {
     "declared": null,
@@ -270,8 +291,10 @@ an identity) that is removed afterwards, including on failure.
 **Network policy (shared HTTP client, `src/sources/http.ts`):** `https:` only (plus `http:` to
 loopback when `LLM_DOCS_ALLOW_PRIVATE_NETWORK=1`, which tests use). Before connecting, resolve
 the hostname and reject private, loopback, link-local, CGNAT, multicast, and unique-local
-addresses (IPv4 and IPv6, including IPv4-mapped IPv6), unless the same env flag is set; pin the
-connection to the resolved address so DNS rebinding cannot swap it. Follow at most 5 redirects,
+addresses (IPv4 and IPv6, including IPv4-mapped IPv6), plus the documentation, benchmarking,
+reserved, NAT64, 6to4, Teredo, discard, and site-local ranges, unless the same env flag is set.
+Every resolved address must pass. Pin the connection to the vetted address so DNS rebinding
+cannot swap it. Follow at most 5 redirects,
 re-applying the policy to each hop and recording the final URL. Timeouts: 15 s connect, 60 s
 total per request. Per-response cap 20 MB (configurable per pack up to 200 MB with
 `limits.maxFileBytes`), streamed and aborted when exceeded. Per-pack caps: 5,000 files and
@@ -282,26 +305,40 @@ rejected; URLs are redacted (`redactUrl`) in every log and error. `GITHUB_TOKEN`
 to `api.github.com` and only when set.
 
 **Git policy (`src/sources/git.ts`):** run git with `execFile`, never a shell. Environment:
-`GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` pointed at an empty
-file, `GIT_ASKPASS` unset. Config flags on every invocation: `-c core.hooksPath=<empty dir>`,
-`-c core.symlinks=false`, `-c protocol.allow=never -c protocol.https.allow=always`
-(`protocol.file.allow=always` only for `file://` repos), `-c submodule.recurse=false`. Fetch
-strategy: `git init`, `git remote add origin <repo>`, `git fetch --depth 1 --filter=blob:none
-origin <ref>` (for tags use `refs/tags/<ref>`), then a sparse, non-cone checkout of `paths`.
-Resolve and record the commit; resolve the ref kind with `git ls-remote` (tag, branch, or
-commit). Reject any checked-out symlink and any path escaping the checkout. Timeout 10 minutes
-per git command. A missing `git` binary is a clear error.
+every `GIT_*` variable from the parent is dropped except `GIT_SSL_CAINFO` and `GIT_SSL_CAPATH`
+(TLS trust a corporate network needs), `SSH_ASKPASS` is removed, and `GIT_TERMINAL_PROMPT=0`,
+`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` pointed at an empty file, `GIT_LITERAL_PATHSPECS=1`,
+and `GCM_INTERACTIVE=never` are set. Config flags on every invocation:
+`-c core.hooksPath=<empty dir>`, `-c core.symlinks=false`, `-c core.fsmonitor=false`,
+`-c protocol.allow=never -c protocol.https.allow=always` (`protocol.file.allow=always` only for
+`file://` repos), `-c submodule.recurse=false`, `-c fetch.recurseSubmodules=false`. Before git
+runs, an `https` repository's host is checked against the address rules above (git connects on
+its own, so this check is not pinned). Fetch strategy: `git ls-remote` first resolves the ref
+kind (a tag wins over a branch of the same name; a 40-hex name is a commit only when no tag or
+branch has it), then `git init --template=`, `git remote add origin <repo>`, `git fetch --depth
+1 --filter=blob:none --no-tags --no-recurse-submodules origin <refspec>` (`refs/tags/<ref>`,
+`refs/heads/<ref>`, or the commit), then a sparse, non-cone checkout of `paths` plus the license
+files (4.10). Record the fetched commit. A symlink the recipe would take is an error naming it;
+other symlinks are skipped with one warning; submodule entries are skipped with a warning; a
+path escaping the checkout is an error. Ref names must be a 40-hex commit or a name that cannot
+read as an option and follows git's ref rules. Timeout 10 minutes per git command. A missing
+`git` binary is a clear error (exit 3).
 
 ### 4.2 Selecting files
 
-Files are enumerated with `walkBoundedDirectoryTree` (the shared walker) from each source's
-root after acquisition. Default include for `git` and `local`: `**/*.{md,mdx,markdown,rst,html,htm}`
-plus OpenAPI files detected by content (`openapi:` / `swagger:` key in JSON or YAML) when
-listed by an explicit include. Default skip directories come from `SKIPPED_DIRECTORY_NAMES`.
-Files that match no handler and no passthrough glob are skipped and counted in one aggregated
-warning per extension. Output paths are checked for collisions (case-insensitive, because
-macOS and Windows file systems are) and for Windows-reserved names; either is an error naming
-the files.
+A `local` source is enumerated with `walkBoundedDirectoryTree` (the shared walker), skipping
+the directories in `SKIPPED_DIRECTORY_NAMES` and the packs directory; a local source inside the
+packs directory is an error. A `git` source is listed with `git ls-tree` at the fetched commit
+and has no skip list (exclude `node_modules` and similar with `exclude`). HTTP sources list the
+files of their fetch plan. Default include for `git` and `local`:
+`**/*.{md,mdx,markdown,rst,html,htm}` plus OpenAPI files detected by content (`openapi:` /
+`swagger:` key in JSON or YAML) when listed by an explicit include. Files that an include
+matched but no handler, converter, or passthrough glob takes are skipped and reported in one
+warning with a count per extension; files no include matched are not reported. Output paths
+are checked for collisions (case-insensitive after Unicode NFC normalization, because macOS
+and Windows file systems are, and again after rendering, for OpenAPI tag pages), for
+Windows-reserved names, for characters Windows forbids, and for segments ending in a dot or a
+space; each is an error naming the files.
 
 ### 4.3 Converting to pages
 
@@ -312,7 +349,8 @@ replaced by .md>`, except OpenAPI (below). Every page starts with one provenance
 <!-- llm-docs: vite@8.2.0 | source: https://github.com/vitejs/vite/blob/<commit>/docs/guide/index.md -->
 ```
 
-(`source:` is the origin URL for git and http sources and the project-relative path for local
+(`source:` is the pinned blob URL for git sources on `github.com`, `<repo>@<commit>:<path>` for
+other git remotes, the fetched URL for http sources, and the project-relative path for local
 sources.) Then a blank line, then the content.
 
 - **Markdown (`.md`, `.markdown`) and MDX (`.mdx`)**: source-preserving. The text is kept
@@ -330,17 +368,19 @@ sources.) Then a blank line, then the content.
 - **reStructuredText, HTML**: parsed with the existing parsers into the `DocNode` IR and
   rendered by a new IR-to-Markdown renderer that keeps the source heading levels (no
   renumbering), renders code blocks as fenced code with the language, and renders `DATA`
-  blocks as fenced `json` or `yaml`. HTML pages drop navigation chrome as v2 does.
-- **OpenAPI 3.x / Swagger 2.0**: one page per tag at `pages/<mount>/<spec stem>/<tag slug>.md`
-  plus `pages/<mount>/<spec stem>/index.md` with info, servers, auth schemes, and the tag list.
-  Operations render method, path, summary, description, deprecation, auth, parameters, request
-  body, and responses with dereferenced schema shapes (existing parser output). Untagged
-  operations go to `untagged.md`.
+  blocks as a Markdown table for tabular data, else as fenced code in the block's own language
+  (`text` when it has none). HTML pages drop navigation chrome as v2 does.
+- **OpenAPI 3.x / Swagger 2.0**: one page per tag at `pages/<mount>/<spec path>/<tag slug>.md`
+  plus `pages/<mount>/<spec path>/index.md` with info, servers, auth schemes, and the tag list,
+  where `<spec path>` is the spec's source path without its extension. A tag whose slug is
+  `index` gets `index-tag.md`. Operations render method, path, operation id, summary,
+  description, deprecation, auth, parameters, request body, and responses with dereferenced
+  schema shapes (existing parser output). Untagged operations go to `untagged.md`.
 - **Converted documents**: see 4.6; the converter's Markdown output then goes through the
   Markdown path.
 
 Headings are never renumbered. Page titles (for the index) come from the first H1, else the
-frontmatter title, else the file name.
+frontmatter title, else the file name without its extension.
 
 ### 4.4 Transforms
 
@@ -361,32 +401,40 @@ inline links, images, reference definitions, autolinks, and `href`/`src` attribu
 HTML. For each target:
 
 1. Fragment-only (`#x`): unchanged.
-2. Relative path that resolves (after stripping a `.md`, `.mdx`, `.html` extension or a trailing
-   `/index`, the same normalization v2 uses for extensionless routes) to another acquired page
-   of the same pack: rewritten to the relative path from this page to that page, fragment kept.
+2. Relative path that resolves (after stripping a `.md`, `.mdx`, `.markdown`, `.html`, `.htm`,
+   or `.rst` extension or a trailing `/index`, the same normalization v2 uses for extensionless
+   routes) to another acquired page of the same pack: rewritten to the relative path from this
+   page to that page, fragment kept.
 3. Site-absolute (`/x/y`) or absolute URL on `site.baseUrl`'s origin: aliases applied first,
    then matched against the acquired pages' site paths. Site path for an http-acquired page is
    its URL pathname; for a git or local page it is its source path with the extension and a
    trailing `index` removed, relative to the source root. A match rewrites to the relative page
-   path; no match rewrites to the absolute URL `baseUrl + path`.
+   path; no match rewrites to the absolute URL `baseUrl + path` (the path as written). A
+   site-absolute link in a pack without `site.baseUrl` goes to step 5. A link from a local
+   source to a page that exists but was not selected goes to `baseUrl` plus its route.
 4. Relative path inside a git source's repository but outside the pack: rewritten to a pinned
-   blob URL at the recorded commit for GitHub remotes (existing `pinOutOfPackTarget` logic);
-   other hosts leave it unchanged and count it.
-5. Anything else: unchanged and recorded in `links.unresolved` with a reason.
+   blob URL at the recorded commit for GitHub remotes (existing `pinOutOfPackTarget` logic).
+   For other hosts it goes to step 5.
+5. Anything else: converted to plain text `[label] (unresolved: target)` and recorded in
+   `links.unresolved` with a reason (`not-found`, `not-in-pack`, `outside-source`,
+   `outside-repository`, `outside-pack-non-github-remote`, `site-absolute-without-base-url`, or
+   `malformed`). In raw HTML the attribute is renamed to `data-unresolved-href` or
+   `data-unresolved-src` instead.
 
-`verify` fails on a relative link in a page or index that does not resolve on disk, so
-step 5 entries must not be relative paths: an unresolvable relative target is rewritten to the
-absolute upstream URL when the origin is http or a GitHub git remote, and otherwise recorded
-and, as a last resort, converted to plain text `[label] (unresolved: target)` so the pack never
-contains a dead local link. The count of such conversions is a manifest warning.
+`verify` fails on a relative link in a page or index that does not resolve on disk, so the
+build never leaves one: a relative target is rewritten to a pack page or an absolute upstream
+URL when it can be, and otherwise made plain text by step 5. The count of such conversions is a
+manifest warning.
 
 ### 4.6 Converters
 
 `convert` on a source: `{ "tool": "docling" | "markitdown" | "command" | "agent", "include":
 [globs], "command": [argv], "timeoutSeconds": 300 }`. `include` defaults to
-`**/*.{pdf,docx,pptx,xlsx,epub,html,htm}` for docling and markitdown (xlsx only if explicitly
-listed, because spreadsheets are passthrough by default) and is required for `command` and
-`agent`. A file matched by both `passthrough` and the converter's `include` is passthrough.
+`**/*.{pdf,docx,pptx,epub,html,htm}` for docling and markitdown (xlsx converts only when listed
+explicitly, because spreadsheets are passthrough by default) and is required for `command` and
+`agent`. `command` is required for `command`, optional for docling and markitdown (without
+`{input}` or `{output}` there), and not allowed for `agent`. `timeoutSeconds` is 1 to 3600,
+default 300. A file matched by both `passthrough` and the converter's `include` is passthrough.
 
 - `docling`: runs `docling --to md --image-export-mode placeholder --output <tmp> <input>` and
   reads `<tmp>/<stem>.md` (placeholder images keep base64 data out of pages).
@@ -403,17 +451,21 @@ listed, because spreadsheets are passthrough by default) and is required for `co
 
 Tool resolution: for docling and markitdown, `command` (when set) is the executable and any
 leading arguments, used instead of the tool name, with the tool's own arguments appended; else
-the tool name on `PATH` (on Windows also with `.exe`, `.cmd`, `.bat`, `.com`). The version is
-captured with `--version` (first line, trimmed; for `command`, `command[0] --version`) and
-recorded; when it cannot be read it is recorded as null with a warning. Failure to resolve the
-tool is an error naming the install command (`pipx install docling`, `pipx install
-'markitdown[all]'`). Inputs are copied under a sanitized name into the temp working directory
-and passed as paths there; per-file timeout (the child is killed); inputs over 200 MB are
-refused; non-zero exit or empty output is an error naming the file and the tool's stderr tail.
+the tool name on `PATH` (on Windows also with `.exe`, `.cmd`, `.bat`, `.com`); a relative
+`command[0]` resolves against the project root. The version is captured with `--version`
+(first line, trimmed, 60 s timeout; for `command`, `command[0] --version`) and recorded; when
+it cannot be read it is recorded as null with a warning, and those conversions are not cached.
+Failure to resolve the tool is a runtime error (exit 3) naming the install command (`pipx
+install docling`, `pipx install 'markitdown[all]'`). Inputs are copied under a sanitized name
+into the temp working directory and passed as paths there; per-file timeout (the child is
+killed); inputs over 200 MiB and outputs over 100 MiB are refused (every acquired file is also
+under `limits.maxFileBytes` first); non-zero exit, empty output, a missing output file, or
+output that is not UTF-8 is an error naming the file and the tool's stderr tail.
 A Windows `.cmd`/`.bat` shim can only run through `cmd.exe`: its arguments are quoted, and an
 argument containing `"`, `%`, or a line break is refused. Converter output is not assumed
-deterministic: successful conversions are cached in `<cache dir>/conversions/`, keyed by the
-input hash, tool, version, and argv template, so an unchanged document is not reconverted when
+deterministic: successful conversions are cached in `<cache dir>/conversions/<key>.md` (the
+cache dir of 6.2), keyed by the sha256 of the input hash, tool, version, argv template, and a
+cache format number, so an unchanged document is not reconverted when
 its pack rebuilds for another reason; `refresh` reports changed pages caused by a converter
 version change separately.
 
@@ -427,11 +479,14 @@ listed as `passthrough` outputs. Links from pages to passthrough files resolve n
 Generated, deterministic, verified. Contents:
 
 1. `# <title> <version>` and a provenance paragraph: the origins in plain words (repository and
-   commit with a link, or the index URL, or the project path), the acquisition date, and the
-   license line (SPDX id and attribution with a link to the license file when known).
-2. A short "How to read this pack" paragraph: open the page for the API you need; grep
-   `pages/` for exact symbol names; pages are upstream text; guides, when the pack has any,
-   are the digests in `guides/` and never outrank pages.
+   commit, linked for `github.com` repositories; the index URL; the number of listed URLs; or
+   the project folder with the host repository commit and whether it had uncommitted changes),
+   the acquisition date (`YYYY-MM-DD`), and the license line: the SPDX id and the file it was
+   detected from, or the declared license, or a note that the license is proprietary or unknown
+   and the terms should be checked before redistributing.
+2. A short "How to read this pack" section: open the page for the API you need; search
+   `pages/` for exact symbol names; pages are upstream text at the pinned version; guides, when
+   the pack has any, are the digests in `guides/` and never outrank pages.
 3. "Read first", only when `recipe.readFirst` is non-empty: one sentence ("Start with these
    pages before writing code against <Title> <version>. They were marked as the ones to read
    first for this version, usually because they describe what changed.") and one link per
@@ -439,8 +494,9 @@ Generated, deterministic, verified. Contents:
    for a target with a fragment, `: <heading text>`. Labels are escaped like page titles.
    When a library is newer than the model's training data, the page that says what changed is
    what keeps the agent from writing the API it remembers.
-4. "Pages": grouped by top-level directory under `pages/` (in sorted order), one table per
-   group with columns page link, title, approximate tokens.
+4. "Pages": grouped by top-level directory under `pages/` (in sorted order, with pages directly
+   under `pages/` in a "Top level" group), one table per group with columns page link, title,
+   approximate tokens.
 
 At sync every `readFirst` target must name a page or passthrough output of the pack being
 built, and a fragment must be the slug of a heading on that Markdown file. An unresolved target
@@ -455,8 +511,9 @@ editing, removing, or stamping a guide changes neither `index.md`, the combined 
 change is the managed block's `guides` topic (7.1), which `sync` rewrites without acquiring
 anything and which `sync --check` and `verify agent-block` report until then.
 
-Titles from upstream are escaped for Markdown tables (`|`, backticks, newlines, control
-characters removed, 120 character cap).
+Titles from upstream are escaped for Markdown tables: control characters and line breaks
+become spaces and whitespace collapses, backticks are removed, `\`, `|`, `[`, `]`, `<`, and `>`
+are backslash-escaped, and the result is capped at 120 characters (117 plus `...`).
 
 ### 4.9 Combined layout
 
@@ -473,80 +530,112 @@ when outside `paths`. Detection matches normalized text against fingerprints for
 Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0, CC-BY-4.0, CC-BY-SA-4.0, CC0-1.0,
 Unlicense, GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0, and a `SPDX-License-Identifier:`
 line. Status: MIT/Apache/BSD/ISC/CC0/Unlicense are `permissive`; CC-BY is `attribution`;
-GPL/LGPL/AGPL/MPL/CC-BY-SA are `copyleft`; nothing found is `unknown`; a declared
-`proprietary` is `proprietary`. `sync` prints a warning for `unknown` and `proprietary`;
-`verify --strict` fails on them. A declared license is recorded alongside the detected one and
-wins for status; a mismatch is a warning.
+GPL/LGPL/AGPL/MPL/CC-BY-SA are `copyleft`; nothing found, or an id outside these lists, is
+`unknown`; a declared `proprietary` is `proprietary`. SPDX expressions are evaluated: `OR`
+takes the most permissive choice, `AND` the most restrictive term, and `-only`, `-or-later`,
+and `WITH` exceptions keep the base status. An `SPDX-License-Identifier:` line wins over
+fingerprints. When several license files are found, one at a taken path outranks the
+repository root, a file whose name mentions docs outranks its siblings, and `LICENSE` outranks
+`COPYING`; files that disagree are a warning. License files over 1 MiB or that are symlinks are
+skipped. `sync` prints a warning for `unknown` and `proprietary` (in its output, not in
+`manifest.warnings`); `verify --strict` fails on them. A declared license is recorded alongside
+the detected one and wins for status; a mismatch is a manifest warning.
 
 ## 5. Commands
 
 Exit codes everywhere: 0 success, 1 a check failed (verify, `--check` modes), 2 usage or config
-error, 3 runtime failure (network, git, converter). Every command accepts `--project <dir>`
-and `--json` (machine output on stdout, human output on stderr, never mixed). Colors only on a
-TTY and never when `NO_COLOR` is set.
+error, 3 runtime failure (network, git, converter, I/O, a held lock); when one run has both, 3
+wins. An invalid `llm-docs.json` under `verify` is a failing `config-schema` check, so exit 1.
+`init`, `add`, `sync`, `refresh`, `verify`, `status`, `guides stamp`, and `migrate` accept
+`--project <dir>`; `discover`, `capabilities`, and `hook session-start` read no project and do
+not. `--json` puts machine output on stdout and human output on stderr, never mixed, with three
+stdout outputs by design: `discover` always prints JSON (its `--json` is accepted and changes
+nothing), `status --brief` prints the note (and takes precedence over `--json`), and
+`capabilities` without `--json` prints its command list. The CLI prints no color.
+`LLM_DOCS_DEBUG=1` adds stack traces to errors.
 
 - `llm-docs init [--packs-dir <dir>]`: create `llm-docs.json` and `packsDir` with its
-  `.gitignore`; insert empty managed blocks per 7.1. Idempotent; never overwrites config.
+  `.gitignore`; write the managed blocks per 7.1 (empty until a pack is built, the full block on
+  a project that has packs). Idempotent; never overwrites config.
 - `llm-docs add <id> (--git <repo> --ref <ref> [--path <p>]... | --url <u>... | --urls-file
-  <f> | --llms-txt <u> --include <glob>... | --local <path>) [--dependency <eco>:<name>]
-  [--version <v>] [--mount <m>] [--title <t>] [--convert <tool>] [--site <baseUrl>]
-  [--recipe <json>] [--read-first <target>]... [--dry-run]`: write the recipe into config
-  (creating config if absent), then `sync <id>`. Refuses to overwrite an existing id unless
-  `--replace`. When the build rejects the recipe as a config error (exit 2, an unresolved
-  read-first target among them), `llm-docs.json` is put back as it was. `--dry-run` prints the
-  recipe and the file list that would be acquired, writing nothing, and says for each
-  `--read-first` target whether a file the recipe takes lands at its path; a heading fragment
-  can only be checked once pages are built, and the output says so.
+  <f> | --llms-txt <u> --include <glob>... [--strip-prefix <prefix>] | --local <path>)
+  [--include <glob>]... [--dependency <eco>:<name>] [--version <v>] [--mount <m>] [--title <t>]
+  [--convert docling|markitdown|agent] [--convert-include <glob>...] [--site <baseUrl>]
+  [--recipe <json>] [--read-first <target>]... [--replace] [--dry-run]`: write the recipe into
+  config (creating config if absent), then `sync <id>`. `--version` or `--dependency` is
+  required. `--include` applies to every source type (file paths, or URL paths for
+  `--llms-txt`). `--recipe` adds source fields as JSON, a `command` converter among them, and
+  can name the whole source by itself. Refuses to overwrite an existing id unless `--replace`.
+  When the build rejects the recipe as a config error (exit 2, an unresolved read-first target
+  among them), `llm-docs.json` is put back as it was; after a runtime failure (exit 3) the
+  recipe stays so that `sync <id>` can retry. `--dry-run` prints the recipe and the file list
+  that would be acquired, writing nothing, and says for each `--read-first` target whether a
+  file the recipe takes lands at its path; a heading fragment can only be checked once pages
+  are built, and the output says so.
 - `llm-docs sync [ids...] [--check] [--offline] [--prune]`: bring packs in line with config
-  and lockfiles. Skips a pack when its manifest's `recipeHash` matches and its outputs verify.
-  `--check`: write nothing, exit 1 if any pack or managed block would change (CI gate).
-  `--offline`: fail rather than acquire. `--prune`: delete pack directories not in config
-  (without it, they are reported). Always updates managed blocks last.
+  and lockfiles. Skips a pack when its manifest's `recipeHash` matches and its files pass the
+  `outputs` and `unlisted-files` checks; `local` sources are read again on every sync, and a
+  changed local file rebuilds the pack. After a rebuild it prints the guides whose cited
+  sections changed or no longer resolve (8), with the `guides stamp` command to run once they
+  are re-reviewed. `--check`: write nothing, exit 1 if any pack, orphan, or managed block would
+  change (CI gate; takes no lock). `--offline`: a pack that needs a rebuild from a network
+  source fails (exit 2) rather than acquire. `--prune`: delete pack directories not in config
+  (without it, they are reported); it keeps a directory without `manifest.json` and a pack that
+  holds guides, and handles orphans only when no ids are given. Always updates managed blocks
+  last.
 - `llm-docs refresh [ids...] [--check]`: re-acquire each pack at its recorded recipe and
   report per page: unchanged, changed, added, removed; for git, whether the ref now resolves to
-  a different commit. Writes the new pack unless `--check`.
+  a different commit; and converted pages whose converter version changed. Writes the new pack
+  unless `--check`. A pack that was never built, or whose recipe changed since the last sync,
+  is refused (exit 2). `--check` lists the guides whose cited pages changed upstream, at page
+  level, since sections can only be compared once rebuilt.
 - `llm-docs verify [ids...] [--strict]`: run every check in 5.1. Read-only, offline.
 - `llm-docs status [--model <id>] [--cutoff <YYYY-MM>] [--offline] [--brief]`: section 6.
 - `llm-docs guides stamp <id> [guide...]`: section 8.
-- `llm-docs migrate <v2-pack-dir> [--id <id>]`: section 9.
+- `llm-docs migrate <v2-pack-dir> --version <version> [--id <id>]`: section 9.
 - `llm-docs discover --url <site> | --package <eco>:<name>[@<version>]`: section 10.
 - `llm-docs hook session-start`: section 7.2. Undocumented in `--help` output except as
   "used by the plugin".
-- `llm-docs capabilities --json`: machine-readable list of commands, options, source types,
-  converters, ecosystems, transforms, and limits, generated from the same tables the code
-  uses (never a hand-maintained list that can drift).
+- `llm-docs capabilities --json`: machine-readable name, version, commands (with summary,
+  status, and options), source types, converters with install commands, ecosystems,
+  transforms, checks, and limits, generated from the same tables the code uses (never a
+  hand-maintained list that can drift).
 
-Removed in v3 with a one-line error pointing to the replacement when invoked: `generate`
-(use `add`), `validate`, `list-sdks`, `source-truth`, `verify-docs`, `plugins`, `agent`.
+Removed in v3 with a one-line error (exit 2) pointing to the replacement when invoked:
+`generate` (use `add`), `validate` and `list-sdks` (add the SDK's docs with `add`),
+`source-truth` and `verify-docs` (no replacement), `plugins` (a `command` converter), `agent`
+(the plugin).
 
 ### 5.1 `verify` checks
 
-Per pack, each a named check with pass, fail, or warn:
+Per pack, each a named check with pass, fail, warn, info, or skipped (when `manifest-schema`
+fails, the other pack checks are skipped):
 
 | Check | Fails when |
 |---|---|
-| `manifest-schema` | manifest missing, unparsable, or not schema v3 |
+| `manifest-schema` | manifest missing, unparsable, not schema v3, or for another pack id |
 | `outputs` | a listed output is missing or its hash differs |
-| `unlisted-files` | a file in the pack is not listed (ignoring `guides/**` and OS junk like `.DS_Store`, which are reported as info) |
-| `links` | a relative link in a page, index, or combined file does not resolve inside the pack (fragments are checked against heading slugs only in `--strict`) |
-| `recipe` | the config recipe for this id resolves to a different `recipeHash` (warn when the config has no such pack: orphan) |
-| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version` |
-| `citations` | a guide citation does not resolve, or its cited section hash changed since stamping; an unstamped guide or a guide edited after stamping is a warning |
-| `conversion` | an `agent` conversion's original changed since the last sync |
+| `unlisted-files` | a file in the pack is not listed, or the pack holds a symlink (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info) |
+| `links` | a relative link in a page, index, or combined file does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
+| `recipe` | the config recipe for this id resolves to a different `recipeHash` or cannot be resolved (warn when the config has no such pack: orphan) |
+| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise |
+| `citations` | a guide citation does not resolve, its cited section hash changed since stamping, or the lock is invalid; an unstamped guide, a guide edited after stamping, or a lock entry for a deleted guide is a warning |
+| `conversion` | an `agent` conversion's original changed since the last sync (warn when a local original no longer exists) |
 | `license` | warn for `unknown` and `proprietary`; fail under `--strict` |
 
-Plus project-level checks: `config-schema`, and `agent-block` (each managed block matches what
-`sync` would write; an agent file that does not exist yet is a warning, so a project that
-gitignores it can still run `verify` in CI). Output lists one line per problem with the pack id,
-check name, and path.
+Plus project-level checks: `config-schema` (verify stops after it fails), and `agent-block`
+(each managed block matches what `sync` would write; an agent file that does not exist yet is a
+warning, so a project that gitignores it can still run `verify` in CI). Output lists one line
+per problem with the pack id, check name, and path.
 
 ## 6. Dependencies, release dates, and model cutoffs
 
 ### 6.1 Lockfile scanning (`src/deps/`)
 
-`scanDependencies(projectRoot)` walks the project with the shared walker (max depth 6, skip
-`node_modules`, `.git`, build and vendor dirs, and `packsDir`), finds lockfiles, and returns
-resolved dependencies:
+`scanDependencies(projectRoot)` walks the project with the shared walker (max depth 6, at most
+200,000 entries, skip `node_modules`, `.git`, build, vendor, virtualenv, and tool cache dirs,
+and `packsDir`), finds lockfiles, and returns resolved dependencies. The hook's deadline can
+stop the scan early, with a warning:
 
 ```ts
 type Ecosystem = 'npm' | 'pypi' | 'cargo' | 'go' | 'pub' | 'swiftpm'
@@ -570,15 +659,16 @@ Supported inputs and how directness is decided:
 
 | Ecosystem | Lockfiles | Direct deps from |
 |---|---|---|
-| npm | `package-lock.json` (v1, v2, v3), `npm-shrinkwrap.json`, `pnpm-lock.yaml` (v6 to v9), `yarn.lock` (classic and berry), `bun.lock` (text) | `package.json` `dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies` of the same directory (and workspace packages listed in the lockfile) |
+| npm | `package-lock.json` (v1, v2, v3), `npm-shrinkwrap.json`, `pnpm-lock.yaml` (v6 to v9), `yarn.lock` (classic and berry), `bun.lock` (text) | `package-lock.json` v2 and v3: the lockfile's root and workspace package entries; other formats: `package.json` `dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies` of the same directory (and workspace packages listed in the lockfile) |
 | pypi | `uv.lock`, `poetry.lock`, `pdm.lock`, `Pipfile.lock`, `requirements*.txt` with `==` pins | `pyproject.toml` (`project.dependencies`, optional groups, `tool.poetry.dependencies`), `Pipfile`; requirements pins are direct |
-| cargo | `Cargo.lock` | `Cargo.toml` `[dependencies]`, `[dev-dependencies]`, workspace members |
+| cargo | `Cargo.lock` | each workspace member's `dependencies` list in `Cargo.lock`; `Cargo.toml` names the members and marks `[dev-dependencies]` |
 | go | `go.mod` (`require` lines; `// indirect` marks indirect) | same |
 | pub | `pubspec.lock` | its own `dependency: direct main / direct dev` field |
 | swiftpm | `Package.resolved` (v1, v2, v3) | `Package.swift` `.package(url:` entries when parsable; otherwise all pins are treated as direct with a warning |
 
-Non-registry dependencies (git, path, workspace, `file:`, npm aliases to other names, `link:`)
-are skipped with one aggregated warning. `bun.lockb` (binary) is reported as unsupported.
+Non-registry dependencies (git, path, workspace, `file:`, npm aliases to other names, `link:`,
+URLs, alternate registries, Go modules replaced by a `replace` directive, and SwiftPM pins with
+only a revision) are skipped with one aggregated warning. `bun.lockb` (binary) is reported as unsupported.
 Name normalization: PyPI names are PEP 503 normalized; others exact. Parsers never execute
 project code. TOML is parsed with `smol-toml`.
 
@@ -589,7 +679,9 @@ cache directory (`LLM_DOCS_CACHE_DIR`, else `$XDG_CACHE_HOME/llm-docs`, else
 `~/Library/Caches/llm-docs` on macOS, `%LOCALAPPDATA%\llm-docs\Cache` on Windows,
 `~/.cache/llm-docs` elsewhere) in `release-dates.json`. Positive entries never expire (a
 version's publish date is immutable); negative entries expire after 24 hours. Writes are
-atomic; a corrupt cache file is discarded with a warning.
+atomic and merged with what is on disk; a corrupt cache file is discarded with a warning.
+Transport errors, budget timeouts, and unsupported lookups (SwiftPM outside GitHub) are not
+cached. Lookups run 4 at a time with a 5 s timeout each.
 
 | Ecosystem | Source |
 |---|---|
@@ -598,38 +690,51 @@ atomic; a corrupt cache file is discarded with a warning.
 | cargo | `https://crates.io/api/v1/crates/<name>/<version>` `version.created_at` |
 | go | `https://proxy.golang.org/<escaped module>/@v/<version>.info` `Time` |
 | pub | `https://pub.dev/api/packages/<name>` `versions[].published` |
-| swiftpm | GitHub repositories only: tag commit date via `api.github.com` (uses `GITHUB_TOKEN` when set); others unknown |
+| swiftpm | GitHub repositories only: the commit date of the tag (as written, then with a `v` prefix; annotated tags dereferenced) via `api.github.com` (uses `GITHUB_TOKEN` when set); others unknown |
 
 `budgetMs` bounds total wall time; unfinished lookups return `null` and are retried next time.
+Only the hook passes a budget; `status` waits for every lookup.
 
 ### 6.3 Model cutoffs
 
-`data/model-cutoffs.json` ships with the package: an ordered list of `{ "pattern": regex over
-the normalized model id, "label": "Claude Opus 5.5", "cutoff": "2026-06", "source": "<url>" }`.
-Normalization lowercases, strips bracketed suffixes like `[1m]`, and strips provider prefixes
-(`us.anthropic.`, `anthropic/`). Only entries backed by a published source are included; the
-source URL is recorded per entry. Resolution order: `--cutoff`, config `model.cutoff`,
-`LLM_DOCS_MODEL_CUTOFF`, the table match for `--model` or the hook's model id. No match means
-no cutoff and the after-cutoff analysis is skipped (never guessed).
+`data/model-cutoffs.json` ships with the package: an object with `schemaVersion`, an ordered
+`models` list of `{ "pattern": regex over the normalized model id, "label": "Claude Opus 5.5",
+"cutoff": "2026-06", "source": "<url>" }`, and `claudeCodeAliases`, the model each Claude Code
+alias selects per provider (7.2). Normalization lowercases, strips bracketed suffixes like
+`[1m]` and parenthesized ones like `(fast mode)`, strips provider and region prefixes
+(`us.anthropic.`, `eu.`, `global.`, `anthropic/`, `bedrock/`, `vertex_ai/`, `models/`, and
+similar), and strips Bedrock `-v1:0` suffixes and snapshot dates (`-20250929`, `@20250929`,
+`-2025-04-14`). Only entries backed by a published source are included; the source URL is
+recorded per entry. Resolution order: `--cutoff`, config `model.cutoff`,
+`LLM_DOCS_MODEL_CUTOFF`, the table match for `--model` or the hook's model id. Each of the first
+three must be `YYYY-MM`; a malformed one is an error (exit 2 in `status`). No match means no
+cutoff and the after-cutoff analysis is skipped (never guessed).
 
 ### 6.4 `status`
 
 Joins the dependency scan, the packs, release dates, and the cutoff:
 
-- Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved,
-  `recipe-changed`, `missing` when configured but never synced, `orphan`), the release date of
+- Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved or
+  lockfiles disagree with none matching, which wins over `recipe-changed`; `recipe-changed`;
+  `missing` when configured but never synced or its manifest cannot be read; `orphan`), the
+  release date of
   the pack's version of its bound dependency and whether it falls after or near the cutoff,
   the built pack's read-first targets (4.8) as project-relative paths (the full list in
   `--json`, a count in the human table), and the step that brings the pack back to `ok`
   (`llm-docs sync <id>`; for a stale pack whose config pins `version`, editing that version
   first; for an orphan, `sync --prune` or adding it back to config).
 - Direct dependencies released after the cutoff, or within `nearCutoffDays` before it, that
-  have no pack: name, version, release date, and a suggested next step
-  (`llm-docs discover --package <eco>:<name>@<version>`, the evidence for writing a recipe).
+  have no pack bound to that name at any version: name, version, release date, and a suggested
+  next step (`llm-docs discover --package <eco>:<name>@<version>`, the evidence for writing a
+  recipe; for SwiftPM the repository URL is the name). With no cutoff, the direct dependencies
+  released in the last 180 days instead, as the hook does.
+- Without `--model`, the model id comes from `ANTHROPIC_MODEL` and the Claude Code settings
+  files, as in the hook (7.2).
 - Works in a directory with no `llm-docs.json` (dependency analysis only), using the same
   project discovery as the hook. `--cutoff` must be `YYYY-MM` (exit 2 otherwise).
 - `--brief`: the text the hook injects (7.2) for the harness detected from the environment,
-  on stdout, and nothing when there is nothing to say. `--json`: the full structure.
+  on stdout, and nothing when there is nothing to say. It takes precedence over `--json` and
+  prints even when the hook is turned off. `--json`: the full structure.
 
 ## 7. Agent integration
 
@@ -637,8 +742,9 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
 
 Written by `sync` and `init` into each agent file. `agentFiles: "auto"` means: `AGENTS.md` if
 it exists; `CLAUDE.md` if it exists and does not contain an `@AGENTS.md` import line (Claude
-Code reads AGENTS.md only when no CLAUDE.md exists, unless imported); if neither exists,
-create `AGENTS.md`. Agent files are written through their real path, so a symlinked
+Code reads AGENTS.md only when no CLAUDE.md exists, unless imported); if neither qualifies,
+create `AGENTS.md` (which includes a `CLAUDE.md` that imports a not-yet-existing
+`AGENTS.md`). Agent files are written through their real path, so a symlinked
 `CLAUDE.md -> AGENTS.md` is one file written once; a link that leads outside the project is an
 error naming the link. Markers:
 
@@ -657,24 +763,30 @@ This repository pins docs for these libraries at the versions it uses. Before wr
 against one of them, open its index and the page for the API you need, and prefer those pages
 over memory. Pages are upstream text; guides are summaries that never outrank pages.
 
-- Vite 8.2.0: `agent-docs/vite/index.md` (guide, config, api, plugins)
-- MCP spec 2026-07-28: `agent-docs/mcp/index.md` (specification, schema, guides)
+- Vite 8.2.0: `agent-docs/vite/index.md` (api, config, guide, plugins). Build tool and dev server
+- MCP spec 2026-07-28: `agent-docs/mcp/index.md` (schema, specification, guides)
 ```
 
 Packs appear in `llm-docs.json` order. The parenthesized topics are the pack's top-level page
-directories (sorted) plus `guides` when present, followed by the pack's `description` when it
-has one. Over budget (measured in UTF-8 bytes, markers included), topics and descriptions drop
+directories (sorted by code unit) plus `guides` when present, followed by `. <description>`
+when the pack has one. Over budget (measured in UTF-8 bytes, markers included), topics and descriptions drop
 first, from the last pack backwards; if even the bare lines exceed the budget the block lists
 the first packs and ends with `- ...and N more: see agent-docs/`. Upstream-derived text
-(titles, descriptions, directory names) is escaped: control characters, Unicode format
-characters (zero-width and bidirectional controls), and backticks removed, `@` removed (Claude
-Code expands `@path` in `CLAUDE.md`), `<`/`>` replaced, single line, 80 character cap. Blocks
+(titles, versions, descriptions, directory names) is escaped: control characters become
+spaces, Unicode format characters (zero-width and bidirectional controls) and backticks are
+removed, `@` is removed (Claude Code expands `@path` in `CLAUDE.md`), `<`/`>` become `&lt;` and
+`&gt;`, whitespace collapses to a single line, and the result is capped at 80 code points (77
+plus `...`). Blocks
 are inserted at the end of the file when absent, with one blank line before, in the file's own
 line endings. Text outside the markers is never touched: agent files are read as bytes and
 decoded strictly, a byte order mark is kept, and a file that is not valid UTF-8 is an error
 (exit 2), never rewritten. Marker lines inside fenced or indented code are not markers. A file
-with mismatched markers is an error, never a guess. A problem with one agent file is reported
-for that file and never stops the others or loses the sync's pack report.
+with mismatched markers is an error, never a guess; any `<!-- BEGIN llm-docs ... -->` line
+counts as a begin marker, and writing always uses the exact text above. A block that would land
+inside an unclosed code fence at the end of the file, a `block.maxBytes` too small for even the
+heading and the `...and N more` line, an agent file that is a directory, and a symlinked agent
+file whose target is missing are errors too. A problem with one agent file is reported for that
+file and never stops the others or loses the sync's pack report.
 
 ### 7.2 Session-start hook
 
@@ -693,9 +805,13 @@ context for the agent. Behavior:
 - Model: payload `model` (Claude Code sends it only in some sessions; headless `-p` runs omit
   it), Cursor `model_id`/`model`, Codex `model`; then `ANTHROPIC_MODEL`; then `model` from
   `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`,
-  `~/.claude/settings.json`. Claude Code aliases (`opus`, `sonnet`, `haiku`, `fable`, with
-  optional `[1m]`-style suffixes) resolve through the cutoff table to the family's current
-  model. Cutoff resolution per 6.3. When no cutoff resolves, the hook lists direct dependencies
+  `~/.claude/settings.json`. The payload's `model` wins over `model_id`, and a `{ "id": ... }`
+  object is accepted. Claude Code aliases (`opus`, `sonnet`, `haiku`, `fable`, `best`,
+  `opusplan`, with optional `[1m]`-style suffixes) resolve through the cutoff table's
+  `claudeCodeAliases` to the model the alias currently selects, per provider
+  (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` select the
+  provider's table); a pin variable such as `ANTHROPIC_DEFAULT_OPUS_MODEL` wins, and `default`
+  is deliberately left unresolved. Cutoff resolution per 6.3. When no cutoff resolves, the hook lists direct dependencies
   without a pack released in the last 180 days under a neutral heading ("Recently released
   dependencies (your training data may predate them)"): a fact from release dates, not a guess
   about the model.
@@ -732,12 +848,17 @@ context for the agent. Behavior:
   cutoff resolves. `llm-docs status --brief` prints the same text.
 - Performance: total wall time under 1.5 s, counted from process start. Release dates come from
   the cache; missing entries get at most a 1,000 ms network budget, and anything still missing
-  is fetched by a detached background `status` process (at most one per project per 6 hours,
-  tracked by a marker file in the cache dir) so the next session has it. The lockfile scan and
-  the lookups stop when the deadline nears. A run that misses the deadline prints nothing.
+  (over budget or after a transport error) is fetched by a detached background
+  `status --project <root> --json` process, started after the note is written, at most one per
+  project per 6 hours, tracked by a marker file in `<cache dir>/hook-warm/`, so the next session
+  has it. The stdin read gets at most 1,000 ms, and 150 ms are reserved at the end of the
+  deadline for rendering and writing. The lockfile scan and the lookups stop when the deadline
+  nears. A run that misses the deadline prints nothing.
 - Failure policy: always exit 0. Errors go to `<cache dir>/hook.log` (rotated at 1 MB, one
-  previous file kept), never to stdout or stderr. `LLM_DOCS_HOOK=off` or config
-  `hook.enabled: false` disables output.
+  previous file kept), never to stdout or stderr. An invalid `llm-docs.json` is logged and the
+  hook continues with the dependency analysis only. A malformed `model.cutoff` or
+  `LLM_DOCS_MODEL_CUTOFF` fails the run, which is logged and prints nothing.
+  `LLM_DOCS_HOOK=off` or config `hook.enabled: false` disables output.
 
 ### 7.3 Plugin (`plugin/`)
 
@@ -766,14 +887,19 @@ hooks from the plugin's install directory, but documents no substitution in hook
 the Cursor hook uses a path relative to the plugin root, which also works in shells that do not
 expand `${...}`. In Claude Code the matcher lists every session source because each of them
 starts a context without the earlier note. `npm run build:plugin` regenerates
-`bin/llm-docs.mjs` (tsup, all dependencies bundled, Node 22 target, byte-identical across
-builds) and stamps plugin and marketplace versions from `package.json`; `npm run check:plugin`
-fails CI when the committed bundle or versions are out of date, when a skill folder name
-differs from its frontmatter `name`, or when the skills, the agent, or the plugin README name a
-command, flag, or verify check that `capabilities --json` does not list. Skills are written
+`bin/llm-docs.mjs` (tsup, all dependencies bundled, minified ESM, Node 22 target,
+byte-identical across builds, and refused if a machine-specific path appears in it) and stamps
+plugin and marketplace versions from `package.json`; `npm run check:plugin` fails CI when the
+committed bundle or versions are out of date, when a skill folder or agent file name differs
+from its frontmatter `name`, when a description is over 1024 characters, when the skills, the
+agent, or the plugin README name (in code) a command or flag that `capabilities --json` does
+not list, or when the `llm-docs` skill does not name every command or its `Check` table does
+not list exactly the verify checks. When the `claude` CLI is on PATH it also runs
+`claude plugin validate --strict` on the plugin and on the repository. Skills are written
 harness-neutral (no tool names that exist in only one harness; frontmatter limited to `name`,
-`description`, `license`, `metadata`). If Node is not on PATH the hook command fails and both
-harnesses treat that as a non-blocking error; the README documents Node 22 as a requirement.
+`description`, `license`, `metadata`; agent frontmatter to `name` and `description`). If Node
+is not on PATH the hook command fails and both harnesses treat that as a non-blocking error;
+the README documents Node 22.19 or newer as a requirement.
 Codex installation is unverified: Codex documents `.codex-plugin/plugin.json` manifests and does
 not document reading `.claude-plugin` marketplaces, so the plugin README does not claim it.
 
@@ -785,52 +911,75 @@ optionally with a fragment. `llm-docs guides stamp <id> [guide...]` writes
 `guides/citations.lock.json`:
 
 ```jsonc
-{ "schemaVersion": 1,
-  "guides": {
+{ "guides": {
     "guides/01-overview.md": {
-      "sha256": "sha256:...",
       "citations": [
-        { "target": "pages/specification/basic-transports.md#session-management",
-          "sectionSha256": "sha256:..." }
-      ] } } }
+        { "sectionSha256": "sha256:...",
+          "target": "pages/specification/basic-transports.md#session-management" }
+      ],
+      "sha256": "sha256:..." } },
+  "schemaVersion": 1 }
 ```
+
+(Written with sorted keys at every depth.)
 
 A fragment resolves to the heading whose slug (the existing Unicode-aware slugger, GitHub
 rules, with `-1`, `-2` suffixes for duplicates) equals it; the section is the text from that
-heading to the next heading of the same or higher level. No fragment means the whole page.
-Stamping fails on a citation that does not resolve. `verify` recomputes everything (5.1).
-After a `refresh`, the report lists guides whose cited sections changed, which is the
-re-review list for the planner.
+heading to the next heading of the same or higher level. No fragment means the whole page
+without its provenance comment line, or the bytes of a file under `files/`; a fragment on a
+non-Markdown file does not resolve. Stamping writes nothing and exits 2 when a citation does
+not resolve, a link climbs out of the pack, a cited file differs from the manifest, a named
+guide does not exist, the pack has no guides, or the pack is not built; it holds the packs
+lock while it writes. Stamping named guides keeps the other entries; entries for deleted guides
+are dropped and reported. `verify` recomputes everything (5.1). After a rebuild by `sync`,
+`add`, or `refresh`, the report lists the guides whose cited sections changed or no longer
+resolve, with the stamp command to run after review; `refresh --check` lists the guides whose
+cited pages changed upstream. That is the re-review list for the planner.
 
 ## 9. Migration from v2
 
-`llm-docs migrate <v2-pack-dir> [--id <id>]` reads a v2 manifest (`schemaVersion` "0.1.0",
-`mode: local-source-docs`) and writes a v3 recipe into the project config:
+`llm-docs migrate <v2-pack-dir> --version <version> [--id <id>]` reads a v2 manifest
+(`schemaVersion` "0.1.0", `mode: local-source-docs`) and writes a v3 recipe into the project
+config, creating `llm-docs.json` by the 2.1 rule when absent. `--version` is required, because
+v2 manifests record none; without it migrate refuses and shows the v2 label and tags as
+evidence. `--id` defaults to the v2 pack directory name. The decision, in order:
 
-- Source with `git` state (`remoteUrl`, `commit`, `sourceRootFromRepo`): a `git` source with
-  `repo` normalized to https, `ref` = the commit, `paths` = [the source root]. Exclude globs
-  carry over.
-- Source under the OS temp directory or missing: exit 2 explaining that the origin is lost and
-  that the pack must be re-added from a durable source.
-- Source inside the project: a `local` source.
-- Other v2 modes: exit 2 naming the mode as unsupported in v3.
+- Source that still exists inside the project: a `local` source, even when git state was
+  recorded.
+- Source with `git` state and a remote (`remoteUrl`, `commit`, `sourceRootFromRepo`): a `git`
+  source with `repo` normalized to https (with a warning when it was not https; `file://` is
+  kept as is), `ref` = the commit, `paths` = [the source root] (`.` when empty). A dirty tree is
+  a warning. The exclude globs (`excludeGlobs` and `excluded[].glob`, merged and sorted) carry
+  over.
+- Source under the OS temp directory or missing, with no usable remote: exit 2 explaining that
+  the origin is lost and that the pack must be re-added from a durable source.
+- Source outside the project with no usable remote: exit 2.
+- Other v2 schema versions and modes: exit 2 naming them as unsupported in v3.
 
-It prints the next command (`llm-docs sync <id>`) and never deletes the v2 pack.
+The recipe is resolved before it is written, and an invalid id, an existing id, or a recipe
+that does not resolve is also exit 2. It prints the next command (`llm-docs sync <id>`), never
+deletes the v2 pack, and creates neither `packsDir` nor managed blocks.
 
 ## 10. Discover
 
 Read-only evidence for the planner, printed as JSON (and a human summary on stderr). Never
 writes files.
 
-- `--url <site>`: reuses the v2 website discovery (llms.txt, sitemap, robots-free bounded
-  fetch) with the 4.1 network policy; adds whether page URLs serve raw Markdown when `.md` is
-  appended (probing at most 3 listed pages) and the version-looking path segments found in
-  `llms.txt` (for example `2026-07-28`, `v8`), so the planner can write a filter.
+- `--url <site>`: reuses the v2 website discovery with the 4.1 network policy, fetching
+  exactly three resources (the given URL, and `/llms.txt` and `/sitemap.xml` at its origin;
+  10 s timeout and 64 KiB per response, at most 200 candidates); adds whether page URLs serve
+  raw Markdown when `.md` is appended (probing at most 3 listed same-origin pages, in sorted
+  order, judged by a 2xx status with a Markdown or plain-text content type) and the
+  version-looking path segments found in `llms.txt` (for example `2026-07-28`, `v8`), so the
+  planner can write a filter.
 - `--package <eco>:<name>[@<version>]`: registry metadata (repository URL and directory,
   homepage, documentation URL, license, the version's publish date), the git tags matching the
-  version (via `git ls-remote`), and, when a tag matches, the top documentation-looking
-  directories at that tag (blobless shallow fetch and `git ls-tree`, ranked by Markdown file
-  count). Ecosystems: npm, pypi, cargo, pub, go (swiftpm: repository URL is the identity).
+  version (via `git ls-remote`), and, when a tag matches, the top 10 documentation-looking
+  directories at that tag (blobless shallow fetch and `git ls-tree`, ranked by `.md` and `.mdx`
+  file count). Without a version it uses the registry's latest (for swiftpm, the latest semver
+  tag) and records which in `package.versionSource`. Ecosystems: npm, pypi, cargo, pub, go
+  (swiftpm: the repository URL, `https://` or `file://`, is the identity). A package or version
+  that does not exist is reported in the JSON with exit 0; an unreachable registry is exit 3.
   From the same tree, `changeDocuments`: files whose name or a directory on their path names a
   description of change (case-insensitive, by words: `CHANGELOG`, `CHANGES`, `HISTORY`,
   `RELEASES`, `RELEASE_NOTES`/`release-notes`, `MIGRATION`/`migrating`/`migrate`,
@@ -849,9 +998,14 @@ writes files.
   redirect re-validation, size and count caps, timeouts, credential rejection, redaction).
 - Git: section 4.1 policy (no hooks, no submodules, no symlinks, protocol allowlist, isolated
   config, no shell).
-- File system: every write is inside the pack staging directory or an agent file the config
-  names; paths are checked with `isSameOrDescendant`; collisions and reserved names are errors;
-  writes are atomic (`writeTextFileSafely`, `writeJsonFileSafely`).
+- File system: pack files are written only inside the pack staging directory; the other
+  writes are `llm-docs.json` (init, add, migrate), `<packsDir>/.gitignore`, the packs lock,
+  `guides/citations.lock.json` (stamp), the agent files `agentFiles` selects (7.1), deletes of
+  pruned packs, and the user cache directory (release dates, conversions, `hook.log`,
+  `hook-warm/`). Paths are checked with `isSameOrDescendant`, after resolving symlinks for
+  `packsDir`, local sources, and agent files; collisions and reserved names are errors; writes
+  are atomic (`writeTextFileSafely`, `writeJsonFileSafely`) and refuse to replace anything but a
+  regular file. `docs/security.md` lists every control with the file that implements it.
 - Converters run with `execFile`, a timeout, and paths the engine chose; `command` converters
   are trusted local configuration, documented as such.
 - The hook never writes outside the cache directory and never prints secrets or tokens.
@@ -865,7 +1019,8 @@ writes files.
 - CLI end-to-end tests run the built CLI against temp projects (one subprocess per scenario,
   grouped to keep the suite fast).
 - CI: Linux, macOS, Windows on Node 22 and 24; `npm ci` with a committed `package-lock.json`;
-  lint, format check, type-check, build, plugin bundle check, schema check, tests.
+  lint, format check, type-check, build, plugin bundle check, tests (the schema check is a
+  test).
 - Release: a tag `v*` publishes to npm with provenance from GitHub Actions (owner adds the
   `NPM_TOKEN` secret).
 - Docs: README (user-facing, crafted, no em-dashes), `docs/` reference pages for config,
@@ -876,14 +1031,17 @@ writes files.
 
 `evals/` holds cases and a runner (`npm run eval`). Each case is a small project pinned to a
 library version released after the evaluated model's training cutoff (plus negative controls
-the model already knows), a task prompt, a pack recipe, and mechanical checks (`tsc --noEmit`,
-`node --test`) the runner executes after the agent finishes. Each post-cutoff case records its
-stratum, `type-visible` when code written from memory fails the type check and `type-invisible`
-when it compiles and fails only at runtime, which the selftest enforces and the results report
+the model already knows), a task prompt, a pack recipe, and hidden mechanical checks the
+runner executes after the agent finishes (`deps-unchanged`, `no-type-suppressions`,
+`typecheck` with `tsc --noEmit -p tsconfig.eval.json`, and `behaviour` with Vitest over hidden
+`__eval__/*.check.ts` files). Each case records its stratum, `type-visible` when code written
+from memory fails the type check, `type-invisible` when it compiles and fails only at runtime,
+and `control` for the negative controls, which the selftest enforces and the results report
 pass rates by. Arms: `baseline` (no pack, no
 plugin), `pack` (pack and managed block, no plugin), `plugin` (pack, block, and plugin hook and
 skills). The runner prepares workspaces with dependencies installed before the agent starts,
-runs `claude -p` with a pinned model, turn and budget caps, and `--setting-sources project` so user
+runs `claude -p` with a pinned model, turn and budget caps, `--strict-mcp-config`,
+`--no-session-persistence`, and `--setting-sources project` so user
 settings and plugins stay out of every arm (measured 2026-11-05 on Claude Code 2.1.318: an
 isolated `CLAUDE_CONFIG_DIR` loses the OAuth login, and `--safe-mode` also disables hooks from
 `--plugin-dir`, so neither can be used for the plugin arm), grades with the checks, and writes `evals/results/<timestamp>/results.json` and `summary.md` (pass rate per
@@ -891,9 +1049,11 @@ arm and case, runs, cost). A session the service or account ended (usage limit, 
 overload, authentication, billing, network), or one that fails an arm assertion (the requested
 model, no MCP servers, the pack and managed block, and for the plugin arm the loaded plugin and
 its SessionStart hook), is an infra error that is never graded and that `--resume` retries; a
-usage limit stops the run with exit 4. `npm run eval -- smoke` runs one
-case once per arm to prove the pipeline before a full run. The README publishes the numbers with
-the date, model, and run count.
+rate limit or overload is first retried in place after 30 s and 120 s, and a usage limit, an
+authentication failure, or a billing error stops the run with exit 4. The runner's commands are
+`selftest`, `prepare-packs`, `plan`, `run`, and `smoke`; `npm run eval -- smoke` runs one case
+(default `zod-4-6`) once per arm to prove the pipeline before a full run. The README publishes
+the numbers with the date, model, Claude Code version, and run count.
 
 ## 14. Acceptance
 
