@@ -8,10 +8,7 @@ import { canCreateSymlinks } from '../helpers/symlinks.js';
 
 import {
   assertNoParentSymlinkComponents,
-  directoryContainsMatchingFile,
-  findFilesRecursively,
   resolveTraversalBound,
-  sortByPosixRelativePath,
   walkBoundedDirectoryTree,
   type BoundedWalkCounters,
   type BoundedWalkOptions,
@@ -275,54 +272,4 @@ describe('assertNoParentSymlinkComponents', () => {
       ).resolves.toBeUndefined();
     }
   );
-});
-
-describe('parser directory helpers', () => {
-  it.skipIf(!canCreateSymlinks)(
-    'walks unbounded, ignores the skip list, and orders each directory by code unit',
-    async () => {
-      const root = await makeTempDir('llm-docs-walk-parser-');
-      await writeTree(root, {
-        'Zed.md': 'zed',
-        'apple.md': 'apple',
-        'node_modules/vendored.md': 'vendored',
-        'a/b/c/d/e/f/g/h/i/j/deep.md': 'deep',
-        'skip.txt': 'skip',
-      });
-      await symlink(join(root, 'apple.md'), join(root, 'link.md'), 'file');
-
-      const matchesMarkdown = (fileName: string): boolean => fileName.endsWith('.md');
-      const found = await findFilesRecursively(root, matchesMarkdown);
-
-      expect(
-        found.map((path) =>
-          path
-            .slice(root.length + 1)
-            .split(sep)
-            .join('/')
-        )
-      ).toEqual(['Zed.md', 'a/b/c/d/e/f/g/h/i/j/deep.md', 'apple.md', 'node_modules/vendored.md']);
-      // Uppercase sorts before lowercase under code-unit ordering, unlike localeCompare.
-      expect(found[0]?.endsWith('Zed.md')).toBe(true);
-
-      await expect(directoryContainsMatchingFile(root, matchesMarkdown)).resolves.toBe(true);
-      await expect(
-        directoryContainsMatchingFile(root, (fileName) => fileName.endsWith('.rst'))
-      ).resolves.toBe(false);
-    }
-  );
-
-  it('orders found files by POSIX relative path whatever the native separator', async () => {
-    const root = await makeTempDir('llm-docs-walk-posix-order-');
-    await writeTree(root, { 'a/b.md': 'b', 'aZ.md': 'z', 'a.md': 'a' });
-
-    const found = await findFilesRecursively(root, (fileName) => fileName.endsWith('.md'));
-
-    // `/` sorts before `Z`, so a/b.md precedes aZ.md; a native `\\` would not.
-    expect(sortByPosixRelativePath(root, found)).toEqual([
-      join(root, 'a.md'),
-      join(root, 'a', 'b.md'),
-      join(root, 'aZ.md'),
-    ]);
-  });
 });

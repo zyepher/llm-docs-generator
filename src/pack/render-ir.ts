@@ -11,9 +11,9 @@ import { posix } from 'node:path';
 
 import { ConfigError } from '../config/project.js';
 import { ContentBlockType, type ContentBlock, type DocNode } from '../core/models.js';
-import { parseHtmlFile } from '../parsers/html/index.js';
+import { parseHtmlFile } from '../parsers/html/parser.js';
 import { parseOpenApiFile } from '../parsers/openapi/index.js';
-import { parseRstFile } from '../parsers/rst/index.js';
+import { parseRstFile } from '../parsers/rst/parser.js';
 import { errorMessage } from '../utils/guards.js';
 import type { SelectedPage } from '../sources/acquire.js';
 

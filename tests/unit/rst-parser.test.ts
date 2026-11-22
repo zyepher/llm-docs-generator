@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,7 +12,7 @@ import {
   type ContentBlock,
   type DocNode,
 } from '../../src/core/models.js';
-import { RstFormatParser, parseRstFile } from '../../src/parsers/rst/index.js';
+import { parseRstFile } from '../../src/parsers/rst/parser.js';
 
 const tempDirs: string[] = [];
 
@@ -22,11 +22,14 @@ async function createTempDir(): Promise<string> {
   return dir;
 }
 
-function collectContentBlocks(node: DocNode): ContentBlock[] {
+type ParsedTree = Pick<DocNode, 'title' | 'content' | 'children'> &
+  Partial<Pick<DocNode, 'description'>>;
+
+function collectContentBlocks(node: ParsedTree): ContentBlock[] {
   return [...node.content, ...node.children.flatMap((child) => collectContentBlocks(child))];
 }
 
-function collectText(node: DocNode): string {
+function collectText(node: ParsedTree): string {
   const ownContent = node.content.map((block) => block.content).join('\n');
   const childContent = node.children.map((child) => collectText(child)).join('\n');
   return [node.title, node.description, ownContent, childContent].filter(Boolean).join('\n');
@@ -37,20 +40,6 @@ afterEach(async () => {
 });
 
 describe('reStructuredText parser foundation', () => {
-  it('detects .rst files', async () => {
-    const dir = await createTempDir();
-    const rstPath = join(dir, 'tutorial.rst');
-    const textPath = join(dir, 'tutorial.txt');
-
-    await writeFile(rstPath, 'Tutorial\n========\n', 'utf-8');
-    await writeFile(textPath, 'Tutorial\n========\n', 'utf-8');
-
-    const parser = new RstFormatParser();
-
-    expect(await parser.detect(rstPath)).toBe(true);
-    expect(await parser.detect(textPath)).toBe(false);
-  });
-
   it('parses underline headings, paragraphs, and simple lists into DocNode IR', async () => {
     const dir = await createTempDir();
     const sourcePath = join(dir, 'tutorial.rst');
@@ -84,13 +73,10 @@ describe('reStructuredText parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const parsedText = collectText(root);
 
-    expect(root).toMatchObject({
-      type: DocNodeType.SECTION,
-      title: 'Python Tutorial',
-    });
+    expect(root.title).toBe('Python Tutorial');
     expect(root.metadata.get('format')).toBe('rst');
     expect(root.metadata.get('sourcePath')).toBe(sourcePath);
     expect(root.metadata.get('parser')).toBe('rst-subset');
@@ -142,7 +128,7 @@ describe('reStructuredText parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const blocks = collectContentBlocks(root);
     const proseBlocks = blocks.filter((block) => block.type === ContentBlockType.PROSE);
     const codeBlocks = blocks.filter((block) => block.type === ContentBlockType.CODE);
@@ -187,7 +173,7 @@ describe('reStructuredText parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const warnings = root.metadata.get('warnings');
     const parsedText = collectText(root);
 
@@ -208,72 +194,25 @@ describe('reStructuredText parser foundation', () => {
     );
   });
 
-  it.skipIf(!canCreateSymlinks)(
-    'detects and parses nested directories deterministically without following symlinks',
-    async () => {
-      const dir = await createTempDir();
-      const sourceDir = join(dir, 'docs');
-      const nestedDir = join(sourceDir, 'api');
-      const symlinkTarget = join(dir, 'external');
-
-      await mkdir(nestedDir, { recursive: true });
-      await mkdir(symlinkTarget, { recursive: true });
-      await writeFile(join(sourceDir, 'tutorial.rst'), 'Tutorial\n========\n', 'utf-8');
-      await writeFile(join(nestedDir, 'index.rst'), 'API\n===\n', 'utf-8');
-      await writeFile(join(sourceDir, 'notes.txt'), 'Notes\n=====\n', 'utf-8');
-      await writeFile(join(symlinkTarget, 'hidden.rst'), 'Hidden\n======\n', 'utf-8');
-      await symlink(symlinkTarget, join(sourceDir, 'linked-docs'));
-
-      const parser = new RstFormatParser();
-
-      expect(await parser.detect(sourceDir)).toBe(true);
-
-      const root = await parser.parse(sourceDir);
-      const sourcePaths = root.metadata.get('sourcePaths');
-
-      expect(root).toMatchObject({
-        type: DocNodeType.ROOT,
-        title: 'docs',
-      });
-      expect(root.metadata.get('format')).toBe('rst');
-      expect(root.metadata.get('sourcePath')).toBe(sourceDir);
-      expect(root.metadata.get('count')).toBe(2);
-      expect(sourcePaths).toEqual([join(nestedDir, 'index.rst'), join(sourceDir, 'tutorial.rst')]);
-      expect(root.children.map((child) => child.title)).toEqual(['API', 'Tutorial']);
-      expect(collectText(root)).not.toContain('Hidden');
-    }
-  );
-
   it('rejects non-RST files even when they contain RST-looking content', async () => {
     const dir = await createTempDir();
     const sourcePath = join(dir, 'tutorial.txt');
 
     await writeFile(sourcePath, 'Tutorial\n========\n', 'utf-8');
 
-    const parser = new RstFormatParser();
-
-    expect(await parser.detect(sourcePath)).toBe(false);
-    await expect(parser.parse(sourcePath)).rejects.toThrow(/Unsupported RST file extension/);
     await expect(parseRstFile(sourcePath)).rejects.toThrow(/Unsupported RST file extension/);
   });
 
-  it.skipIf(!canCreateSymlinks)(
-    'rejects root symlink files through the facade and parseRstFile helper',
-    async () => {
-      const dir = await createTempDir();
-      const targetPath = join(dir, 'target.rst');
-      const symlinkPath = join(dir, 'linked.rst');
+  it.skipIf(!canCreateSymlinks)('rejects root symlink files', async () => {
+    const dir = await createTempDir();
+    const targetPath = join(dir, 'target.rst');
+    const symlinkPath = join(dir, 'linked.rst');
 
-      await writeFile(targetPath, 'Linked\n======\n', 'utf-8');
-      await symlink(targetPath, symlinkPath);
+    await writeFile(targetPath, 'Linked\n======\n', 'utf-8');
+    await symlink(targetPath, symlinkPath);
 
-      const parser = new RstFormatParser();
-
-      expect(await parser.detect(symlinkPath)).toBe(false);
-      await expect(parser.parse(symlinkPath)).rejects.toThrow(/Invalid RST source path/);
-      await expect(parseRstFile(symlinkPath)).rejects.toThrow(/Invalid RST file path/);
-    }
-  );
+    await expect(parseRstFile(symlinkPath)).rejects.toThrow(/Invalid RST file path/);
+  });
 
   it('exposes parseRstFile for parser-library use without a CLI generation workflow', async () => {
     const dir = await createTempDir();
@@ -306,7 +245,7 @@ describe('reStructuredText parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const blocks = collectContentBlocks(root);
     const codeBlocks = blocks.filter((block) => block.type === ContentBlockType.CODE);
     const proseText = blocks
@@ -351,7 +290,7 @@ describe('reStructuredText parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const parsedText = collectText(root);
     const codeBlocks = collectContentBlocks(root).filter(
       (block) => block.type === ContentBlockType.CODE
@@ -394,7 +333,7 @@ describe('reStructuredText parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const parsedText = collectText(root);
 
     expect(root.title).toBe('Document Title');
@@ -424,7 +363,7 @@ describe('reStructuredText parser foundation', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const codeBlocks = collectContentBlocks(root).filter(
       (block) => block.type === ContentBlockType.CODE
     );
@@ -459,7 +398,7 @@ describe('reStructuredText inline markup rendering', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const parsedText = collectText(root);
 
     expect(parsedText).toContain('`mypkg.io.read_table`');
@@ -497,7 +436,7 @@ describe('reStructuredText inline markup rendering', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const parsedText = collectText(root);
 
     expect(parsedText).toContain('DataLib is fast.');
@@ -531,7 +470,7 @@ describe('reStructuredText inline markup rendering', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const parsedText = collectText(root);
 
     expect(parsedText).toContain('[Python](https://www.python.org)');
@@ -564,7 +503,7 @@ describe('reStructuredText inline markup rendering', () => {
       'utf-8'
     );
 
-    const root = await new RstFormatParser().parse(sourcePath);
+    const root = await parseRstFile(sourcePath);
     const parsedText = collectText(root);
 
     expect(parsedText).toContain('``refs_``');
@@ -573,12 +512,12 @@ describe('reStructuredText inline markup rendering', () => {
     expect(parsedText).toContain('expand 9.9.');
   });
 
-  it('renders a directory with no raw role or trailing-underscore residue', async () => {
+  it('renders pages with no raw role or trailing-underscore residue', async () => {
     const dir = await createTempDir();
-    const sourceDir = join(dir, 'docs');
-    await mkdir(sourceDir, { recursive: true });
+    const indexPath = join(dir, 'index.rst');
+    const usagePath = join(dir, 'usage.rst');
     await writeFile(
-      join(sourceDir, 'index.rst'),
+      indexPath,
       [
         'MyPkg Documentation',
         '===================',
@@ -594,7 +533,7 @@ describe('reStructuredText inline markup rendering', () => {
       'utf-8'
     );
     await writeFile(
-      join(sourceDir, 'usage.rst'),
+      usagePath,
       [
         'Usage',
         '=====',
@@ -605,7 +544,9 @@ describe('reStructuredText inline markup rendering', () => {
       'utf-8'
     );
 
-    const full = collectText(await new RstFormatParser().parse(sourceDir));
+    const full = [await parseRstFile(indexPath), await parseRstFile(usagePath)]
+      .map(collectText)
+      .join('\n');
 
     expect(full).toContain('MyPkg ships `mypkg.load` and `Frame`.');
     expect(full).toContain('[homepage](https://example.com/mypkg)');

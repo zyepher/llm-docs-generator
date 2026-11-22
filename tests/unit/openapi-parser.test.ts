@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { DocNodeType, type DocNode } from '../../src/core/models.js';
-import { OpenApiFormatParser, parseOpenApiFile } from '../../src/parsers/openapi/index.js';
+import { parseOpenApiFile } from '../../src/parsers/openapi/index.js';
 
 const tempDirs: string[] = [];
 
@@ -119,11 +119,7 @@ describe('OpenAPI / Swagger parser', () => {
       },
     });
 
-    const parser = new OpenApiFormatParser();
-
-    expect(await parser.detect(sourcePath)).toBe(true);
-
-    const root = await parser.parse(sourcePath);
+    const root = await parseOpenApiFile(sourcePath);
 
     expect(root).toMatchObject({
       type: DocNodeType.ROOT,
@@ -186,7 +182,7 @@ describe('OpenAPI / Swagger parser', () => {
     expect(createPetContent).toContain('simple {"name":"Fido"}');
   });
 
-  it('parses OpenAPI YAML and does not claim other YAML documents', async () => {
+  it('parses OpenAPI YAML and rejects other YAML documents', async () => {
     const dir = await createTempDir();
     const openApiPath = join(dir, 'openapi.yaml');
     const otherYamlPath = join(dir, 'other.yaml');
@@ -235,8 +231,9 @@ describe('OpenAPI / Swagger parser', () => {
       'utf-8'
     );
 
-    expect(await new OpenApiFormatParser().detect(openApiPath)).toBe(true);
-    expect(await new OpenApiFormatParser().detect(otherYamlPath)).toBe(false);
+    await expect(parseOpenApiFile(otherYamlPath)).rejects.toThrow(
+      /expected an openapi 3\.x or swagger 2\.0 version field/
+    );
 
     const root = await parseOpenApiFile(openApiPath);
     const operation = findNode(root, 'get-users-id');
@@ -372,9 +369,6 @@ describe('OpenAPI / Swagger parser', () => {
       'utf-8'
     );
 
-    const parser = new OpenApiFormatParser();
-
-    expect(await parser.detect(sourcePath)).toBe(false);
     await expect(parseOpenApiFile(sourcePath)).rejects.toThrow(
       /Unsupported OpenAPI \/ Swagger file extension "\.txt"/
     );
@@ -406,11 +400,12 @@ describe('OpenAPI / Swagger parser', () => {
     );
     await expect(parseOpenApiFile(unsupportedPath)).rejects.toThrow(/Unsupported OpenAPI version/);
 
-    const parser = new OpenApiFormatParser();
     const arbitraryJsonPath = join(dir, 'arbitrary.json');
     await writeJson(arbitraryJsonPath, { info: { title: 'Not an API' }, data: [] });
 
-    expect(await parser.detect(arbitraryJsonPath)).toBe(false);
+    await expect(parseOpenApiFile(arbitraryJsonPath)).rejects.toThrow(
+      /expected an openapi 3\.x or swagger 2\.0 version field/
+    );
   });
 
   it('rejects malformed path, operation, parameter, and response shapes with context', async () => {
@@ -865,9 +860,6 @@ describe('OpenAPI / Swagger parser', () => {
       'utf-8'
     );
 
-    const parser = new OpenApiFormatParser();
-    expect(await parser.detect(sourcePath)).toBe(true);
-
     const root = await parseOpenApiFile(sourcePath);
 
     expect(root.metadata.get('sourceKind')).toBe('swagger');
@@ -900,9 +892,6 @@ describe('OpenAPI / Swagger parser', () => {
       ].join('\n'),
       'utf-8'
     );
-
-    const parser = new OpenApiFormatParser();
-    expect(await parser.detect(sourcePath)).toBe(true);
 
     const root = await parseOpenApiFile(sourcePath);
 
