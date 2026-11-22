@@ -3,8 +3,7 @@
  * docs goes through `createHttpClient`, which enforces one policy:
  *
  * - `https:` only; `http:` only to loopback, and private addresses at all,
- *   only when LLM_DOCS_ALLOW_PRIVATE_NETWORK=1 (or the caller's equivalent
- *   switch, such as `discover --allow-private-hosts`).
+ *   only when LLM_DOCS_ALLOW_PRIVATE_NETWORK=1.
  * - The hostname is resolved before connecting; private, loopback,
  *   link-local, CGNAT, multicast, unique-local, documentation, and other
  *   special-purpose addresses are refused, and the connection is pinned to
@@ -309,6 +308,8 @@ export interface HttpGetOptions {
   accept?: string;
   /** Overrides the client's total timeout for this request. */
   timeoutMs?: number;
+  /** Cancels the request, its retries, and their backoff (a caller's overall budget). */
+  signal?: AbortSignal;
 }
 
 export interface HttpResponse {
@@ -435,6 +436,27 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
   const limit = createHostLimiter(options.perHostConcurrency ?? HTTP_DEFAULTS.perHostConcurrency);
   const agents = new Map<string, Agent>();
 
+  /** The backoff sleep, cut short when the caller's signal aborts. */
+  const pause = async (ms: number, signal: AbortSignal | undefined): Promise<void> => {
+    if (signal === undefined) {
+      await sleep(ms);
+      return;
+    }
+    if (signal.aborted) {
+      return;
+    }
+    let onAbort = (): void => {};
+    const aborted = new Promise<void>((resolveAbort) => {
+      onAbort = () => resolveAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([sleep(ms), aborted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  };
+
   const agentFor = (hostname: string, pinned: ResolvedAddress): Agent => {
     const key = `${hostname}\u0000${pinned.address}`;
     let agent = agents.get(key);
@@ -548,6 +570,10 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
     const timeoutMs = getOptions.timeoutMs ?? totalTimeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const signal =
+      getOptions.signal === undefined
+        ? controller.signal
+        : AbortSignal.any([controller.signal, getOptions.signal]);
     let current = requested;
 
     try {
@@ -555,10 +581,13 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
         let result: HopResult;
 
         try {
-          result = await hop(current, getOptions, controller.signal);
+          result = await hop(current, getOptions, signal);
         } catch (error) {
           if (error instanceof HttpPolicyError || error instanceof HttpRequestError) {
             throw error;
+          }
+          if (getOptions.signal?.aborted === true) {
+            throw cancelled(current);
           }
           const message = controller.signal.aborted
             ? `timed out after ${timeoutMs} ms`
@@ -627,24 +656,29 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
         throw new HttpPolicyError(`Refusing ${redactUrl(url)}: not a valid URL.`);
       }
       parsed.hash = '';
+      // A function, not a narrowed property read: the signal can abort during any await.
+      const isCancelled = (): boolean => getOptions.signal?.aborted === true;
 
       for (let attemptIndex = 0; ; attemptIndex += 1) {
+        if (isCancelled()) {
+          throw cancelled(parsed);
+        }
         try {
           return await attempt(parsed, getOptions);
         } catch (error) {
-          const last = attemptIndex >= retries;
+          const last = attemptIndex >= retries || isCancelled();
 
           if (error instanceof RetryableStatus) {
             if (last) {
               return error.response;
             }
-            await sleep(backoff(attemptIndex, error.retryAfterMs, random));
+            await pause(backoff(attemptIndex, error.retryAfterMs, random), getOptions.signal);
             continue;
           }
           if (!(error instanceof HttpRequestError) || !error.retryable || last) {
             throw error;
           }
-          await sleep(backoff(attemptIndex, error.retryAfterMs, random));
+          await pause(backoff(attemptIndex, error.retryAfterMs, random), getOptions.signal);
         }
       }
     },
@@ -654,6 +688,10 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
       await Promise.all(pending);
     },
   };
+}
+
+function cancelled(url: URL): HttpRequestError {
+  return new HttpRequestError(`GET ${redactUrl(url)} was cancelled.`, undefined, false);
 }
 
 class RetryableStatus extends Error {

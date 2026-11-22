@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, posix, win32 } from 'node:path';
 
-import packageJson from '../../package.json';
+import { createHttpClient, HttpRequestError, type HttpClient } from '../sources/http.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { readJsonFile, writeJsonFileSafely } from '../utils/json.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
@@ -41,8 +41,6 @@ export interface LookupReleaseDatesOptions {
   budgetMs?: number;
   cacheDir?: string;
   endpoints?: Partial<RegistryEndpoints>;
-  /** Sent as a bearer token to api.github.com only. */
-  githubToken?: string;
   now?: () => Date;
 }
 
@@ -71,7 +69,6 @@ const CONCURRENCY = 4;
 const NPM_PACKUMENT_MAX_BYTES = 25 * 1024 * 1024;
 const JSON_RESPONSE_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_TAG_DEREFERENCES = 3;
-const USER_AGENT = `llm-docs/${packageJson.version} (+https://github.com/Zyepher/llm-docs-generator)`;
 
 export function releaseKey(query: Pick<ReleaseQuery, 'ecosystem' | 'name' | 'version'>): string {
   return `${query.ecosystem}:${query.name}@${query.version}`;
@@ -203,74 +200,38 @@ async function writeCache(
 // HTTP
 // ============================================================================
 
-class HttpStatusError extends Error {
-  constructor(
-    readonly status: number,
-    url: string
-  ) {
-    super(`HTTP ${status} from ${url}`);
-  }
-}
-
 interface RequestContext {
+  /** The shared client (spec 4.1); it sends GITHUB_TOKEN to api.github.com only. */
+  client: HttpClient;
+  /** The caller's budget: aborting it cancels requests in flight. */
   signal: AbortSignal;
-  githubToken: string | undefined;
+  timeoutMs: number;
 }
 
 /**
- * GET a JSON document with a per-request timeout, the shared abort signal
- * (budget), a streamed size cap, and the project User-Agent. Returns
- * undefined for 404 and 410 (the version or package does not exist).
+ * GET a JSON document through the shared client with the per-request
+ * timeout, the budget signal, and a streamed size cap. Returns undefined
+ * for 404 and 410 (the version or package does not exist).
  */
 async function getJson(url: string, context: RequestContext, maxBytes: number): Promise<unknown> {
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    'user-agent': USER_AGENT,
-  };
+  let body: Buffer;
 
-  if (context.githubToken !== undefined && new URL(url).hostname === 'api.github.com') {
-    headers.authorization = `Bearer ${context.githubToken}`;
-  }
-
-  const response = await fetch(url, {
-    headers,
-    signal: AbortSignal.any([context.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-  });
-
-  if (response.status === 404 || response.status === 410) {
-    await response.body?.cancel();
-    return undefined;
-  }
-
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new HttpStatusError(response.status, url);
-  }
-
-  const declaredLength = Number(response.headers.get('content-length'));
-
-  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-    await response.body?.cancel();
-    throw new Error(`response from ${url} exceeds ${maxBytes} bytes`);
-  }
-
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-
-  if (response.body) {
-    for await (const chunk of response.body) {
-      received += chunk.byteLength;
-
-      if (received > maxBytes) {
-        await response.body.cancel().catch(() => undefined);
-        throw new Error(`response from ${url} exceeds ${maxBytes} bytes`);
-      }
-
-      chunks.push(chunk);
+  try {
+    const response = await context.client.get(url, {
+      maxBytes,
+      accept: 'application/json',
+      timeoutMs: context.timeoutMs,
+      signal: context.signal,
+    });
+    body = response.body;
+  } catch (error) {
+    if (error instanceof HttpRequestError && (error.status === 404 || error.status === 410)) {
+      return undefined;
     }
+    throw error;
   }
 
-  return JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+  return JSON.parse(body.toString('utf-8'));
 }
 
 function toIsoTimestamp(value: unknown): string | null {
@@ -546,7 +507,11 @@ export async function lookupReleaseDates(
   const budget = new AbortController();
   const budgetTimer =
     options.budgetMs === undefined ? undefined : setTimeout(() => budget.abort(), options.budgetMs);
-  const context: RequestContext = { signal: budget.signal, githubToken: options.githubToken };
+  const context: RequestContext = {
+    client: createHttpClient(),
+    signal: budget.signal,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+  };
   const updates = new Map<string, CacheEntry>();
   const failures: string[] = [];
   const units = [...pending.values()];
@@ -606,6 +571,7 @@ export async function lookupReleaseDates(
     if (budgetTimer !== undefined) {
       clearTimeout(budgetTimer);
     }
+    await context.client.close();
   }
 
   for (const query of queries) {
