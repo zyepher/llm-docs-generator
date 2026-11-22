@@ -250,6 +250,32 @@ describe('cutoff precedence', () => {
     );
     expect(() => resolveModelCutoff({ override: '2025-13', env: {} })).toThrow(ConfigError);
   });
+
+  it('skips each malformed explicit cutoff for the next source when told to ignore them', () => {
+    const ignored: string[] = [];
+    const ignoreInvalid = (problem: string): number => ignored.push(problem);
+
+    expect(
+      resolveModelCutoff({
+        modelId: 'claude-opus-5-5',
+        override: '2025-13',
+        configCutoff: 'June 2025',
+        env: { LLM_DOCS_MODEL_CUTOFF: '2025-6' },
+        ignoreInvalid,
+      })
+    ).toMatchObject({ cutoff: '2026-06', source: 'table' });
+    expect(
+      resolveModelCutoff({ configCutoff: 'June 2025', env: { ...env }, ignoreInvalid })
+    ).toMatchObject({ cutoff: '2025-03', source: 'env' });
+    expect(resolveModelCutoff({ override: 'x', env: {}, ignoreInvalid })).toBeUndefined();
+    expect(ignored).toEqual([
+      '--cutoff must be a YYYY-MM month (for example 2026-06), got "2025-13"',
+      'llm-docs.json model.cutoff must be a YYYY-MM month (for example 2026-06), got "June 2025"',
+      'LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month (for example 2026-06), got "2025-6"',
+      'llm-docs.json model.cutoff must be a YYYY-MM month (for example 2026-06), got "June 2025"',
+      '--cutoff must be a YYYY-MM month (for example 2026-06), got "x"',
+    ]);
+  });
 });
 
 describe('resolveModelIdFromEnvironment', () => {
@@ -263,31 +289,46 @@ describe('resolveModelIdFromEnvironment', () => {
     return { projectRoot, homeDir };
   }
 
-  it('uses the payload model, then ANTHROPIC_MODEL, then settings files in order', async () => {
+  it('uses the stated model, then ANTHROPIC_MODEL, then settings files in order, saying which', async () => {
     const dirs = await makeDirs();
-    await writeFile(join(dirs.homeDir, '.claude', 'settings.json'), '{"model": "fable"}');
+    const settings = (root: string, name: string) => join(root, '.claude', name);
+    await writeFile(settings(dirs.homeDir, 'settings.json'), '{"model": "fable"}');
 
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toBe('fable');
+    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toEqual({
+      id: 'fable',
+      source: 'settings',
+      file: settings(dirs.homeDir, 'settings.json'),
+    });
 
-    await writeFile(join(dirs.projectRoot, '.claude', 'settings.json'), '{"model": "sonnet"}');
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toBe('sonnet');
+    await writeFile(settings(dirs.projectRoot, 'settings.json'), '{"model": "sonnet"}');
+    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toEqual({
+      id: 'sonnet',
+      source: 'settings',
+      file: settings(dirs.projectRoot, 'settings.json'),
+    });
 
-    await writeFile(
-      join(dirs.projectRoot, '.claude', 'settings.local.json'),
-      '{"model": "opus[1m]"}'
-    );
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toBe('opus[1m]');
+    await writeFile(settings(dirs.projectRoot, 'settings.local.json'), '{"model": "opus[1m]"}');
+    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toEqual({
+      id: 'opus[1m]',
+      source: 'settings',
+      file: settings(dirs.projectRoot, 'settings.local.json'),
+    });
 
-    expect(
-      resolveModelIdFromEnvironment({ ...dirs, env: { ANTHROPIC_MODEL: 'claude-opus-4-8' } })
-    ).toBe('claude-opus-4-8');
+    const env = { ANTHROPIC_MODEL: 'claude-opus-4-8' };
+    expect(resolveModelIdFromEnvironment({ ...dirs, env })).toEqual({
+      id: 'claude-opus-4-8',
+      source: 'env',
+    });
     expect(
       resolveModelIdFromEnvironment({
         ...dirs,
-        payloadModel: 'claude-fable-5-1',
-        env: { ANTHROPIC_MODEL: 'claude-opus-4-8' },
+        stated: { id: ' claude-fable-5-1 ', source: 'payload' },
+        env,
       })
-    ).toBe('claude-fable-5-1');
+    ).toEqual({ id: 'claude-fable-5-1', source: 'payload' });
+    expect(
+      resolveModelIdFromEnvironment({ ...dirs, stated: { id: 'opus', source: 'flag' }, env })
+    ).toEqual({ id: 'opus', source: 'flag' });
   });
 
   it('skips unreadable, invalid, and model-less settings silently', async () => {
@@ -296,10 +337,12 @@ describe('resolveModelIdFromEnvironment', () => {
     await writeFile(join(dirs.projectRoot, '.claude', 'settings.json'), '{"permissions": {}}');
     await mkdir(join(dirs.homeDir, '.claude', 'settings.json'));
 
-    expect(resolveModelIdFromEnvironment({ ...dirs, payloadModel: '  ', env: {} })).toBeUndefined();
+    expect(
+      resolveModelIdFromEnvironment({ ...dirs, stated: { id: '  ', source: 'payload' }, env: {} })
+    ).toBeUndefined();
 
     await rm(join(dirs.homeDir, '.claude', 'settings.json'), { recursive: true });
     await writeFile(join(dirs.homeDir, '.claude', 'settings.json'), '{"model": "haiku"}');
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toBe('haiku');
+    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })?.id).toBe('haiku');
   });
 });

@@ -16,7 +16,12 @@ import { applyEdits, modify } from 'jsonc-parser';
 import { z } from 'zod';
 
 import { gitTopLevel } from '../core/git-state.js';
-import { ECOSYSTEMS, type DependencyRef, type DependencyVersionLookup } from '../deps/lockfiles.js';
+import {
+  dependencyKey,
+  ECOSYSTEMS,
+  type DependencyRef,
+  type DependencyVersionLookup,
+} from '../deps/lockfiles.js';
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
@@ -236,6 +241,21 @@ const dependencySchema = z.strictObject({
   name: z.string().min(1),
 });
 
+export const COVERS_MAX = 20;
+
+/**
+ * Other packages the pack's docs also describe (spec 2.2), such as the client
+ * of a server SDK documented in one docs set. They bind no version: status
+ * and the hook only stop reporting them as undocumented.
+ */
+const coversSchema = z
+  .array(dependencySchema)
+  .min(1)
+  .max(COVERS_MAX)
+  .refine((covers) => new Set(covers.map(dependencyKey)).size === covers.length, {
+    error: 'must not repeat a dependency',
+  });
+
 export const READ_FIRST_MAX = 5;
 
 /**
@@ -277,6 +297,7 @@ export const packConfigSchema = z
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     dependency: dependencySchema.optional(),
+    covers: coversSchema.optional(),
     version: versionSchema.optional(),
     sources: z.array(sourceConfigSchema).min(1),
     site: z
@@ -300,6 +321,16 @@ export const packConfigSchema = z
         code: 'custom',
         path: ['version'],
         message: 'is required unless "dependency" is set',
+      });
+    }
+    const own = pack.dependency === undefined ? undefined : dependencyKey(pack.dependency);
+    const index = pack.covers?.findIndex((covered) => dependencyKey(covered) === own) ?? -1;
+    if (index !== -1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['covers', index],
+        message:
+          'is the pack\'s own "dependency"; list only the other packages these docs describe',
       });
     }
   });
@@ -395,6 +426,8 @@ export const resolvedPackRecipeSchema = z.strictObject({
    * field existed, and packs built then stay up to date.
    */
   readFirst: z.array(z.string()).min(1).optional(),
+  /** Absent, never empty, when the pack covers no other package, for the same reason. */
+  covers: z.array(dependencySchema).min(1).optional(),
 });
 
 export type ResolvedSource = z.infer<typeof resolvedSourceSchema>;
@@ -776,6 +809,9 @@ export async function resolvePackRecipe(
     license: pack.license ?? null,
     limits: { maxFileBytes: pack.limits?.maxFileBytes ?? PACK_LIMITS.defaultMaxFileBytes },
     ...(readFirst.length === 0 ? {} : { readFirst }),
+    ...(pack.covers === undefined
+      ? {}
+      : { covers: pack.covers.map(({ ecosystem, name }) => ({ ecosystem, name })) }),
   };
 
   return { id, recipe, recipeHash: recipeHash(recipe) };

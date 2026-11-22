@@ -16,6 +16,7 @@ If the library is a dependency of this project, bind the pack to it with `--depe
 - Use the registry name as the lockfile spells it, such as `npm:@tanstack/react-query` or `pypi:pydantic`. Ecosystems are `npm`, `pypi`, `cargo`, `go`, `pub`, and `swiftpm`.
 - Pass `--version` alone only for docs that no lockfile pins, such as a protocol revision (`2026-07-28`) or a hosted API.
 - If two workspaces resolve different versions, sync stops and names both. Ask the user which version the docs should follow, then pass it with `--version` next to `--dependency`.
+- When one docs set describes several packages of a family that the project depends on (a server and a client SDK, `@tanstack/*` packages), bind the pack to the main one and list each other one with `--covers <ecosystem>:<name>`. The session-start note then stops reporting them as dependencies with no pinned docs. Cover only packages these docs really describe; one whose docs live elsewhere gets its own pack.
 
 ## 2. Gather evidence, never memory
 

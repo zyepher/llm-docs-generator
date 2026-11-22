@@ -339,14 +339,42 @@ describe('which project and model the hook reads', () => {
       cutoffOf('Claude Opus 5', '2026-05')
     );
 
+    // A settings file names only the default model, which the session may have overridden,
+    // so the cutoff it leads to is stated as an assumption.
+    const assumedOf = (label: string, month: string): string =>
+      `Assuming your model is the configured default (${label}, cutoff ${month}): direct dependencies released after or close to that cutoff with no pinned docs. If you are a different model, judge by the release dates shown. Newest first:`;
     await writeFiles(home, {
       '.claude/settings.json': JSON.stringify({ model: 'claude-sonnet-5' }),
     });
-    expect(await heading({ payload: { cwd: root } })).toBe(cutoffOf('Claude Sonnet 5', '2026-01'));
+    expect(await heading({ payload: { cwd: root } })).toBe(assumedOf('Claude Sonnet 5', '2026-01'));
 
     await writeFiles(root, { '.claude/settings.json': JSON.stringify({ model: 'opus' }) });
     expect(await heading({ payload: { cwd: root } })).toBe(
-      cutoffOf('Claude Opus 5.5 (alias opus)', '2026-06')
+      assumedOf('Claude Opus 5.5 (alias opus)', '2026-06')
+    );
+    expect(await heading({ payload: { cwd: root }, env })).toBe(
+      cutoffOf('Claude Opus 5', '2026-05')
+    );
+  });
+
+  it('states the cutoff as an assumption in each heading that names it when only a settings default names the model', async () => {
+    const root = await project({
+      lock: npmLock({ hono: '4.13.16', next: '16.1.0' }),
+      packs: { hono: HONO },
+      config: { agentFiles: 'auto' },
+      build: ['hono'],
+      files: { '.claude/settings.local.json': JSON.stringify({ model: 'claude-opus-5-5' }) },
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root } }))).toBe(
+      [
+        'Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): pinned docs for libraries released after or close to that cutoff. If you are a different model, judge by the release dates shown. Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:',
+        '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+        '',
+        'Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): direct dependencies released after or close to that cutoff with no pinned docs, newest first:',
+        '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+        DEPENDENCIES_FOOTER,
+      ].join('\n')
     );
   });
 
@@ -392,6 +420,23 @@ describe('what the hook says', () => {
       [
         PINNED_HEADING,
         '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+      ].join('\n')
+    );
+  });
+
+  it('counts a package the pack covers as pinned, naming the pack once with the newest date', async () => {
+    const covering = { ...HONO, covers: [{ ecosystem: 'npm', name: 'next' }] };
+    const root = await project({
+      lock: npmLock({ hono: '4.13.16', next: '16.1.0' }),
+      packs: { hono: covering },
+      config: { agentFiles: 'auto' },
+      build: ['hono'],
+    });
+
+    expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
+      [
+        PINNED_HEADING,
+        '- Hono 4.13.16 (released 2026-10-21, after cutoff): `agent-docs/hono/index.md`',
       ].join('\n')
     );
   });
@@ -585,17 +630,32 @@ describe('when the hook stays silent', () => {
     );
   });
 
-  it('prints nothing, logs, and resolves when the analysis throws', async () => {
+  it('prints nothing, logs, and resolves when the run throws', async () => {
     const root = await project();
-    const run = await runHook({
-      payload: { cwd: root, ...OPUS },
-      env: { LLM_DOCS_MODEL_CUTOFF: 'June' },
-    });
+    const broken: AsyncIterable<string> = {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(new Error('EIO: read failed')) }),
+    };
+    const run = await runHook({ stdin: broken, env: { CLAUDE_PROJECT_DIR: root } });
 
     expect(run.out).toEqual([]);
-    expect(await hookLog(run.cache)).toContain(
-      'session-start failed: LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month (for example 2026-06), got "June".'
+    expect(await hookLog(run.cache)).toMatch(/^\S+ session-start failed: EIO: read failed\n$/);
+  });
+
+  it('ignores a malformed cutoff override, logging it, and keeps the rest of the note', async () => {
+    const root = await project();
+    const env = { LLM_DOCS_MODEL_CUTOFF: 'June' };
+    const ignored =
+      /^\S+ LLM_DOCS_MODEL_CUTOFF must be a YYYY-MM month \(for example 2026-06\), got "June"; ignored it\n$/;
+
+    const fromModel = await runHook({ payload: { cwd: root, ...OPUS }, env });
+    expect(injected(fromModel)).toBe(ALL_DEPENDENCIES);
+    expect(await hookLog(fromModel.cache)).toMatch(ignored);
+
+    const none = await runHook({ payload: { cwd: root, model: 'some-unknown-model' }, env });
+    expect(injected(none).split('\n')[0]).toBe(
+      'Recently released dependencies (your training data may predate them), released in the last 180 days with no pinned docs, newest first:'
     );
+    expect(await hookLog(none.cache)).toMatch(ignored);
   });
 
   it(`rotates hook.log past ${HOOK_LIMITS.logMaxBytes} bytes, keeping one previous file`, async () => {

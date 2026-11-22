@@ -21,6 +21,8 @@ export interface ResolveModelCutoffInput {
   /** `model.cutoff` from llm-docs.json */
   configCutoff?: string;
   env?: NodeJS.ProcessEnv;
+  /** Receives each malformed explicit cutoff, which is then skipped instead of thrown. */
+  ignoreInvalid?: (problem: string) => void;
 }
 
 const CUTOFF_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/;
@@ -144,42 +146,50 @@ function lookupModelCutoff(
   };
 }
 
-function validatedCutoff(value: string, origin: string): string {
-  const trimmed = value.trim();
-
-  if (!CUTOFF_PATTERN.test(trimmed)) {
-    throw new ConfigError(
-      `${origin} must be a YYYY-MM month (for example 2026-06), got "${value}".`
-    );
-  }
-
-  return trimmed;
-}
-
 /**
  * The training data cutoff to compare release dates against. Precedence:
  * `--cutoff`, config `model.cutoff`, LLM_DOCS_MODEL_CUTOFF, then the shipped
  * table for the model id. An unknown model yields undefined; the cutoff is
- * never guessed. A malformed explicit value is an error, not a fallthrough.
+ * never guessed. A malformed explicit value is a ConfigError, unless
+ * `ignoreInvalid` is given: then it is reported there and resolution goes on
+ * with the next source (the hook must not lose its whole note to one typo).
  */
 export function resolveModelCutoff(input: ResolveModelCutoffInput): ModelCutoff | undefined {
   const env = input.env ?? process.env;
-
-  if (input.override !== undefined) {
-    const cutoff = validatedCutoff(input.override, '--cutoff');
-    return { cutoff, label: `cutoff ${cutoff} (--cutoff)`, source: 'flag' };
-  }
-
-  if (input.configCutoff !== undefined) {
-    const cutoff = validatedCutoff(input.configCutoff, 'llm-docs.json model.cutoff');
-    return { cutoff, label: `cutoff ${cutoff} (llm-docs.json)`, source: 'config' };
-  }
-
   const fromEnv = env[CUTOFF_ENV];
+  const explicit = [
+    { value: input.override, origin: '--cutoff', from: '--cutoff', source: 'flag' },
+    {
+      value: input.configCutoff,
+      origin: 'llm-docs.json model.cutoff',
+      from: 'llm-docs.json',
+      source: 'config',
+    },
+    {
+      value: isNonEmptyString(fromEnv) ? fromEnv : undefined,
+      origin: CUTOFF_ENV,
+      from: CUTOFF_ENV,
+      source: 'env',
+    },
+  ] as const;
 
-  if (isNonEmptyString(fromEnv)) {
-    const cutoff = validatedCutoff(fromEnv, CUTOFF_ENV);
-    return { cutoff, label: `cutoff ${cutoff} (${CUTOFF_ENV})`, source: 'env' };
+  for (const { value, origin, from, source } of explicit) {
+    if (value === undefined) {
+      continue;
+    }
+
+    const cutoff = value.trim();
+
+    if (CUTOFF_PATTERN.test(cutoff)) {
+      return { cutoff, label: `cutoff ${cutoff} (${from})`, source };
+    }
+
+    const problem = `${origin} must be a YYYY-MM month (for example 2026-06), got "${value}"`;
+
+    if (input.ignoreInvalid === undefined) {
+      throw new ConfigError(`${problem}.`);
+    }
+    input.ignoreInvalid(problem);
   }
 
   if (!isNonEmptyString(input.modelId)) {
@@ -190,9 +200,19 @@ export function resolveModelCutoff(input: ResolveModelCutoffInput): ModelCutoff 
   return match ? { ...match, source: 'table' } : undefined;
 }
 
+/**
+ * A model id and where it came from. `payload` (the harness reported it),
+ * `flag` (`status --model`), and `env` (ANTHROPIC_MODEL) name the session's
+ * model. `settings` is only the default in a Claude Code settings file, which
+ * a session started with `--model` overrides without telling the hook.
+ */
+export type ModelIdentity =
+  | { id: string; source: 'payload' | 'flag' | 'env' }
+  | { id: string; source: 'settings'; file: string };
+
 export interface ResolveModelIdInput {
-  /** `model` from the hook payload, when the harness sent one. */
-  payloadModel?: string;
+  /** The model the hook payload or `--model` names, when there is one. */
+  stated?: { id: string; source: 'payload' | 'flag' };
   env: NodeJS.ProcessEnv;
   projectRoot: string;
   homeDir: string;
@@ -200,21 +220,26 @@ export interface ResolveModelIdInput {
 
 /**
  * The model a Claude Code session most likely runs, for when the hook
- * payload omits it (headless runs) or carries only an alias. Precedence:
- * payload, ANTHROPIC_MODEL, then `model` in the first readable settings file
- * among project `.claude/settings.local.json`, project `.claude/settings.json`,
- * and user `~/.claude/settings.json`. Unreadable or invalid files are skipped
- * silently: the hook must never fail on someone else's config.
+ * payload omits it (headless runs) or carries only an alias. Precedence: the
+ * stated model, ANTHROPIC_MODEL, then `model` in the first readable settings
+ * file among project `.claude/settings.local.json`, project
+ * `.claude/settings.json`, and user `~/.claude/settings.json`. Unreadable or
+ * invalid files are skipped silently: the hook must never fail on someone
+ * else's config.
  */
-export function resolveModelIdFromEnvironment(input: ResolveModelIdInput): string | undefined {
-  if (isNonEmptyString(input.payloadModel?.trim())) {
-    return input.payloadModel?.trim();
+export function resolveModelIdFromEnvironment(
+  input: ResolveModelIdInput
+): ModelIdentity | undefined {
+  const stated = input.stated?.id.trim();
+
+  if (input.stated !== undefined && isNonEmptyString(stated)) {
+    return { id: stated, source: input.stated.source };
   }
 
   const fromEnv = input.env.ANTHROPIC_MODEL?.trim();
 
   if (isNonEmptyString(fromEnv)) {
-    return fromEnv;
+    return { id: fromEnv, source: 'env' };
   }
 
   const settingsFiles = [
@@ -223,11 +248,11 @@ export function resolveModelIdFromEnvironment(input: ResolveModelIdInput): strin
     join(input.homeDir, '.claude', 'settings.json'),
   ];
 
-  for (const path of settingsFiles) {
-    const model = readSettingsModel(path);
+  for (const file of settingsFiles) {
+    const id = readSettingsModel(file);
 
-    if (model !== undefined) {
-      return model;
+    if (id !== undefined) {
+      return { id, source: 'settings', file };
     }
   }
 

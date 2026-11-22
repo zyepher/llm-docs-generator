@@ -272,6 +272,10 @@ describe('llm-docs v3 CLI', () => {
       '2.0.0',
       '--recipe',
       '{"exclude":["guide/**"]}',
+      '--covers',
+      'npm:demo-client',
+      '--covers',
+      'pypi:demo_extras',
       '--dry-run',
       '--json',
       '--project',
@@ -279,12 +283,36 @@ describe('llm-docs v3 CLI', () => {
     ]);
 
     expect(result.code).toBe(0);
+    const covers = [
+      { ecosystem: 'npm', name: 'demo-client' },
+      { ecosystem: 'pypi', name: 'demo_extras' },
+    ];
     const output = JSON.parse(result.stdout);
-    expect(output).toMatchObject({ id: 'demo', dryRun: true, recipe: { version: '2.0.0' } });
+    expect(output).toMatchObject({
+      id: 'demo',
+      dryRun: true,
+      recipe: { version: '2.0.0', covers },
+    });
     expect(output.files).toEqual([
       { outputPath: 'pages/index.md', kind: 'page', source: 'docs/index.md' },
     ]);
     expect(await readdir(root)).toEqual(['docs']);
+
+    const human = await runCli(root, [
+      'add',
+      'demo',
+      '--local',
+      'docs',
+      '--version',
+      '2.0.0',
+      '--covers',
+      'npm:demo-client',
+      '--dry-run',
+    ]);
+    expect(human.code).toBe(0);
+    expect(human.stderr).toContain(
+      '"covers": [\n      {\n        "ecosystem": "npm",\n        "name": "demo-client"\n      }\n    ]'
+    );
   });
 
   it('follows the lockfile for a dependency-bound pack and flags an explicit version that disagrees', async () => {
@@ -393,10 +421,13 @@ describe('llm-docs v3 CLI', () => {
       detail: 'the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0',
       line: 'demo: would rebuild (the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0)',
     });
+    // One cause, one finding: the lockfile check reports the move, and the recipe passes.
     const verify = await runCli(root, ['verify']);
     expect(verify.stderr).toContain(
-      "demo recipe fail: packs.demo in llm-docs.json is unchanged, but the lockfile now resolves npm:demo-lib 1.3.0 and the pack is 1.2.0; run 'llm-docs sync demo'"
+      "demo lockfile fail: stale-pack: lockfiles resolve npm:demo-lib 1.3.0 (package-lock.json), the pack is 1.2.0; run 'llm-docs sync demo'"
     );
+    expect(verify.stderr).not.toContain('demo recipe fail');
+    expect(verify.stderr).toContain('verify: 1 problem found.');
     expect((await runCli(root, ['sync'])).stderr).toContain(
       'demo: built (the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0)'
     );
@@ -580,6 +611,32 @@ describe('llm-docs v3 CLI', () => {
         '--project',
         root,
       ],
+      [
+        'add',
+        'demo',
+        '--local',
+        'docs',
+        '--version',
+        '1',
+        '--covers',
+        'demo-client',
+        '--project',
+        root,
+      ],
+      [
+        'add',
+        'demo',
+        '--local',
+        'docs',
+        '--dependency',
+        'npm:demo',
+        '--version',
+        '1',
+        '--covers',
+        'npm:demo',
+        '--project',
+        root,
+      ],
     ];
     const expected = [
       "run 'llm-docs init' or pass --project <dir>",
@@ -588,6 +645,8 @@ describe('llm-docs v3 CLI', () => {
       'source path: must be project-relative, not absolute',
       'source: unknown key "bogus"',
       '--dependency must be <ecosystem>:<name>',
+      '--covers must be <ecosystem>:<name>',
+      'pack covers[0]: is the pack\'s own "dependency"',
     ];
 
     for (const [index, args] of cases.entries()) {
@@ -786,6 +845,7 @@ describe('llm-docs v3 CLI', () => {
         '  ID    VERSION  DEPENDENCY  LOCKFILE  STATE  RELEASED                   READ FIRST  NEXT',
         '  hono  4.13.16  npm:hono    4.13.16   ok     2026-09-02 (after cutoff)  -           -',
         '',
+        'Model: claude-opus-5-5 (--model).',
         'Model training data cutoff: 2026-06 (Claude Opus 5.5).',
         '',
         'Direct dependencies released after the cutoff without a pack:',
@@ -801,7 +861,8 @@ describe('llm-docs v3 CLI', () => {
     expect(json.code).toBe(0);
     expect(json.stderr).toBe(human.stderr);
     expect(JSON.parse(json.stdout)).toMatchObject({
-      cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5' },
+      model: { id: 'claude-opus-5-5', source: 'flag' },
+      cutoff: { cutoff: '2026-06', label: 'Claude Opus 5.5', source: 'table', assumed: false },
       packs: [
         {
           id: 'hono',
@@ -830,6 +891,27 @@ describe('llm-docs v3 CLI', () => {
       'llm-docs: --cutoff must be a YYYY-MM month (for example 2026-06), got "2026-6".\n'
     );
 
+    // --project names the project root as given, as for every other command; without it,
+    // status discovers the project from the working directory as the hook does.
+    const sub = join(root, 'sub', 'dir');
+    await mkdir(sub, { recursive: true });
+    const literal = await runCli(
+      root,
+      ['status', '--project', 'sub/dir', '--model', 'claude-opus-5-5', '--json'],
+      env
+    );
+    expect(literal.code).toBe(0);
+    expect(JSON.parse(literal.stdout)).toMatchObject({
+      packs: [],
+      afterCutoff: [],
+      directDependencies: 0,
+    });
+    expect(await runCli(sub, ['status', '--model', 'claude-opus-5-5', '--brief'], env)).toEqual({
+      code: 0,
+      stdout: `${brief}\n`,
+      stderr: '',
+    });
+
     const payload = JSON.stringify({
       cwd: root,
       hook_event_name: 'SessionStart',
@@ -851,6 +933,11 @@ describe('llm-docs v3 CLI', () => {
       });
 
     expect(await hook(payload)).toEqual({
+      code: 0,
+      stdout: `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: brief } })}\n`,
+      stderr: '',
+    });
+    expect(await hook(JSON.stringify({ cwd: sub, model: 'claude-opus-5-5' }), {}, sub)).toEqual({
       code: 0,
       stdout: `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: brief } })}\n`,
       stderr: '',

@@ -391,6 +391,27 @@ export function normalizeDependencyName(ecosystem: Ecosystem, name: string): str
   return ecosystem === 'pypi' ? normalizePypiName(name) : name;
 }
 
+/** One key per package, so `Foo_Bar` and `foo-bar` on PyPI are the same dependency. */
+export function dependencyKey(dependency: DependencyRef): string {
+  return `${dependency.ecosystem}:${normalizeDependencyName(dependency.ecosystem, dependency.name)}`;
+}
+
+/**
+ * Whether two versions have different leading numbers, as in `2.4.0` and
+ * `v3.0.1`. False when either has no `<number>.` prefix (a date such as
+ * `2026-07-28`), since there is no major to compare. A pack covering another
+ * package uses it as a coarse warning only: the packages of one family do
+ * not always share versions.
+ */
+export function majorVersionsDiffer(a: string, b: string): boolean {
+  const major = (version: string): number | undefined => {
+    const match = /^v?(\d+)\./.exec(version);
+    return match?.[1] === undefined ? undefined : Number(match[1]);
+  };
+  const [left, right] = [major(a), major(b)];
+  return left !== undefined && right !== undefined && left !== right;
+}
+
 // ============================================================================
 // Shared helpers (also used by lockfiles-npm.ts)
 // ============================================================================

@@ -15,12 +15,20 @@ import {
 } from '../config/project.js';
 import { readProjectPacks, type ProjectPack } from '../pack/manifest.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
-import { resolveModelCutoff, resolveModelIdFromEnvironment, type ModelCutoff } from './cutoffs.js';
 import {
+  resolveModelCutoff,
+  resolveModelIdFromEnvironment,
+  type ModelCutoff,
+  type ModelIdentity,
+} from './cutoffs.js';
+import {
+  dependencyKey,
   findDependencyVersion,
+  majorVersionsDiffer,
   normalizeDependencyName,
   projectDependencies,
   type DependencyRef,
+  type DependencyScan,
   type DependencyVersionLookup,
   type Ecosystem,
   type ResolvedDependency,
@@ -59,8 +67,22 @@ export interface PackStatusInput {
    * `#fragment` kept), in recipe order; empty when it marks none.
    */
   readFirst: string[];
+  /** Other packages the docs also describe (`covers`), which bind no version. */
+  covers: DependencyRef[];
   /** llm-docs.json lists the pack. */
   inConfig: boolean;
+}
+
+/** A package a pack covers, at a version the lockfiles resolve for it. */
+export interface CoveredDependency {
+  ecosystem: Ecosystem;
+  name: string;
+  version: string;
+  lockfiles: string[];
+  publishedAt: string | null;
+  releaseWindow: ReleaseWindow | null;
+  /** Its major version differs from the pack's, so the pack may describe another release line. */
+  majorDiffers: boolean;
 }
 
 export interface PackStatus {
@@ -74,6 +96,8 @@ export interface PackStatus {
   indexPath: string | null;
   /** Project-relative read-first targets of the built pack, in recipe order (spec 4.8). */
   readFirst: string[];
+  /** Each covered package at each version the lockfiles resolve; one absent from them is left out. */
+  covered: CoveredDependency[];
   /** When the pack's version of its bound dependency was released, when known. */
   publishedAt: string | null;
   /** Set when that release is newer than the model's training data, or close to it. */
@@ -93,10 +117,24 @@ export interface DependencyRelease {
   nextStep: string;
 }
 
+/** The cutoff release dates are compared against, and how sure status is of it. */
+export interface StatusCutoff {
+  cutoff: string;
+  label: string;
+  source: ModelCutoff['source'];
+  /**
+   * The cutoff is the table's for a model read from a settings-file default,
+   * which a session can override unseen: the note states it as an assumption.
+   */
+  assumed: boolean;
+}
+
 export interface StatusReport {
   /** Sorted by id. */
   packs: PackStatus[];
-  cutoff: { cutoff: string; label: string } | null;
+  /** The model compared against and where its id came from, or null when none is known. */
+  model: ModelIdentity | null;
+  cutoff: StatusCutoff | null;
   /** Direct dependencies without a pack, released after the cutoff month, newest first. */
   afterCutoff: DependencyRelease[];
   /** Released within `nearCutoffDays` before the end of the cutoff month, newest first. */
@@ -117,7 +155,8 @@ export interface StatusReport {
 export interface ComputeStatusInput {
   dependencies: ResolvedDependency[];
   releases: Map<string, ReleaseInfo>;
-  cutoff?: { cutoff: string; label: string };
+  model?: ModelIdentity;
+  cutoff?: StatusCutoff;
   nearCutoffDays: number;
   packs: PackStatusInput[];
   now: Date;
@@ -213,19 +252,44 @@ function discoverCommand(dependency: ResolvedDependency): string {
   return `llm-docs discover --package ${dependency.ecosystem}:${name}@${dependency.version}`;
 }
 
-function dependencyKey(ecosystem: Ecosystem, name: string): string {
-  return `${ecosystem}:${normalizeDependencyName(ecosystem, name)}`;
+function releaseQuery(dependency: DependencyRef, version: string): ReleaseQuery {
+  return {
+    ecosystem: dependency.ecosystem,
+    name: normalizeDependencyName(dependency.ecosystem, dependency.name),
+    version,
+  };
 }
 
 /** The release a pack's docs describe: its version of its bound dependency. */
 function packReleaseQuery(pack: PackStatusInput): ReleaseQuery | undefined {
   return pack.dependency === null || pack.version === null
     ? undefined
-    : {
-        ecosystem: pack.dependency.ecosystem,
-        name: normalizeDependencyName(pack.dependency.ecosystem, pack.dependency.name),
-        version: pack.version,
-      };
+    : releaseQuery(pack.dependency, pack.version);
+}
+
+/** The versions the lockfiles resolve for a dependency, each with the lockfiles that say so. */
+function resolvedVersions(
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles'>,
+  dependency: DependencyRef
+): { version: string; lockfiles: string[] }[] {
+  const lookup = findDependencyVersion(scan, dependency);
+
+  switch (lookup.kind) {
+    case 'found':
+      return [{ version: lookup.version, lockfiles: lookup.lockfiles }];
+    case 'missing':
+      return [];
+    case 'conflict': {
+      const byVersion = new Map<string, string[]>();
+      for (const entry of lookup.versions) {
+        byVersion.set(entry.version, [...(byVersion.get(entry.version) ?? []), entry.lockfile]);
+      }
+      return [...byVersion].map(([version, lockfiles]) => ({
+        version,
+        lockfiles: lockfiles.sort(compareStringsByCodeUnit),
+      }));
+    }
+  }
 }
 
 /**
@@ -260,6 +324,20 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
       const lookup = pack.dependency ? findDependencyVersion(scan, pack.dependency) : undefined;
       const state = packState(pack, lookup);
       const publishedAt = datedRelease(packReleaseQuery(pack));
+      const covered = pack.covers.flatMap((dependency) =>
+        resolvedVersions(scan, dependency).map(({ version, lockfiles }): CoveredDependency => {
+          const released = datedRelease(releaseQuery(dependency, version));
+          return {
+            ecosystem: dependency.ecosystem,
+            name: dependency.name,
+            version,
+            lockfiles,
+            publishedAt: released,
+            releaseWindow: released === null ? null : windowOf(released),
+            majorDiffers: pack.version !== null && majorVersionsDiffer(version, pack.version),
+          };
+        })
+      );
 
       return {
         id: pack.id,
@@ -270,6 +348,7 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
         ...(lookup === undefined ? {} : { lockfile: lookup }),
         indexPath: pack.indexPath,
         readFirst: pack.readFirst,
+        covered,
         publishedAt,
         releaseWindow: publishedAt === null ? null : windowOf(publishedAt),
         nextStep: packNextStep(pack, state, lookup),
@@ -277,9 +356,10 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
     })
     .sort((a, b) => compareStringsByCodeUnit(a.id, b.id));
 
+  // A covered package has a pack too: its docs are pinned, just not at a version of their own.
   const boundDependencies = new Set(
     input.packs.flatMap((pack) =>
-      pack.dependency ? [dependencyKey(pack.dependency.ecosystem, pack.dependency.name)] : []
+      [...(pack.dependency ? [pack.dependency] : []), ...pack.covers].map(dependencyKey)
     )
   );
 
@@ -319,7 +399,7 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
       continue;
     }
 
-    if (boundDependencies.has(dependencyKey(entry.dependency.ecosystem, entry.dependency.name))) {
+    if (boundDependencies.has(dependencyKey(entry.dependency))) {
       continue;
     }
 
@@ -350,7 +430,8 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
 
   return {
     packs,
-    cutoff: input.cutoff ? { cutoff: input.cutoff.cutoff, label: input.cutoff.label } : null,
+    model: input.model ?? null,
+    cutoff: input.cutoff ?? null,
     afterCutoff: inWindow('after-cutoff'),
     nearCutoff: inWindow('near-cutoff'),
     recent: inWindow('recent'),
@@ -489,30 +570,48 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
     });
   }
 
+  // One row per pack, dated by the newest release among its own version and the covered
+  // packages the lockfiles resolve, so a pack covering a newer package is listed once.
   const pinned = report.packs
-    .flatMap((pack) =>
-      pack.state !== 'orphan' &&
-      pack.releaseWindow !== null &&
-      pack.publishedAt !== null &&
-      pack.indexPath !== null &&
-      pack.version !== null
-        ? [
-            {
-              pack,
-              version: pack.version,
-              publishedAt: pack.publishedAt,
-              window: pack.releaseWindow,
-            },
-          ]
-        : []
-    )
+    .flatMap((pack) => {
+      const newest = [
+        { publishedAt: pack.publishedAt, window: pack.releaseWindow },
+        ...pack.covered.map((entry) => ({
+          publishedAt: entry.publishedAt,
+          window: entry.releaseWindow,
+        })),
+      ]
+        .flatMap(({ publishedAt, window }) =>
+          publishedAt === null || window === null ? [] : [{ publishedAt, window }]
+        )
+        .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt))[0];
+      return pack.state !== 'orphan' &&
+        newest !== undefined &&
+        pack.indexPath !== null &&
+        pack.version !== null
+        ? [{ pack, version: pack.version, ...newest }]
+        : [];
+    })
     .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt));
 
+  const cutoff = report.cutoff;
+  // A cutoff reached through a settings-file default is an assumption: each heading that
+  // names it says so, and the first one says what to do when the assumption is wrong.
+  const assumption =
+    cutoff?.assumed === true
+      ? `Assuming your model is the configured default (${cutoff.label}, cutoff ${cutoff.cutoff})`
+      : undefined;
+  const judge = 'If you are a different model, judge by the release dates shown.';
+
   if (pinned.length > 0) {
+    const lead =
+      cutoff === null
+        ? `Pinned docs for libraries released in the last ${report.recentDays} days. Your training data may predate these versions:`
+        : assumption === undefined
+          ? `Pinned docs for libraries released after or close to your training data cutoff (${cutoff.label}, through ${cutoff.cutoff}). Your memory of these libraries predates these versions:`
+          : `${assumption}: pinned docs for libraries released after or close to that cutoff. ${judge} Your memory of these libraries predates these versions:`;
     sections.push({
-      heading: report.cutoff
-        ? `Pinned docs for libraries released after or close to your training data cutoff (${report.cutoff.label}, through ${report.cutoff.cutoff}). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:`
-        : `Pinned docs for libraries released in the last ${report.recentDays} days. Your training data may predate these versions: read the pinned pages before writing code against them. Newest first:`,
+      heading: `${lead} read the pinned pages before writing code against them. Newest first:`,
       rows: pinned.map(({ pack, version, publishedAt, window }) => {
         const tag = WINDOW_TAG[window];
         const lead = `- ${escapeBlockText(pack.title)} ${escapeBlockText(version)} (released ${releaseDay(publishedAt)}${tag ? `, ${tag}` : ''}): `;
@@ -530,7 +629,7 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
     });
   }
 
-  const flagged = report.cutoff
+  const flagged = cutoff
     ? [
         ...report.afterCutoff.map((release) => ({ release, tag: 'after cutoff' })),
         ...report.nearCutoff.map((release) => ({ release, tag: 'near cutoff' })),
@@ -539,9 +638,12 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
 
   if (flagged.length > 0) {
     sections.push({
-      heading: report.cutoff
-        ? `Direct dependencies released after or close to your training data cutoff (${report.cutoff.label}, through ${report.cutoff.cutoff}) with no pinned docs, newest first:`
-        : `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`,
+      heading:
+        cutoff === null
+          ? `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`
+          : assumption === undefined
+            ? `Direct dependencies released after or close to your training data cutoff (${cutoff.label}, through ${cutoff.cutoff}) with no pinned docs, newest first:`
+            : `${assumption}: direct dependencies released after or close to that cutoff with no pinned docs${pinned.length === 0 ? `. ${judge} Newest first:` : ', newest first:'}`,
       rows: flagged.map(({ release, tag }) => {
         const suffix = tag ? `, ${tag}` : '';
         return sameRow(
@@ -610,12 +712,24 @@ function lockfileSummary(pack: PackStatus): string {
   }
 }
 
-function packReleased(pack: PackStatus): string {
-  if (pack.publishedAt === null) {
+function released(release: {
+  publishedAt: string | null;
+  releaseWindow: ReleaseWindow | null;
+}): string {
+  if (release.publishedAt === null) {
     return '-';
   }
-  const tag = pack.releaseWindow === null ? undefined : WINDOW_TAG[pack.releaseWindow];
-  return `${releaseDay(pack.publishedAt)}${tag ? ` (${tag})` : ''}`;
+  const tag = release.releaseWindow === null ? undefined : WINDOW_TAG[release.releaseWindow];
+  return `${releaseDay(release.publishedAt)}${tag ? ` (${tag})` : ''}`;
+}
+
+/** The line under a pack row for a package it covers, with a note when the major differs. */
+function coveredLine(pack: PackStatus, entry: CoveredDependency): string {
+  const note = entry.majorDiffers
+    ? `; note: its major version differs from the pack's ${pack.version ?? ''}, so the pack may not describe this version`
+    : '';
+  const when = entry.publishedAt === null ? 'release date unknown' : `released ${released(entry)}`;
+  return `    covers ${entry.ecosystem}:${entry.name} ${entry.version}, ${when}${note}`;
 }
 
 function releaseRows(releases: DependencyRelease[]): string[] {
@@ -631,6 +745,13 @@ function releaseRows(releases: DependencyRelease[]): string[] {
   ]).map((line) => `  ${line}`);
 }
 
+const MODEL_SOURCE_TEXT: Readonly<Record<ModelIdentity['source'], string>> = {
+  payload: 'reported by the session',
+  flag: '--model',
+  env: 'ANTHROPIC_MODEL',
+  settings: 'assumed from a settings file',
+};
+
 /** The human `llm-docs status` report. */
 export function formatStatusHuman(report: StatusReport): string {
   const lines: string[] = [];
@@ -638,28 +759,43 @@ export function formatStatusHuman(report: StatusReport): string {
   if (report.packs.length === 0) {
     lines.push('Packs: none configured.');
   } else {
-    lines.push('Packs:');
-    lines.push(
-      ...table([
-        ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'READ FIRST', 'NEXT'],
-        ...report.packs.map((pack) => [
-          pack.id,
-          pack.version ?? '-',
-          pack.dependency ? `${pack.dependency.ecosystem}:${pack.dependency.name}` : '-',
-          lockfileSummary(pack),
-          pack.state,
-          packReleased(pack),
-          pack.readFirst.length === 0 ? '-' : String(pack.readFirst.length),
-          pack.nextStep ?? '-',
-        ]),
-      ]).map((line) => `  ${line}`)
-    );
+    const [header = '', ...rows] = table([
+      ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'READ FIRST', 'NEXT'],
+      ...report.packs.map((pack) => [
+        pack.id,
+        pack.version ?? '-',
+        pack.dependency ? `${pack.dependency.ecosystem}:${pack.dependency.name}` : '-',
+        lockfileSummary(pack),
+        pack.state,
+        released(pack),
+        pack.readFirst.length === 0 ? '-' : String(pack.readFirst.length),
+        pack.nextStep ?? '-',
+      ]),
+    ]);
+    lines.push('Packs:', `  ${header}`);
+    report.packs.forEach((pack, index) => {
+      lines.push(
+        `  ${rows[index] ?? ''}`,
+        ...pack.covered.map((entry) => coveredLine(pack, entry))
+      );
+    });
   }
 
   lines.push('');
 
+  if (report.model !== null) {
+    lines.push(`Model: ${report.model.id} (${MODEL_SOURCE_TEXT[report.model.source]}).`);
+    if (report.model.source === 'settings') {
+      lines.push(
+        `  This is the default in ${report.model.file}; a session started with another model differs. Pass --model to name it.`
+      );
+    }
+  }
+
   if (report.cutoff) {
-    lines.push(`Model training data cutoff: ${report.cutoff.cutoff} (${report.cutoff.label}).`);
+    lines.push(
+      `Model training data cutoff: ${report.cutoff.cutoff} (${report.cutoff.label})${report.cutoff.assumed ? ', assuming that default' : ''}.`
+    );
     lines.push('');
     lines.push(
       report.afterCutoff.length === 0
@@ -719,9 +855,15 @@ export interface GatherStatusOptions {
   /** Network budget for missing release dates; unbounded when absent (the `status` command). */
   budgetMs?: number;
   /** `--model`, or the hook payload's model. Falls back to resolveModelIdFromEnvironment. */
-  modelId?: string;
+  model?: { id: string; source: 'payload' | 'flag' };
   /** `--cutoff YYYY-MM`. A malformed value is a ConfigError (exit 2). */
   cutoff?: string;
+  /**
+   * The hook's policy for a malformed `--cutoff`, `model.cutoff`, or
+   * LLM_DOCS_MODEL_CUTOFF: report it here and go on with the next source.
+   * Without it, a malformed value is a ConfigError, for a person to fix.
+   */
+  ignoreInvalidCutoff?: (problem: string) => void;
   env: NodeJS.ProcessEnv;
   homeDir: string;
   cacheDir: string;
@@ -738,8 +880,8 @@ export interface ProjectStatus {
   /** The packs read for this report, so the hook renders its pack list without reading them again. */
   packs: readonly ProjectPack[];
   report: StatusReport;
-  /** The model id status compared against, after every fallback, or null. */
-  modelId: string | null;
+  /** The model status compared against, after every fallback, and where its id came from. */
+  model: ModelIdentity | null;
   cutoff: ModelCutoff | null;
   /**
    * Release dates this run could not get only because it ran out of time or
@@ -785,6 +927,7 @@ async function packStatusInput(
     readFirst: (manifest?.recipe.readFirst ?? []).map(
       (target) => `${loaded.packsDirRelative}/${pack.id}/${target}`
     ),
+    covers: manifest?.recipe.covers ?? config?.covers ?? [],
     inConfig: pack.inConfig,
   };
 }
@@ -795,7 +938,8 @@ async function packStatusInput(
  * `model.cutoff`, LLM_DOCS_MODEL_CUTOFF, then the table match for the model
  * id from `--model`, the payload, or the environment), and the release dates
  * of direct dependencies and of each bound pack's version. Throws only for
- * an unreadable project (I/O) or a malformed cutoff (ConfigError).
+ * an unreadable project (I/O) or, without `ignoreInvalidCutoff`, a malformed
+ * cutoff (ConfigError).
  */
 export async function gatherProjectStatus(
   project: ProjectContext,
@@ -806,9 +950,9 @@ export async function gatherProjectStatus(
     ...(loaded === null ? {} : { skipDirectories: [loaded.packsDirRelative] }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
-  const modelId =
+  const model =
     resolveModelIdFromEnvironment({
-      ...(options.modelId === undefined ? {} : { payloadModel: options.modelId }),
+      ...(options.model === undefined ? {} : { stated: options.model }),
       env: options.env,
       projectRoot,
       homeDir: options.homeDir,
@@ -816,9 +960,12 @@ export async function gatherProjectStatus(
   const configCutoff = loaded?.config.model?.cutoff;
   const cutoff =
     resolveModelCutoff({
-      ...(modelId === null ? {} : { modelId }),
+      ...(model === null ? {} : { modelId: model.id }),
       ...(options.cutoff === undefined ? {} : { override: options.cutoff }),
       ...(configCutoff === undefined ? {} : { configCutoff }),
+      ...(options.ignoreInvalidCutoff === undefined
+        ? {}
+        : { ignoreInvalid: options.ignoreInvalidCutoff }),
       env: options.env,
     }) ?? null;
 
@@ -840,9 +987,17 @@ export async function gatherProjectStatus(
     }
   }
   for (const input of packInputs) {
-    const query = input.indexPath === null ? undefined : packReleaseQuery(input);
-    if (query !== undefined && !queries.has(releaseKey(query))) {
-      queries.set(releaseKey(query), query);
+    if (input.indexPath === null) {
+      continue;
+    }
+    const own = packReleaseQuery(input);
+    const covered = input.covers.flatMap((dependency) =>
+      resolvedVersions(scan, dependency).map(({ version }) => releaseQuery(dependency, version))
+    );
+    for (const query of [...(own === undefined ? [] : [own]), ...covered]) {
+      if (!queries.has(releaseKey(query))) {
+        queries.set(releaseKey(query), query);
+      }
     }
   }
 
@@ -862,7 +1017,17 @@ export async function gatherProjectStatus(
   const report = computeStatus({
     dependencies: scan.dependencies,
     releases: lookup.releases,
-    ...(cutoff === null ? {} : { cutoff: { cutoff: cutoff.cutoff, label: cutoff.label } }),
+    ...(model === null ? {} : { model }),
+    ...(cutoff === null
+      ? {}
+      : {
+          cutoff: {
+            cutoff: cutoff.cutoff,
+            label: cutoff.label,
+            source: cutoff.source,
+            assumed: cutoff.source === 'table' && model?.source === 'settings',
+          },
+        }),
     nearCutoffDays: loaded?.config.hook?.nearCutoffDays ?? DEFAULT_NEAR_CUTOFF_DAYS,
     packs: packInputs,
     now: options.now,
@@ -873,7 +1038,7 @@ export async function gatherProjectStatus(
     loaded,
     packs,
     report,
-    modelId,
+    model,
     cutoff,
     pendingReleaseDates,
     warnings: [...new Set([...scan.warnings, ...lookup.warnings])].sort(compareStringsByCodeUnit),

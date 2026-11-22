@@ -654,6 +654,35 @@
           "items": {
             "type": "string"
           }
+        },
+        "covers": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ecosystem": {
+                "type": "string",
+                "enum": [
+                  "npm",
+                  "pypi",
+                  "cargo",
+                  "go",
+                  "pub",
+                  "swiftpm"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "ecosystem",
+              "name"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

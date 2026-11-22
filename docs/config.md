@@ -49,6 +49,7 @@ A pack id matches `^[a-z0-9][a-z0-9._-]{0,63}$`. It is the pack's directory name
 | `dependency` | object | none | `{ "ecosystem": ..., "name": ... }`. Binds the pack to a dependency the lockfiles resolve. |
 | `dependency.ecosystem` | string | required | One of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`. |
 | `dependency.name` | string | required | The registry name as the lockfile spells it, such as `@scope/name`. PyPI names are matched after PEP 503 normalization. |
+| `covers` | object array | none | 1 to 20 more dependencies these docs also describe, each `{ "ecosystem": ..., "name": ... }` with the same rules as `dependency`. Distinct, and none equal to `dependency`. Binds no version. See [`covers`](#covers). |
 | `version` | string | the lockfile version | Required unless `dependency` is set. No whitespace, no `<` or `>`, no control characters. Need not be semver: `2026-07-28` is valid. |
 | `sources` | array | required | At least one source. See [Sources](#sources). |
 | `site.baseUrl` | string | required with `site` | An `https://` URL without credentials: the docs website, so absolute links to it resolve to pack pages. |
@@ -202,6 +203,26 @@ A target is a pack-relative POSIX path that starts with `pages/` or `files/`, op
 
 At sync, each target must name a page or passthrough file of the pack being built, and a fragment must match a heading slug on that Markdown page. An unresolved target fails that pack's build as a config error (exit 2) that names the target, why it did not resolve, up to five nearby paths or slugs, and the fix. The previous pack stays in place.
 
+## `covers`
+
+One docs set often describes several packages of a family: the Model Context Protocol TypeScript SDK docs cover both `@modelcontextprotocol/server` and `@modelcontextprotocol/client`, and the same goes for `@tanstack/*`, `@sveltejs/*`, and the `effect` packages. Bind the pack to the main package with `dependency`, and list the others under `covers`:
+
+```json
+"mcp-sdk": {
+  "title": "MCP TypeScript SDK",
+  "dependency": { "ecosystem": "npm", "name": "@modelcontextprotocol/server" },
+  "covers": [{ "ecosystem": "npm", "name": "@modelcontextprotocol/client" }],
+  "sources": [{ "type": "local", "path": "vendor-docs/mcp-sdk" }]
+}
+```
+
+`covers` says these docs also describe those packages. It does not bind a version: the pack's version still comes from `dependency` or `version` alone, and the `lockfile` check of `verify` never fails because of a covered package.
+
+- `status` and the session-start note treat a covered package as having a pack, so it is never listed among the dependencies with no pinned docs.
+- A pack is listed among the pinned docs newer than the cutoff when its own version or any covered package the lockfiles resolve was released after or near the cutoff. Its row names the pack once, with the most recent of those release dates.
+- When a covered package resolves to a version whose major number differs from the pack's version, `status` adds a note under the pack's row and `verify` warns under `lockfile` that the pack may not describe that package's version. Versions without a leading `<number>.`, such as `2026-07-28`, are never compared.
+- `covers` is recorded in the manifest's recipe, and a pack that sets none keeps the `recipeHash` it had before the key existed.
+
 ## Escaping
 
 Text that reaches an agent file (pack titles, versions, descriptions, and top-level page directory names) is escaped before the managed block uses it: control characters become spaces; Unicode format characters (zero-width and bidirectional controls), backticks, and `@` are removed; `<` and `>` become `&lt;` and `&gt;`; whitespace collapses to one line; the result is capped at 80 characters. `@` goes because Claude Code expands `@path` in `CLAUDE.md` into that file's contents.
@@ -218,6 +239,7 @@ Text that reaches an agent file (pack titles, versions, descriptions, and top-le
 | Converter time per document | 300 s by default | `convert.timeoutSeconds`, 1 to 3600 |
 | Managed block size | 4096 bytes by default | `block.maxBytes`, 1024 to 65536 |
 | Read-first targets per pack | 5 | fixed |
+| Covered packages per pack | 20 | fixed |
 
 `llm-docs capabilities --json` reports the pack limits of the installed build under `limits`.
 

@@ -71,8 +71,9 @@ explicitly named index (`llms.txt`) lists after an explicit planner-written filt
 The project root is the nearest ancestor of the working directory containing `llm-docs.json`.
 Commands that create config (`init`, `add`, `migrate`) use that project when one exists, else
 the git top-level directory when inside a git repository, else the working directory.
-`--project <dir>` names the root on every command that reads a project (section 5);
-`status --project <dir>` starts the upward search at `<dir>`.
+`--project <dir>` names the root, as given, on every command that reads a project (section 5),
+`status` included: with no `llm-docs.json` there, `status` analyses that directory's
+dependencies.
 
 ### 2.2 `llm-docs.json`
 
@@ -95,6 +96,7 @@ never silently disable behavior.
       "title": "Vite",
       "description": "Build tool and dev server",   // optional, one line, escaped into the block
       "dependency": { "ecosystem": "npm", "name": "vite" },  // optional
+      "covers": [{ "ecosystem": "npm", "name": "create-vite" }],  // optional, 1 to 20: see rules
       "version": "8.2.0",                  // required unless dependency is set; then optional,
                                            // and when omitted the lockfile version is used
       "sources": [
@@ -144,6 +146,15 @@ Rules:
   need not be semver (`2026-07-28`
   is a valid version for a protocol revision).
 - `dependency.ecosystem` is one of `npm`, `pypi`, `cargo`, `go`, `pub`, `swiftpm`.
+- `covers` lists 1 to 20 more dependencies, in the shape of `dependency` and under its rules,
+  that the pack's docs also describe (one docs set for a family: `@modelcontextprotocol/server`
+  and `@modelcontextprotocol/client`, `@tanstack/*`, the `effect` packages). No two may name the
+  same package (PyPI names compared after PEP 503 normalization), and none may equal the pack's
+  own `dependency`. It binds no version: the pack's version still comes from `dependency` or
+  `version` alone, and the `lockfile` check ignores `covers` for that. Like `readFirst`, it is
+  absent from the resolved recipe when the pack sets none, so no existing recipeHash changes; it
+  is recorded in the manifest's recipe, so `status` and the hook read it without config. Its
+  effects are in 5.1, 6.4, and 7.2.
 - `packsDir`, `agentFiles` entries, and local `path`s must be project-relative and stay inside
   the project after resolution (`isSameOrDescendant`). Absolute paths are rejected.
 
@@ -233,7 +244,7 @@ no lock.
   "recipeHash": "sha256:...",          // hash of the canonical JSON of `recipe`
                                        // (`recipe.readFirst` is absent, never [], when the
                                        // pack marks no pages, so packs built before the field
-                                       // existed keep their recipeHash)
+                                       // existed keep their recipeHash; `recipe.covers` likewise)
   "acquiredAt": "2026-11-05T10:00:00.000Z",
   "origins": [                          // one per source, same order as recipe.sources
     { "type": "git", "repo": "https://github.com/vitejs/vite", "ref": "v8.2.0",
@@ -563,7 +574,8 @@ command carries `--project <dir>` when the user passed it. The CLI prints no col
   a project that has packs). Idempotent; never overwrites config.
 - `llm-docs add <id> (--git <repo> --ref <ref> [--path <p>]... | --url <u>... | --urls-file
   <f> | --llms-txt <u> --include <glob>... [--strip-prefix <prefix>] | --local <path>)
-  [--include <glob>]... [--dependency <eco>:<name>] [--version <v>] [--mount <m>] [--title <t>]
+  [--include <glob>]... [--dependency <eco>:<name>] [--covers <eco>:<name>]... [--version <v>]
+  [--mount <m>] [--title <t>]
   [--convert docling|markitdown|agent] [--convert-include <glob>...] [--site <baseUrl>]
   [--recipe <json>] [--read-first <target>]... [--replace] [--dry-run]`: write the recipe into
   config (creating config if absent), then `sync <id>`. `--version` or `--dependency` is
@@ -624,8 +636,8 @@ fails, the other pack checks are skipped):
 | `outputs` | a listed output is missing or its hash differs |
 | `unlisted-files` | a file in the pack is not listed, or the pack holds a symlink (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info) |
 | `links` | a relative link in a page, index, or combined file does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
-| `recipe` | the config recipe for this id resolves to a different `recipeHash` or cannot be resolved (warn when the config has no such pack: orphan) |
-| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise |
+| `recipe` | the config recipe for this id, resolved at the version the manifest records, has a different `recipeHash` (the config was edited) or cannot be resolved (warn when the config has no such pack: orphan); a lockfile that moved while the config stayed the same passes here, since `lockfile` reports it: one cause, one finding |
+| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise. A `covers` entry never fails it: warn when the lockfiles resolve it to a version whose major (the leading `<number>.`) differs from `pack.version`'s, since the pack may not describe that package's version (no finer comparison: a family's packages do not always share versions) |
 | `citations` | a guide citation does not resolve, its cited section hash changed since stamping, or the lock is invalid; an unstamped guide, a guide edited after stamping, or a lock entry for a deleted guide is a warning |
 | `conversion` | an `agent` conversion's original changed since the last sync (warn when a local original no longer exists) |
 | `license` | warn for `unknown` and `proprietary`; fail under `--strict` |
@@ -714,8 +726,9 @@ similar), and strips Bedrock `-v1:0` suffixes and snapshot dates (`-20250929`, `
 `-2025-04-14`). Only entries backed by a published source are included; the source URL is
 recorded per entry. Resolution order: `--cutoff`, config `model.cutoff`,
 `LLM_DOCS_MODEL_CUTOFF`, the table match for `--model` or the hook's model id. Each of the first
-three must be `YYYY-MM`; a malformed one is an error (exit 2 in `status`). No match means no
-cutoff and the after-cutoff analysis is skipped (never guessed).
+three must be `YYYY-MM`; a malformed one is an error (exit 2 in `status`, where a person can fix
+it), while the hook logs it and goes on with the next source (7.2). No match means no cutoff and
+the after-cutoff analysis is skipped (never guessed).
 
 When a vendor gives two dates for one model (Anthropic's reliable knowledge cutoff and training
 data cutoff; a Google model card's general date and an earlier date some domains stop at), the
@@ -748,16 +761,26 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
   the built pack's read-first targets (4.8) as project-relative paths (the full list in
   `--json`, a count in the human table), and the step that brings the pack back to `ok`
   (`llm-docs sync <id>`; for a stale pack whose config pins `version`, editing that version
-  first; for an orphan, `sync --prune` or adding it back to config).
+  first; for an orphan, `sync --prune` or adding it back to config). Each package the pack
+  `covers` (2.2) that the lockfiles resolve, at each resolved version, with its lockfiles,
+  release date, window, and whether its major version differs from the pack's (`covered` in
+  `--json`; a line under the pack's row in the human table, with a note when the major differs).
 - Direct dependencies released after the cutoff, or within `nearCutoffDays` before it, that
-  have no pack bound to that name at any version: name, version, release date, and a suggested
-  next step (`llm-docs discover --package <eco>:<name>@<version>`, the evidence for writing a
-  recipe; for SwiftPM the repository URL is the name). With no cutoff, the direct dependencies
-  released in the last 180 days instead, as the hook does.
+  have no pack bound to that name or covering it, at any version: name, version, release date,
+  and a suggested next step (`llm-docs discover --package <eco>:<name>@<version>`, the evidence
+  for writing a recipe; for SwiftPM the repository URL is the name). With no cutoff, the direct
+  dependencies released in the last 180 days instead, as the hook does.
 - Without `--model`, the model id comes from `ANTHROPIC_MODEL` and the Claude Code settings
-  files, as in the hook (7.2).
-- Works in a directory with no `llm-docs.json` (dependency analysis only), using the same
-  project discovery as the hook. `--cutoff` must be `YYYY-MM` (exit 2 otherwise).
+  files, as in the hook (7.2). The report names the model and where its id came from (`--model`,
+  `ANTHROPIC_MODEL`, or a settings file, named by path), and marks a cutoff reached through a
+  settings-file default as assumed, in the human table and in `--json` (`model` and
+  `cutoff.assumed`).
+- Works in a directory with no `llm-docs.json` (dependency analysis only). Without
+  `--project`, it finds the project as the hook does from its `cwd` (the nearest ancestor of the
+  working directory holding `llm-docs.json`, else the working directory), so `status --brief` run
+  there prints what a session there is told. `--project <dir>` is the project root as given, as
+  on every other command: with no `llm-docs.json` in `<dir>`, the dependency analysis runs for
+  `<dir>`. `--cutoff` must be `YYYY-MM` (exit 2 otherwise).
 - `--brief`: the text the hook injects (7.2) for the harness detected from the environment,
   on stdout, and nothing when there is nothing to say. It takes precedence over `--json` and
   prints even when the hook is turned off. `--json`: the full structure.
@@ -837,16 +860,27 @@ context for the agent. Behavior:
   `claudeCodeAliases` to the model the alias currently selects, per provider
   (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` select the
   provider's table); a pin variable such as `ANTHROPIC_DEFAULT_OPUS_MODEL` wins, and `default`
-  is deliberately left unresolved. Cutoff resolution per 6.3. When no cutoff resolves, the hook lists direct dependencies
+  is deliberately left unresolved. The model id carries its provenance as a typed value beside
+  it: reported by the payload, set in the environment (`ANTHROPIC_MODEL`), or read from a
+  settings file. A settings file holds only the user's or project's default, which a session
+  started with `--model` overrides without telling the hook (measured on 2026-11-22: headless
+  `claude -p --model ...` sends no `model` and sets no `ANTHROPIC_MODEL`), so a cutoff reached
+  through it is an assumption, not a fact. Each heading that names such a cutoff states the
+  assumption instead of asserting it ("Assuming your model is the configured default (Claude
+  Opus 5.5, cutoff 2026-06): ..."), and the first one adds that a different model should judge by
+  the release dates shown. A payload or environment model, and a cutoff set by `--cutoff`,
+  `model.cutoff`, or `LLM_DOCS_MODEL_CUTOFF`, keep the assertive wording. Cutoff resolution per
+  6.3. When no cutoff resolves, the hook lists direct dependencies
   without a pack released in the last 180 days under a neutral heading ("Recently released
   dependencies (your training data may predate them)"): a fact from release dates, not a guess
   about the model.
 - Content (at most 2,000 characters; nothing at all when there is nothing to say):
   1. Packs that need a rebuild (the lockfile moved, the recipe changed, or never built), each
      with its fix from `status`.
-  2. Built packs whose library version (the pack's version of its bound dependency) was
-     released after the model's training cutoff or within the near-cutoff window, most recent
-     first, one line each with the title, version, release date, whether it is after or near
+  2. Built packs whose library version (the pack's version of its bound dependency), or any
+     package it `covers` at the version the lockfiles resolve, was released after the model's
+     training cutoff or within the near-cutoff window, most recent first, one line per pack with
+     the title, version, the most recent of those release dates, whether it is after or near
      the cutoff, and the index path, under a heading that tells the agent its memory of these
      libraries predates these versions and that it must read the pinned pages before writing
      code against them. This is what a fully adopted project is told at every session start.
@@ -856,7 +890,7 @@ context for the agent. Behavior:
      merged; the index links the rest. A path that the 7.1 escaping would alter is left out
      rather than shown altered.
   3. Direct dependencies newer than the model's training cutoff (or within the near-cutoff
-     window) without a pack, most recent first, at most 8, with their release dates, and the
+     window) without a pack (a package a pack `covers` has one), most recent first, at most 8, with their release dates, and the
      suggestion to read their docs or create a pack with the `add-docs` skill.
   4. When packs exist and the managed block is missing from the agent file the harness reads,
      the pack list itself (so the hook covers projects that gitignore AGENTS.md). Codex and
@@ -882,8 +916,10 @@ context for the agent. Behavior:
   nears. A run that misses the deadline prints nothing.
 - Failure policy: always exit 0. Errors go to `<cache dir>/hook.log` (rotated at 1 MB, one
   previous file kept), never to stdout or stderr. An invalid `llm-docs.json` is logged and the
-  hook continues with the dependency analysis only. A malformed `model.cutoff` or
-  `LLM_DOCS_MODEL_CUTOFF` fails the run, which is logged and prints nothing.
+  hook continues with the dependency analysis only. A malformed `LLM_DOCS_MODEL_CUTOFF` costs the
+  override, not the note: it is logged, that source is ignored, and cutoff resolution goes on
+  with the next source, ending at the neutral heading when none resolves. (A malformed
+  `model.cutoff` makes `llm-docs.json` invalid, so the rule above applies to it.)
   `LLM_DOCS_HOOK=off` or config `hook.enabled: false` disables output.
 
 ### 7.3 Plugin (`plugin/`)

@@ -43,6 +43,8 @@ The model id comes from the first of:
 2. `ANTHROPIC_MODEL`.
 3. `model` in `<project>/.claude/settings.local.json`, then `<project>/.claude/settings.json`, then `~/.claude/settings.json`.
 
+A settings file only names the default model. A session started with `--model` runs another model, and a headless `claude -p` session sends no `model` and sets no `ANTHROPIC_MODEL`, so the hook cannot see the override. When the model comes from a settings file, the note therefore states the cutoff as an assumption in each heading that names it, such as "Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): ...", and tells the agent to judge by the release dates shown if it is a different model. A model from the payload or `ANTHROPIC_MODEL`, and a cutoff set explicitly, keep the plain wording. `llm-docs status` shows the same provenance.
+
 Claude Code aliases (`opus`, `sonnet`, `haiku`, `fable`, with an optional suffix such as `[1m]`) resolve to the model the alias currently selects, through the table in [`data/model-cutoffs.json`](../data/model-cutoffs.json). A pin variable such as `ANTHROPIC_DEFAULT_OPUS_MODEL` wins, and `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, and `CLAUDE_CODE_USE_FOUNDRY` select that provider's alias table.
 
 The cutoff then comes from `model.cutoff` in `llm-docs.json`, `LLM_DOCS_MODEL_CUTOFF`, or the table entry for the model id, in that order. The table lists only models whose cutoff has a published source, and records that source per entry. With no cutoff, the note lists releases from the last 180 days under a neutral heading instead of guessing.
@@ -64,7 +66,7 @@ The harness timeout in both hook files is 5 s, well above the hook's own deadlin
 
 ### Failure policy
 
-The hook always exits 0, never writes to stderr, and prints nothing when it fails. It logs problems to `hook.log` in the cache directory, which rotates at 1 MB and keeps one previous file, `hook.log.1`. If `node` is not on the `PATH` the harness passes to hooks, the hook command fails and both harnesses treat that as a non-blocking error.
+The hook always exits 0, never writes to stderr, and prints nothing when it fails. A malformed `LLM_DOCS_MODEL_CUTOFF` does not fail it: the hook logs the value, ignores it, and takes the cutoff from the next source, or uses the neutral heading when none is left. A malformed `model.cutoff` makes `llm-docs.json` invalid, and with an invalid config the hook logs the problem and sends only the dependency part of the note. It logs problems to `hook.log` in the cache directory, which rotates at 1 MB and keeps one previous file, `hook.log.1`. If `node` is not on the `PATH` the harness passes to hooks, the hook command fails and both harnesses treat that as a non-blocking error.
 
 ## Which agent files each harness reads
 
@@ -101,4 +103,4 @@ If the note is missing in a session but `status --brief` prints text:
 3. Check that the release dates are cached. A first session can miss its 1.5 s deadline while it looks dates up; the background warm-up fills the cache for the next one. Running `llm-docs status` once fills it too.
 4. Check `LLM_DOCS_HOOK` and `hook.enabled`.
 
-If the note names the wrong cutoff, set `model.cutoff` in `llm-docs.json` or `LLM_DOCS_MODEL_CUTOFF`. The heading of parts 2 and 3 names the cutoff and where it came from.
+If the note names the wrong cutoff, set `model.cutoff` in `llm-docs.json` or `LLM_DOCS_MODEL_CUTOFF`. The heading of parts 2 and 3 names the cutoff and where it came from, and starts with "Assuming your model is the configured default" when only a settings file named the model. `llm-docs status` prints the model, its source, and the settings file it was read from.

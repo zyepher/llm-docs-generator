@@ -30,6 +30,7 @@ import {
   sourceConfigSchema,
   PACK_ID_PATTERN,
   READ_FIRST_MAX,
+  COVERS_MAX,
   type PackConfig,
 } from './config/project.js';
 import { migrateV2Pack } from './config/migrate.js';
@@ -427,6 +428,7 @@ interface AddOptions extends ProjectOptions {
   stripPrefix?: string;
   site?: string;
   dependency?: string;
+  covers?: string[];
   version?: string;
   mount?: string;
   title?: string;
@@ -599,14 +601,17 @@ function collect(value: string, previous: string[] | undefined): string[] {
   return [...(previous ?? []), value];
 }
 
-function parseDependency(value: string): { ecosystem: Ecosystem; name: string } {
+function parseDependency(
+  value: string,
+  flag: '--dependency' | '--covers'
+): { ecosystem: Ecosystem; name: string } {
   const separator = value.indexOf(':');
   const ecosystem = ECOSYSTEMS.find((entry) => entry === value.slice(0, separator));
   const name = value.slice(separator + 1);
 
   if (separator <= 0 || name === '' || ecosystem === undefined) {
     throw new UsageError(
-      `--dependency must be <ecosystem>:<name> with an ecosystem of ${ECOSYSTEMS.join(', ')}; got "${value}".`
+      `${flag} must be <ecosystem>:<name> with an ecosystem of ${ECOSYSTEMS.join(', ')}; got "${value}".`
     );
   }
 
@@ -705,7 +710,10 @@ function buildPackRecipe(options: AddOptions): PackConfig {
     pack.title = options.title;
   }
   if (options.dependency !== undefined) {
-    pack.dependency = parseDependency(options.dependency);
+    pack.dependency = parseDependency(options.dependency, '--dependency');
+  }
+  if (options.covers !== undefined) {
+    pack.covers = options.covers.map((value) => parseDependency(value, '--covers'));
   }
   if (options.version !== undefined) {
     pack.version = options.version;
@@ -1018,7 +1026,7 @@ function capabilities(program: Command): unknown {
     ecosystems: ECOSYSTEMS,
     transforms: TRANSFORM_NAMES,
     checks: { pack: PACK_CHECK_NAMES, project: PROJECT_CHECK_NAMES },
-    limits: { ...PACK_LIMITS, maxReadFirst: READ_FIRST_MAX },
+    limits: { ...PACK_LIMITS, maxReadFirst: READ_FIRST_MAX, maxCovers: COVERS_MAX },
   };
 }
 
@@ -1115,6 +1123,11 @@ function buildProgram(): Command {
       .option(
         '--dependency <ecosystem:name>',
         `Bind the pack to a dependency, such as npm:vite; ecosystems: ${ECOSYSTEMS.join(', ')} (default: none)`
+      )
+      .option(
+        '--covers <ecosystem:name>',
+        `Another package these docs also describe, such as npm:@modelcontextprotocol/client next to a server SDK; status and the session note then count it as documented. It binds no version (repeatable, at most ${COVERS_MAX}; default: none)`,
+        collect
       )
       .option(
         '--version <version>',
@@ -1391,14 +1404,17 @@ function buildProgram(): Command {
         brief?: boolean;
       }
     ) => {
-      // The same project rule as the hook, so --brief prints what a session there would get.
-      const start = resolve(options.project ?? process.cwd());
-      const projectRoot = (await findProjectRoot(start)) ?? start;
+      // --project is the root, as for every other command. Without it, the hook's discovery
+      // from the working directory, so --brief prints what a session there would get.
+      const projectRoot =
+        options.project !== undefined
+          ? resolve(options.project)
+          : ((await findProjectRoot(process.cwd())) ?? resolve(process.cwd()));
       const status = await gatherProjectStatus(
         { projectRoot, loaded: await loadProjectConfigIfPresent(projectRoot) },
         {
           offline: options.offline === true,
-          ...(options.model === undefined ? {} : { modelId: options.model }),
+          ...(options.model === undefined ? {} : { model: { id: options.model, source: 'flag' } }),
           ...(options.cutoff === undefined ? {} : { cutoff: options.cutoff }),
           env: process.env,
           homeDir: homedir(),
