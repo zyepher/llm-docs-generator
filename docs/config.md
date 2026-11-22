@@ -204,7 +204,7 @@ At sync, each target must name a page or passthrough file of the pack being buil
 
 ## Escaping
 
-Text that reaches an agent file (pack titles, versions, descriptions, and top-level page directory names) is escaped before the managed block uses it: control characters, Unicode format characters (zero-width and bidirectional controls), backticks, and `@` are removed; `<` and `>` become `&lt;` and `&gt;`; whitespace collapses to one line; the result is capped at 80 characters. `@` goes because Claude Code expands `@path` in `CLAUDE.md` into that file's contents.
+Text that reaches an agent file (pack titles, versions, descriptions, and top-level page directory names) is escaped before the managed block uses it: control characters become spaces; Unicode format characters (zero-width and bidirectional controls), backticks, and `@` are removed; `<` and `>` become `&lt;` and `&gt;`; whitespace collapses to one line; the result is capped at 80 characters. `@` goes because Claude Code expands `@path` in `CLAUDE.md` into that file's contents.
 
 ## Limits
 

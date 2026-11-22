@@ -28,7 +28,7 @@ Inside the pack, the build rewrites links so that no local link points outside i
 
 The managed block in `AGENTS.md` or `CLAUDE.md` is the only place the tool writes into a file an agent reads as instructions. It holds the pack list and fixed text. The only upstream-derived text in it is each pack's title, version, description, and top-level page directory names, escaped by `escapeBlockText` (`src/agent/block.ts`):
 
-- Control characters, Unicode format characters (zero-width and bidirectional controls), backticks, and `@` are removed. `@` goes because Claude Code expands `@path` in `CLAUDE.md` into that file's contents.
+- Control characters become spaces. Unicode format characters (zero-width and bidirectional controls), backticks, and `@` are removed. `@` goes because Claude Code expands `@path` in `CLAUDE.md` into that file's contents.
 - `<` and `>` become `&lt;` and `&gt;`.
 - Whitespace collapses to one line, capped at 80 characters.
 
