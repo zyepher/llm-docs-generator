@@ -51,7 +51,12 @@ import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type IndexGuide } from './index-page.js';
-import { listGuides } from './guides.js';
+import {
+  listGuides,
+  reviewGuidesAfterBuild,
+  reviewGuidesForRefreshCheck,
+  type GuideReviewReport,
+} from './guides.js';
 import { createPackLinkRewriter } from './links.js';
 import { resolvePackLicense } from './license.js';
 import {
@@ -89,6 +94,12 @@ export interface PackSyncResult {
   warnings: string[];
   /** What a refresh found upstream (`refresh` only). */
   refresh?: RefreshReport;
+  /**
+   * Guides whose stamped citations a rebuild changed (section-exact), or,
+   * under `refresh --check`, whose cited pages changed upstream (page-level).
+   * Absent when there is nothing to re-review.
+   */
+  guideReview?: GuideReviewReport;
 }
 
 export type OrphanStatus = 'orphan' | 'pruned' | 'would-prune' | 'kept';
@@ -882,12 +893,31 @@ async function refreshOnePack(
   if (!report.changed) {
     return { id, status: 'unchanged', warnings: [], refresh: report };
   }
+
+  const packDir = join(context.loaded.packsDir, id);
+
   if (context.options.check === true) {
-    return { id, status: 'would-build', reason: 'upstream changed', warnings: [], refresh: report };
+    const review = await reviewGuidesForRefreshCheck(packDir, report);
+    return {
+      id,
+      status: 'would-build',
+      reason: 'upstream changed',
+      warnings: [],
+      refresh: report,
+      ...(review === undefined ? {} : { guideReview: review }),
+    };
   }
 
   const warnings = await buildPack(context, resolved, existing, acquisitions, workRoot);
-  return { id, status: 'built', reason: 'upstream changed', warnings, refresh: report };
+  const review = await reviewGuidesAfterBuild(packDir);
+  return {
+    id,
+    status: 'built',
+    reason: 'upstream changed',
+    warnings,
+    refresh: report,
+    ...(review === undefined ? {} : { guideReview: review }),
+  };
 }
 
 async function syncOnePack(
@@ -941,7 +971,14 @@ async function syncOnePack(
       return acquired;
     });
     const warnings = await buildPack(context, resolved, existing, acquisitions, workRoot);
-    return { id, status: 'built', reason, warnings };
+    const review = await reviewGuidesAfterBuild(join(context.loaded.packsDir, id));
+    return {
+      id,
+      status: 'built',
+      reason,
+      warnings,
+      ...(review === undefined ? {} : { guideReview: review }),
+    };
   } finally {
     await rm(workRoot, { recursive: true, force: true });
   }

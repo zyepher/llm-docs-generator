@@ -642,3 +642,83 @@ describe('verify citations', () => {
     ]);
   });
 });
+
+describe('the re-review list', () => {
+  const INSTALL_CHANGED = API_PAGE.replace('Run it.', 'Run it twice.').replace(
+    'First usage.',
+    'First usage, revised.'
+  );
+  const GUIDE_C = '# Usage digest\n\nSee [usage](../pages/guide/api.md#usage-1).\n';
+
+  it('refresh --check lists cited pages, then refresh lists exactly the changed sections', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A, 'c.md': GUIDE_C });
+    await stamp(root);
+    await writeFiles(root, { 'docs/guide/api.md': INSTALL_CHANGED });
+    const before = await readFile(join(packDir(root), 'pages', 'guide', 'api.md'), 'utf-8');
+    const lock = await readLock(root);
+
+    const check = await syncPacks(root, undefined, { refresh: true, check: true });
+    expect(check.packs[0]).toMatchObject({
+      status: 'would-build',
+      guideReview: {
+        basis: 'pages',
+        guides: [
+          {
+            guide: 'guides/a.md',
+            citations: [{ target: 'pages/guide/api.md#install', change: 'page-changed' }],
+          },
+          {
+            guide: 'guides/c.md',
+            citations: [{ target: 'pages/guide/api.md#usage-1', change: 'page-changed' }],
+          },
+        ],
+      },
+    });
+    expect(await readFile(join(packDir(root), 'pages', 'guide', 'api.md'), 'utf-8')).toBe(before);
+    expect(await readLock(root)).toBe(lock);
+
+    const refresh = await syncPacks(root, undefined, { refresh: true });
+    expect(refresh.packs[0]).toMatchObject({
+      status: 'built',
+      guideReview: {
+        basis: 'sections',
+        guides: [
+          {
+            guide: 'guides/a.md',
+            citations: [{ target: 'pages/guide/api.md#install', change: 'section-changed' }],
+          },
+        ],
+      },
+    });
+    expect(await readLock(root)).toBe(lock);
+
+    await stamp(root);
+    const quiet = await syncPacks(root, undefined, { refresh: true });
+    expect(quiet.packs[0]).toMatchObject({ status: 'unchanged' });
+    expect(quiet.packs[0]?.guideReview).toBeUndefined();
+  });
+
+  it('a plain sync that rebuilds carries the same section-exact list', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A, 'c.md': GUIDE_C });
+    await stamp(root);
+    await writeFiles(root, { 'docs/guide/api.md': INSTALL_CHANGED.replace('# API', '# API v2') });
+    await rm(join(root, 'docs', 'guide', 'start.md'));
+
+    const report = await syncPacks(root, undefined);
+    expect(report.packs[0]).toMatchObject({
+      status: 'built',
+      guideReview: {
+        basis: 'sections',
+        guides: [
+          {
+            guide: 'guides/a.md',
+            citations: [
+              { target: 'pages/guide/api.md#install', change: 'section-changed' },
+              { target: 'pages/guide/start.md', change: 'unresolved' },
+            ],
+          },
+        ],
+      },
+    });
+  });
+});

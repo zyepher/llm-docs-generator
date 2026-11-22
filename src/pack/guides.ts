@@ -29,6 +29,7 @@ import type { IndexGuide } from './index-page.js';
 import { withPacksLock } from './lock.js';
 import { ManifestError, readPackManifest, type PackManifest } from './manifest.js';
 import { collectHeadings, findLinkTargets, headingSlugs } from './markdown.js';
+import type { RefreshReport } from './refresh.js';
 import type { CheckFinding } from './verify.js';
 
 /** Pack-relative path of the lock. Not a `.md` file, so it is never listed as a guide. */
@@ -768,4 +769,91 @@ export async function checkCitations(packId: string, packDir: string): Promise<C
   }
 
   return findings;
+}
+
+// ---------------------------------------------------------------------------
+// The re-review list (refresh and sync)
+// ---------------------------------------------------------------------------
+
+/** Known after a rebuild: the cited section itself was recomputed. */
+export type SectionChange = 'section-changed' | 'unresolved';
+/** Known without building (`refresh --check`): only that the cited page's source moved. */
+export type PageChange = 'page-changed' | 'page-removed';
+
+export interface GuideReview<Change extends SectionChange | PageChange> {
+  guide: string;
+  citations: { target: string; change: Change }[];
+}
+
+/**
+ * What the planner should re-review. The basis is in the type, so a printer
+ * cannot present a page-level guess as a section-level fact.
+ */
+export type GuideReviewReport =
+  | { basis: 'sections'; guides: GuideReview<SectionChange>[] }
+  | { basis: 'pages'; guides: GuideReview<PageChange>[] };
+
+/**
+ * After a rebuild swapped in (the lock moved with `guides/`): the stamped
+ * citations that no longer match, from the same recomputation `verify`
+ * runs. Undefined when there is nothing to re-review.
+ */
+export async function reviewGuidesAfterBuild(
+  packDir: string
+): Promise<GuideReviewReport | undefined> {
+  const assessment = await assessCitations(packDir);
+
+  if (assessment.kind !== 'assessed') {
+    return undefined;
+  }
+
+  const guides = assessment.guides.flatMap((guide): GuideReview<SectionChange>[] => {
+    const citations = guide.missing
+      ? []
+      : guide.citations.flatMap((citation) =>
+          citation.state === 'ok' ? [] : [{ target: citation.target, change: citation.state }]
+        );
+    return citations.length === 0 ? [] : [{ guide: guide.path, citations }];
+  });
+
+  return guides.length === 0 ? undefined : { basis: 'sections', guides };
+}
+
+/**
+ * Under `refresh --check`, where nothing is built: the stamped citations of
+ * guides still on disk whose cited file the refresh reports changed or
+ * removed (page level; whether the cited section changed is known only after
+ * the rebuild). Undefined when there is nothing to re-review.
+ */
+export async function reviewGuidesForRefreshCheck(
+  packDir: string,
+  refresh: RefreshReport
+): Promise<GuideReviewReport | undefined> {
+  const lock = await readCitationsLock(packDir);
+
+  if (lock.kind !== 'ok') {
+    return undefined;
+  }
+
+  const changed = new Map<string, PageChange>();
+  for (const file of refresh.files) {
+    if (file.status === 'changed' || file.status === 'removed') {
+      changed.set(file.output, file.status === 'changed' ? 'page-changed' : 'page-removed');
+    }
+  }
+
+  const present = new Set((await listGuides(packDir)).map((guide) => guide.path));
+  const guides = Object.keys(lock.lock.guides)
+    .filter((path) => present.has(path))
+    .sort(compareStringsByCodeUnit)
+    .flatMap((path): GuideReview<PageChange>[] => {
+      const citations = (lock.lock.guides[path]?.citations ?? []).flatMap(({ target }) => {
+        const citation = parseTarget(target);
+        const change = citation === undefined ? undefined : changed.get(citation.path);
+        return change === undefined ? [] : [{ target, change }];
+      });
+      return citations.length === 0 ? [] : [{ guide: path, citations }];
+    });
+
+  return guides.length === 0 ? undefined : { basis: 'pages', guides };
 }

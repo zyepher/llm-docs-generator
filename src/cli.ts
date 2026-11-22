@@ -35,8 +35,14 @@ import {
 } from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
-import { ensurePacksDir, previewPack, syncPacks, type SyncReport } from './pack/build.js';
-import { stampGuides } from './pack/guides.js';
+import {
+  ensurePacksDir,
+  previewPack,
+  syncPacks,
+  type PackSyncResult,
+  type SyncReport,
+} from './pack/build.js';
+import { stampGuides, type PageChange, type SectionChange } from './pack/guides.js';
 import {
   PACK_CHECK_NAMES,
   PROJECT_CHECK_NAMES,
@@ -527,6 +533,36 @@ function printAgentBlocks(blocks: readonly AgentBlockOutcome[]): void {
   }
 }
 
+const CITATION_CHANGE_LABEL: Readonly<Record<SectionChange | PageChange, string>> = {
+  'section-changed': 'section changed',
+  unresolved: 'no longer resolves',
+  'page-changed': 'page changed upstream',
+  'page-removed': 'page removed upstream',
+};
+
+function printGuideReview(pack: PackSyncResult): void {
+  const review = pack.guideReview;
+
+  if (review === undefined) {
+    return;
+  }
+
+  say(
+    review.basis === 'sections'
+      ? '  guides to re-review (cited sections changed):'
+      : '  guides to re-review (cited pages changed upstream; sections are compared once rebuilt):'
+  );
+  for (const guide of review.guides) {
+    for (const citation of guide.citations) {
+      say(`    ${guide.guide} -> ${citation.target} (${CITATION_CHANGE_LABEL[citation.change]})`);
+    }
+  }
+  if (review.basis === 'sections') {
+    const guides = review.guides.map((guide) => guide.guide).join(' ');
+    say(`  after re-reviewing them: llm-docs guides stamp ${pack.id} ${guides}`);
+  }
+}
+
 function printSyncReport(report: SyncReport): void {
   for (const pack of report.packs) {
     switch (pack.status) {
@@ -546,6 +582,7 @@ function printSyncReport(report: SyncReport): void {
     for (const warning of pack.warnings) {
       say(`  warning: ${warning}`);
     }
+    printGuideReview(pack);
   }
 
   for (const orphan of report.orphans) {
@@ -605,6 +642,7 @@ function printRefreshReport(report: SyncReport): void {
     for (const warning of pack.warnings) {
       say(`  warning: ${warning}`);
     }
+    printGuideReview(pack);
   }
 
   printAgentBlocks(report.agentBlocks);
