@@ -1,0 +1,11 @@
+{
+  "id": "effect-4-partition",
+  "title": "Counting partial failures of a batch job with Effect 4",
+  "kind": "post-cutoff",
+  "stratum": "type-invisible",
+  "packageDocumentsAnswer": "types",
+  "library": { "name": "effect", "version": "4.1.2", "released": "2026-11-02" },
+  "notes": "Effect 4.0.0 (2026-10-01) reversed the tuple Effect.partition returns: [passes, fails] now, [failures, successes] in Effect 3 (packages/effect/CHANGELOG.md:1761 at effect@4.1.2, 'now return successes before failures ... Swap the tuple when moving from the previous [failures, successes] order'; migration/v3-to-v4.md:10199). The change merged on 2026-09-29 (PR #8583), so even v4 betas from before the cutoff had the old order; unlike effect-4, this case is not weakened by the public beta. The v3 destructuring compiles unchanged against 4.1.2 when only counts are used and reports the counts swapped; on effect 3.21.4 (2026-06-18, the last release before the cutoff) it is correct. Asking for counts rather than the failed ids keeps the change invisible to the compiler, as it is in a real report. The installed types state the order without saying it changed: node_modules/effect/dist/Effect.d.ts:414.",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}

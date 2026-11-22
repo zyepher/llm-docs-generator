@@ -1,0 +1,11 @@
+{
+  "id": "zod-4-6-datetime",
+  "title": "Accepting minute-precision UTC timestamps with zod 4.6",
+  "kind": "post-cutoff",
+  "stratum": "type-invisible",
+  "packageDocumentsAnswer": "docs",
+  "library": { "name": "zod", "version": "4.6.7", "released": "2026-10-12" },
+  "notes": "zod 4.5.0 (2026-08-28) made the ISO datetime format require seconds: z.iso.datetime() and z.string().datetime() no longer accept minute-precision input such as 2026-12-01T09:30Z, which zod 4.4.3 (2026-05-04, the last release before the cutoff) accepted. packages/docs/content/blog/zod-4-5.mdx:300 at v4.6.7 ('z.iso.datetime() requires seconds') and packages/docs/content/api.mdx:464 state it and give the fix, a union with z.iso.datetime({ precision: -1 }). The from-memory schema compiles unchanged and rejects the web calendar's start times. A hand-written pattern is also a correct answer, since the task does not ask for zod's own datetime format (solution-regex). The installed package states it only in a shipped source comment, node_modules/zod/src/v4/core/regexes.ts:150, not in its .d.ts or README.",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

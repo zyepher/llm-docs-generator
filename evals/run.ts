@@ -735,7 +735,8 @@ async function copyPackInto(evalCase: EvalCase, dir: string): Promise<void> {
   await cp(join(prepared, 'llm-docs.json'), join(dir, 'llm-docs.json'));
 }
 
-const NOT_AGENT_OUTPUT = /^(node_modules|agent-docs)\//;
+/** Installed, provided, or generated (SvelteKit writes route types to .svelte-kit/ when Vite starts). */
+const NOT_AGENT_OUTPUT = /^(node_modules|agent-docs|\.svelte-kit)\//;
 
 const MAX_SAVED_FILE_BYTES = 256 * 1024;
 
