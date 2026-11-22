@@ -356,6 +356,28 @@ describe('llm-docs migrate', () => {
       message: expect.stringContaining('packs.vite version'),
     });
 
+    for (const root of ['../../../etc', '/etc', 'docs/../../x']) {
+      const escaping = await viteWith((manifest) => {
+        manifest.source.git = { ...manifest.source.git, sourceRootFromRepo: root };
+      });
+      expect(
+        refusal(
+          await migrateV2Pack(await writePack(`escape-${root.length}`, escaping), {
+            projectRoot: project,
+            id: 'vite',
+            version: '8.1.5',
+          })
+        ),
+        root
+      ).toMatchObject({
+        reason: 'invalid-recipe',
+        message: expect.stringContaining(
+          `source.git.sourceRootFromRepo in the v2 manifest (git path "${root}" must be a relative path inside the repository`
+        ),
+      });
+    }
+    await expect(readFile(join(project, 'llm-docs.json'), 'utf-8')).rejects.toThrow(/ENOENT/);
+
     const existing = {
       schemaVersion: 3,
       packs: { 'vite-8': { version: '8.0.0', sources: [{ type: 'local', path: 'docs' }] } },
