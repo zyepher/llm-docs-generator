@@ -465,6 +465,121 @@ describe('llm-docs v3 CLI', () => {
     }
   });
 
+  it('marks read-first pages with add, shows them in the index and the brief, and rejects a bad one', async () => {
+    const dependencies = { hono: '^4.13.16' };
+    const root = await makeProject({
+      'docs/index.md': '# Hono\n',
+      'docs/guide/migration.md': '# Migration\n\n## Breaking changes\n\nRenamed.\n',
+      'package.json': JSON.stringify({ name: 'app', version: '1.0.0', dependencies }),
+      'package-lock.json': npmLockfile('hono', '4.13.16'),
+    });
+    const cache = await makeProject({
+      'release-dates.json': JSON.stringify({
+        schemaVersion: 1,
+        entries: {
+          'npm:hono@4.13.16': {
+            publishedAt: '2026-09-02T10:00:00.000Z',
+            source: 'deps.dev',
+            fetchedAt: '2026-11-01T00:00:00.000Z',
+          },
+        },
+      }),
+    });
+    const env = {
+      LLM_DOCS_CACHE_DIR: cache,
+      HOME: await makeProject({}),
+      CLAUDECODE: '1',
+      CLAUDE_PROJECT_DIR: '',
+      ANTHROPIC_MODEL: '',
+      LLM_DOCS_MODEL_CUTOFF: '',
+    };
+    const addHono = (...extra: string[]) =>
+      runCli(
+        root,
+        ['add', 'hono', '--local', 'docs', '--dependency', 'npm:hono', '--title', 'Hono', ...extra],
+        env
+      );
+
+    const dryRun = await addHono(
+      '--read-first',
+      'pages/guide/migration.md#breaking-changes',
+      '--read-first',
+      'pages/guide/migrate.md',
+      '--dry-run'
+    );
+    expect(dryRun.code, dryRun.stderr).toBe(0);
+    expect(dryRun.stderr).toContain(
+      '  read first pages/guide/migration.md#breaking-changes: the file is taken; the heading #breaking-changes can only be checked once the pages are built, by the real add\n' +
+        '  read first pages/guide/migrate.md: not among the files this recipe takes (nearest: pages/guide/migration.md, pages/index.md); the build would fail until packs.hono.readFirst names one\n'
+    );
+    expect(await readdir(root)).not.toContain('llm-docs.json');
+
+    const add = await addHono(
+      '--read-first',
+      'pages/guide/migration.md',
+      '--read-first',
+      'pages/guide/migration.md#breaking-changes'
+    );
+    expect(add.code, add.stderr).toBe(0);
+    expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs.hono).toEqual({
+      title: 'Hono',
+      dependency: { ecosystem: 'npm', name: 'hono' },
+      sources: [{ type: 'local', path: 'docs' }],
+      readFirst: ['pages/guide/migration.md', 'pages/guide/migration.md#breaking-changes'],
+    });
+    expect(await readFile(join(root, 'agent-docs', 'hono', 'index.md'), 'utf-8')).toContain(
+      '## Read first\n\n' +
+        'Start with these pages before writing code against Hono 4.13.16. They were marked as the ones to read first for this version, usually because they describe what changed.\n\n' +
+        '- [Migration](pages/guide/migration.md)\n' +
+        '- [Migration: Breaking changes](pages/guide/migration.md#breaking-changes)\n\n' +
+        '## Pages\n'
+    );
+    // Strict checks fragments too; the only problem is the undeclared license of the fixture.
+    expect((await runCli(root, ['verify', '--strict'], env)).stderr).toBe(
+      'hono license fail: license unknown: no license file was detected; set "license" in the recipe once you know the terms\n' +
+        'verify: 1 problem found.\n'
+    );
+
+    expect(await runCli(root, ['status', '--model', 'claude-opus-5-5', '--brief'], env)).toEqual({
+      code: 0,
+      stdout:
+        'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:\n' +
+        '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/guide/migration.md` first, then `agent-docs/hono/index.md`\n',
+      stderr: '',
+    });
+    const json = await runCli(root, ['status', '--model', 'claude-opus-5-5', '--json'], env);
+    expect(JSON.parse(json.stdout).packs[0].readFirst).toEqual([
+      'agent-docs/hono/pages/guide/migration.md',
+      'agent-docs/hono/pages/guide/migration.md#breaking-changes',
+    ]);
+    expect(json.stderr).toContain('READ FIRST');
+
+    const config = await readFile(join(root, 'llm-docs.json'), 'utf-8');
+    const index = await readFile(join(root, 'agent-docs', 'hono', 'index.md'), 'utf-8');
+    const manifest = await readFile(join(root, 'agent-docs', 'hono', 'manifest.json'), 'utf-8');
+    const bad = await addHono('--replace', '--read-first', 'pages/guide/migration.md#breaking');
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain(
+      'hono: failed: packs.hono.readFirst[0] "pages/guide/migration.md#breaking" does not resolve: no heading on pages/guide/migration.md has the slug "breaking" (nearest: #breaking-changes, #migration). Edit packs.hono.readFirst in llm-docs.json.'
+    );
+    expect(bad.stderr).toContain(
+      'Left llm-docs.json as it was: the build rejected the recipe for packs.hono. Fix it and run the add again.'
+    );
+    expect(await readFile(join(root, 'llm-docs.json'), 'utf-8')).toBe(config);
+    expect(await readFile(join(root, 'agent-docs', 'hono', 'index.md'), 'utf-8')).toBe(index);
+    expect(await readFile(join(root, 'agent-docs', 'hono', 'manifest.json'), 'utf-8')).toBe(
+      manifest
+    );
+
+    const outside = await addHono('--replace', '--read-first', 'pages/../llm-docs.json');
+    expect(outside.code).toBe(2);
+    expect(outside.stderr.trim().split('\n')).toHaveLength(1);
+    expect(outside.stderr).toContain(
+      'pack readFirst[0]: must be a pack-relative POSIX path under pages/ or files/'
+    );
+    expect(await readFile(join(root, 'llm-docs.json'), 'utf-8')).toBe(config);
+  }, 120_000);
+
   it('reports status and runs the session-start hook from a seeded release-date cache', async () => {
     const dependencies = { hono: '^4.13.16', next: '^16.1.0', 'date-fns': '^2.30.0' };
     const root = await makeProject({
@@ -534,8 +649,8 @@ describe('llm-docs v3 CLI', () => {
       stdout: '',
       stderr: [
         'Packs:',
-        '  ID    VERSION  DEPENDENCY  LOCKFILE  STATE  RELEASED                   NEXT',
-        '  hono  4.13.16  npm:hono    4.13.16   ok     2026-09-02 (after cutoff)  -',
+        '  ID    VERSION  DEPENDENCY  LOCKFILE  STATE  RELEASED                   READ FIRST  NEXT',
+        '  hono  4.13.16  npm:hono    4.13.16   ok     2026-09-02 (after cutoff)  -           -',
         '',
         'Model training data cutoff: 2026-06 (Claude Opus 5.5).',
         '',

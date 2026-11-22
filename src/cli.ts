@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'node:fs';
+import { readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { Command, CommanderError } from 'commander';
 
@@ -56,7 +57,8 @@ import {
 } from './pack/verify.js';
 import { supportedSourceTypes } from './sources/acquire.js';
 import { CONVERTER_INSTALL_HINTS } from './sources/convert.js';
-import { errorMessage, isRecord } from './utils/guards.js';
+import { errorMessage, isFileNotFoundError, isRecord } from './utils/guards.js';
+import { writeTextFileSafely } from './utils/safe-write.js';
 
 const CLI_NAME = 'llm-docs';
 const EXIT_CHECK_FAILED = 1;
@@ -121,7 +123,7 @@ const COMMANDS = [
   {
     name: 'discover',
     summary:
-      'Print read-only evidence for writing a recipe as JSON: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments) or a package (--package: registry metadata, matching git tags, Markdown directories)',
+      'Print read-only evidence for writing a recipe as JSON: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments) or a package (--package: registry metadata, matching git tags, Markdown directories, change documents)',
     status: 'implemented',
   },
   {
@@ -229,6 +231,7 @@ interface AddOptions extends ProjectOptions {
   recipe?: string;
   convert?: string;
   convertInclude?: string[];
+  readFirst?: string[];
   replace?: boolean;
   dryRun?: boolean;
 }
@@ -500,6 +503,9 @@ function buildPackRecipe(options: AddOptions): PackConfig {
   }
   // Keep the source exactly as the user wrote it (not the parsed copy) so the config stays minimal.
   pack.sources = [source];
+  if (options.readFirst !== undefined) {
+    pack.readFirst = options.readFirst;
+  }
 
   const checkedPack = packConfigSchema.safeParse(pack);
 
@@ -816,6 +822,11 @@ function buildProgram(): Command {
         '--convert-include <glob...>',
         'Documents the converter takes (default for docling and markitdown: pdf, docx, pptx, epub, html)'
       )
+      .option(
+        '--read-first <target>',
+        'A page or passthrough file to read first, such as a migration guide: pages/<path> or files/<path>, optionally #<heading slug> (repeatable, at most 5)',
+        collect
+      )
       .option('--replace', 'Overwrite an existing pack with this id')
       .option('--dry-run', 'Print the recipe and the files it would take, writing nothing')
   ).action(async (id: string, options: AddOptions) => {
@@ -855,6 +866,20 @@ function buildProgram(): Command {
       for (const file of preview.files) {
         say(`  ${file.outputPath}  <-  ${file.source}`);
       }
+      for (const entry of preview.readFirst) {
+        if (!entry.found) {
+          const hints = entry.nearest.length === 0 ? '' : ` (nearest: ${entry.nearest.join(', ')})`;
+          say(
+            `  read first ${entry.target}: not among the files this recipe takes${hints}; the build would fail until packs.${id}.readFirst names one`
+          );
+        } else if (entry.fragment !== null) {
+          say(
+            `  read first ${entry.target}: the file is taken; the heading #${entry.fragment} can only be checked once the pages are built, by the real add`
+          );
+        } else {
+          say(`  read first ${entry.target}: the file is taken`);
+        }
+      }
       for (const warning of preview.warnings) {
         say(`  warning: ${warning}`);
       }
@@ -864,14 +889,38 @@ function buildProgram(): Command {
       return;
     }
 
+    const configPath = join(projectRoot, CONFIG_FILE_NAME);
+    const previousConfig = await readFile(configPath, 'utf-8').catch((error: unknown) => {
+      if (isFileNotFoundError(error)) {
+        return null;
+      }
+      throw error;
+    });
     await saveProjectConfig(projectRoot, id, pack);
     say(`Wrote packs.${id} to ${CONFIG_FILE_NAME}.`);
     const report = await syncPacks(projectRoot, [id], { command: `llm-docs add ${id}` });
 
+    // A recipe the build rejects as a config error (exit 2) is not kept: fixing it is a new add.
+    const rejected = report.packs.some(
+      (entry) => entry.status === 'failed' && entry.exitCode === EXIT_USAGE
+    );
+    if (rejected) {
+      if (previousConfig === null) {
+        await rm(configPath, { force: true });
+      } else {
+        await writeTextFileSafely(configPath, previousConfig);
+      }
+    }
+
     if (options.json === true) {
-      writeJson({ id, dryRun: false, recipe: pack, sync: report });
+      writeJson({ id, dryRun: false, recipe: pack, configKept: !rejected, sync: report });
     }
     printSyncReport(report);
+    if (rejected) {
+      say(
+        `Left ${CONFIG_FILE_NAME} as it was: the build rejected the recipe for packs.${id}. Fix it and run the add again.`
+      );
+    }
     process.exitCode = syncExitCode(report);
   });
 
