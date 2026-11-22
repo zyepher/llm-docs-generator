@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "node ./bin/llm-docs.mjs hook session-start",
+        "timeout": 5
+      }
+    ]
+  }
+}

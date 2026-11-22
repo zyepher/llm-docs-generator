@@ -741,15 +741,14 @@ context for the agent. Behavior:
 
 ### 7.3 Plugin (`plugin/`)
 
-One tree serving Claude Code and Cursor, and installable in Codex through its Claude-compatible
-marketplace support:
+One tree serving Claude Code and Cursor (Codex support is unverified; see below):
 
 ```
 plugin/
   .claude-plugin/plugin.json      name "llm-docs", version = package version
   .cursor-plugin/plugin.json      name "llm-docs", skills, agents, hooks: "./hooks/cursor-hooks.json"
-  hooks/hooks.json                Claude Code format: SessionStart -> node "${CLAUDE_PLUGIN_ROOT}/bin/llm-docs.mjs" hook session-start
-  hooks/cursor-hooks.json         Cursor format: {"version":1,"hooks":{"sessionStart":[{"command":"node \"${CURSOR_PLUGIN_ROOT}/bin/llm-docs.mjs\" hook session-start"}]}}
+  hooks/hooks.json                Claude Code format: SessionStart, matcher startup|resume|clear|compact|fork, timeout 5 -> node "${CLAUDE_PLUGIN_ROOT}/bin/llm-docs.mjs" hook session-start
+  hooks/cursor-hooks.json         Cursor format: {"version":1,"hooks":{"sessionStart":[{"command":"node ./bin/llm-docs.mjs hook session-start","timeout":5}]}}
   bin/llm-docs                    POSIX sh wrapper (exec node "$(dirname "$0")/llm-docs.mjs" "$@")
   bin/llm-docs.cmd                Windows wrapper
   bin/llm-docs.mjs                the whole CLI bundled into one file (generated, committed)
@@ -760,13 +759,23 @@ plugin/
   README.md
 ```
 
-Root `.claude-plugin/marketplace.json` and `.cursor-plugin/marketplace.json` list the plugin at
-`./plugin`. `npm run build:plugin` regenerates `bin/llm-docs.mjs` (tsup, all dependencies
-bundled, Node 22 target) and stamps plugin versions from `package.json`; `npm run
-check:plugin` fails CI when the committed bundle or versions are out of date. Skill folder
-names equal their frontmatter `name`. Skills are written harness-neutral (no tool names that
-exist in only one harness). If Node is not on PATH the hook command fails and both harnesses
-treat that as a non-blocking error; the README documents Node 22 as a requirement.
+Root `.claude-plugin/marketplace.json` lists the plugin at `./plugin` and
+`.cursor-plugin/marketplace.json` at `plugin` (Cursor's documented form: a bare relative
+directory). Cursor documents `${CURSOR_PLUGIN_ROOT}` as an environment variable and runs plugin
+hooks from the plugin's install directory, but documents no substitution in hook commands, so
+the Cursor hook uses a path relative to the plugin root, which also works in shells that do not
+expand `${...}`. In Claude Code the matcher lists every session source because each of them
+starts a context without the earlier note. `npm run build:plugin` regenerates
+`bin/llm-docs.mjs` (tsup, all dependencies bundled, Node 22 target, byte-identical across
+builds) and stamps plugin and marketplace versions from `package.json`; `npm run check:plugin`
+fails CI when the committed bundle or versions are out of date, when a skill folder name
+differs from its frontmatter `name`, or when the skills, the agent, or the plugin README name a
+command, flag, or verify check that `capabilities --json` does not list. Skills are written
+harness-neutral (no tool names that exist in only one harness; frontmatter limited to `name`,
+`description`, `license`, `metadata`). If Node is not on PATH the hook command fails and both
+harnesses treat that as a non-blocking error; the README documents Node 22 as a requirement.
+Codex installation is unverified: Codex documents `.codex-plugin/plugin.json` manifests and does
+not document reading `.claude-plugin` marketplaces, so the plugin README does not claim it.
 
 ## 8. Guides and citations
 
