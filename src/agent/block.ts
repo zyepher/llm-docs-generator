@@ -505,15 +505,25 @@ export function locateBlock(text: string): BlockLocation {
 /**
  * The file text with the block set to `body`: replaced in place when
  * present, appended after one blank line when absent (alone in an empty or
- * new file). The block's line endings follow the file's, and text outside
- * the markers stays byte-identical.
+ * new file). Text outside the markers stays byte-identical, bare `\r` line
+ * endings included. The block is written with `\r\n` when every line feed
+ * outside it is part of a `\r\n` (and there is one), else with `\n`; a file
+ * with no line feed outside the block is judged by the block itself. Judging
+ * by the text outside the block makes one sync a fixed point: the line
+ * breaks a sync adds before the block never change the judgement, even when
+ * the file's last line ends in a bare `\r` and the added `\n` pairs with it.
  */
 export function spliceBlock(text: string | null, body: string): string {
   const current = text ?? '';
-  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  const location = locateBlock(current);
+  const outside =
+    location.kind === 'present'
+      ? current.slice(0, location.start) + current.slice(location.end)
+      : current;
+  const sample = outside.includes('\n') ? outside : current;
+  const eol = sample.includes('\r\n') && !/(?:^|[^\r])\n/.test(sample) ? '\r\n' : '\n';
   const lines = body === '' ? [] : body.replace(/\n$/, '').split('\n');
   const block = `${[BLOCK_BEGIN, ...lines, BLOCK_END].join(eol)}${eol}`;
-  const location = locateBlock(current);
 
   switch (location.kind) {
     case 'present':

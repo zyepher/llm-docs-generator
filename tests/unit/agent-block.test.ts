@@ -458,6 +458,34 @@ describe('locating and splicing the block', () => {
     );
   });
 
+  it('reaches a fixed point in one sync for every line-ending style, keeping the bytes outside', async () => {
+    const styles: Record<string, string> = {
+      LF: '# A\nb\n',
+      CRLF: '# A\r\nb\r\n',
+      'bare CR': 'line1\rline2\r',
+      mixed: '# A\r\nb\nc\r\n',
+      'no trailing newline': '# A\nb',
+      'CRLF without a trailing newline': '# A\r\nb',
+      'a last line ending in a bare CR': '# A\nb\r',
+      'CRLF with a last line ending in a bare CR': '# A\r\nb\r',
+    };
+
+    for (const [style, text] of Object.entries(styles)) {
+      const root = await makeProject({ 'AGENTS.md': text });
+      expect(await syncBlocks(root), style).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+      expect((await read(root, 'AGENTS.md')).startsWith(text), style).toBe(true);
+      expect(await syncBlocks(root), style).toEqual([{ path: 'AGENTS.md', status: 'unchanged' }]);
+      expect(await checkAgentBlocks(await loadProjectConfig(root)), style).toEqual([]);
+    }
+  });
+
+  it('writes the block with the line feeds the file uses outside it', () => {
+    expect(spliceBlock('line1\rline2\r', '')).toBe(`line1\rline2\r\n\n${EMPTY_BLOCK}`);
+    expect(spliceBlock('# A\r\nb\nc\r\n', '')).toBe(`# A\r\nb\nc\r\n\n${EMPTY_BLOCK}`);
+    const crlfBlockOnly = `${BLOCK_BEGIN}\r\n${BLOCK_END}\r\n`;
+    expect(spliceBlock(crlfBlockOnly, '')).toBe(crlfBlockOnly);
+  });
+
   it('ignores markers inside fenced and indented code', () => {
     const documented = `# Docs\n\n\`\`\`md\n${BLOCK_BEGIN}\n${BLOCK_END}\n\`\`\`\n`;
     expect(locateBlock(documented)).toEqual({ kind: 'absent' });
