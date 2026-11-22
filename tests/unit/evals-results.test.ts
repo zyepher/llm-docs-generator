@@ -104,6 +104,6 @@ describe('results per stratum', () => {
     expect(summary).toContain('| Case | Stratum | Package documents it | baseline | pack |');
     expect(summary).toContain('| invisible-case | type-invisible | none | 0/2 (0%) | 1/2 (50%) |');
     expect(summary).toContain('| control-case | control | docs | 2/2 (100%) | 2/2 (100%) |');
-    expect(summary).not.toMatch(/—/);
+    expect(summary).not.toContain(String.fromCharCode(0x2014));
   });
 });
