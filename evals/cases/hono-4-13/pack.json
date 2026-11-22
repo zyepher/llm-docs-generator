@@ -3,6 +3,7 @@
   "pack": {
     "title": "Hono",
     "description": "Web framework built on Web Standards",
+    "dependency": { "ecosystem": "npm", "name": "hono" },
     "version": "4.13.16",
     "sources": [
       {
