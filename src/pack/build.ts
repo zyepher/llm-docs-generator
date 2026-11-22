@@ -11,7 +11,17 @@
 
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises';
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  rmdir,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 
@@ -20,6 +30,7 @@ import {
   ConfigError,
   onlyLockfileVersionMoved,
   loadProjectConfig,
+  PACK_ID_PATTERN,
   resolvePackRecipe,
   type DependencyVersionResolver,
   type LoadedProjectConfig,
@@ -283,36 +294,49 @@ async function manifestPackId(dir: string): Promise<string | undefined> {
   }
 }
 
+/** What recoverStaging put back, and what it had to leave in `.staging` because it holds guides. */
+interface StagingRecovery {
+  restored: { id: string; message: string }[];
+  kept: { id: string; error: string; exitCode: 2 | 3 }[];
+}
+
 /**
- * Remove leftover staging directories from interrupted syncs. A crash during
- * a swap can leave the old pack renamed aside or the guides moved into a
- * staging pack; both are put back before the leftovers are deleted, so an
- * interruption never loses a pack or its guides.
+ * Reconcile `.staging` with the packs, at the start of a sync (after a crash)
+ * and at its end (after a failed swap). An old pack set aside with no pack in
+ * its place is renamed back; guides/ in any leftover is moved into its pack
+ * when the pack has none. A leftover that holds guides is never deleted: when
+ * they cannot be put back it stays, and the end-of-run pass reports it as a
+ * failure of its pack. Everything else is removed.
  */
-async function recoverStaging(packsDir: string): Promise<string[]> {
+async function recoverStaging(packsDir: string): Promise<StagingRecovery> {
   await assertStagingIsRealDirectory(packsDir);
   const stagingRoot = join(packsDir, STAGING_DIR);
+  const recovery: StagingRecovery = { restored: [], kept: [] };
   let entries: string[];
 
   try {
     entries = await readdir(stagingRoot);
   } catch (error) {
     if (isFileNotFoundError(error)) {
-      return [];
+      return recovery;
     }
     throw error;
   }
 
-  const warnings: string[] = [];
   const parsed = entries.map((name) => {
     const old = /^(.+)-old-[0-9a-f]{12}$/.exec(name);
     const staged = /^(.+)-[0-9a-f]{12}$/.exec(name);
-    return { name, kind: old !== null ? 'old' : 'staging', id: old?.[1] ?? staged?.[1] };
+    const id = old?.[1] ?? staged?.[1];
+    return {
+      name,
+      kind: old !== null ? 'old' : 'staging',
+      id: id !== undefined && PACK_ID_PATTERN.test(id) ? id : undefined,
+    };
   });
   parsed.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'old' ? -1 : 1));
 
-  for (const entry of parsed) {
-    const dir = join(stagingRoot, entry.name);
+  for (const { name, kind, id } of parsed) {
+    const dir = join(stagingRoot, name);
 
     // Only a real directory can be a pack left by an interrupted sync. Anything else
     // (a symbolic link above all) is removed by name, never entered or moved into place.
@@ -320,35 +344,78 @@ async function recoverStaging(packsDir: string): Promise<string[]> {
       await rm(dir, { force: true });
       continue;
     }
+    if (id === undefined) {
+      await rm(dir, { recursive: true, force: true });
+      continue;
+    }
 
-    if (entry.id !== undefined && (await manifestPackId(dir)) === entry.id) {
-      const target = join(packsDir, entry.id);
+    const target = join(packsDir, id);
+    const guides = join(dir, 'guides');
 
-      if (entry.kind === 'old' && !(await exists(target))) {
+    try {
+      if (kind === 'old' && !(await exists(target)) && (await manifestPackId(dir)) === id) {
         await renameWithRetry(dir, target);
-        warnings.push(`Restored pack "${entry.id}" left aside by an interrupted sync.`);
+        recovery.restored.push({
+          id,
+          message: `Restored pack "${id}" left aside by an interrupted sync.`,
+        });
         continue;
       }
 
-      if (
-        entry.kind === 'staging' &&
-        (await isRealDirectory(join(dir, 'guides'))) &&
-        (await exists(target)) &&
-        !(await exists(join(target, 'guides')))
-      ) {
-        await renameWithRetry(join(dir, 'guides'), join(target, 'guides'));
-        warnings.push(`Restored the guides of pack "${entry.id}" from an interrupted sync.`);
+      if (await isRealDirectory(guides)) {
+        if (!(await exists(target))) {
+          recovery.kept.push({
+            id,
+            error: `the guides of pack "${id}" are kept at ${guides} because the pack is not built; run 'llm-docs sync ${id}' to build it and move them back, or move them into ${target}/ by hand.`,
+            exitCode: 3,
+          });
+          continue;
+        }
+        await assertRealPackDirectories(target);
+        if (await exists(join(target, 'guides'))) {
+          recovery.kept.push({
+            id,
+            error: `${guides} holds guides an interrupted sync left behind, and ${target}/guides already exists; merge the two by hand, delete ${dir}, then run 'llm-docs sync' again.`,
+            exitCode: 2,
+          });
+          continue;
+        }
+        await renameWithRetry(guides, join(target, 'guides'));
+        recovery.restored.push({
+          id,
+          message: `Restored the guides of pack "${id}" from an interrupted sync.`,
+        });
       }
-    }
 
-    await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
+    } catch (error) {
+      recovery.kept.push({
+        id,
+        error: `${dir}, left by a failed or interrupted sync, could not be put back (${errorMessage(error)}); it is kept, and the next 'llm-docs sync' tries again.`,
+        exitCode: error instanceof ConfigError ? 2 : 3,
+      });
+    }
   }
 
-  await rm(stagingRoot, { recursive: true, force: true });
-  return warnings;
+  try {
+    await rmdir(stagingRoot);
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error ? error.code : undefined;
+    if (code !== 'ENOTEMPTY' && code !== 'EEXIST' && !isFileNotFoundError(error)) {
+      throw error;
+    }
+  }
+  return recovery;
 }
 
-/** Swap a verified staging pack into place (spec 2.6). */
+/**
+ * Swap a verified staging pack into place (spec 2.6): set the old pack aside,
+ * rename the staging pack into place, then move guides/ from the old pack into
+ * it and remove the old pack. The guides only ever move between two pack
+ * directories, never into a staging pack, so a failure at any step leaves
+ * them in the old pack for recoverStaging to put back, and no cleanup path
+ * can delete them.
+ */
 async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): Promise<void> {
   const target = join(packsDir, id);
 
@@ -357,13 +424,13 @@ async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): 
     return;
   }
 
-  if (await exists(join(target, 'guides'))) {
-    await renameWithRetry(join(target, 'guides'), join(stagingDir, 'guides'));
-  }
-
   const oldDir = join(packsDir, STAGING_DIR, `${id}-old-${randomSuffix()}`);
   await renameWithRetry(target, oldDir);
   await renameWithRetry(stagingDir, target);
+
+  if (await isRealDirectory(join(oldDir, 'guides'))) {
+    await renameWithRetry(join(oldDir, 'guides'), join(target, 'guides'));
+  }
   await rm(oldDir, { recursive: true, force: true });
 }
 
@@ -1332,7 +1399,7 @@ export async function syncPacks(
     projectDependencies(loaded.projectRoot, { skipDirectories: [loaded.packsDirRelative] })
       .resolveVersion;
   const run = async (): Promise<SyncReport> => {
-    const recoveryWarnings = check ? [] : await recoverStaging(loaded.packsDir);
+    const before = check ? undefined : await recoverStaging(loaded.packsDir);
     const packs: PackSyncResult[] = [];
 
     for (const id of selected) {
@@ -1349,16 +1416,24 @@ export async function syncPacks(
       }
     }
 
-    if (recoveryWarnings.length > 0) {
-      packs[0]?.warnings.unshift(...recoveryWarnings);
-    }
-
     const orphans =
       ids === undefined || ids.length === 0 ? await handleOrphans(loaded, options) : [];
-    if (!check) {
-      // Every build has swapped in or cleaned up its own staging directory by now.
-      await assertStagingIsRealDirectory(loaded.packsDir);
-      await rm(join(loaded.packsDir, STAGING_DIR), { recursive: true, force: true });
+    // A swap that failed part-way left the old pack or its guides in .staging; put them back now.
+    const after = check ? undefined : await recoverStaging(loaded.packsDir);
+    const restored = [...(before?.restored ?? []), ...(after?.restored ?? [])];
+
+    for (const { id, message } of restored.reverse()) {
+      (packs.find((pack) => pack.id === id) ?? packs[0])?.warnings.unshift(message);
+    }
+    for (const { id, error, exitCode } of after?.kept ?? []) {
+      const pack = packs.find((result) => result.id === id);
+      if (pack === undefined) {
+        packs.push({ id, status: 'failed', error, exitCode, warnings: [] });
+      } else if (pack.status === 'failed') {
+        pack.error = pack.error === undefined ? error : `${pack.error}; ${error}`;
+      } else {
+        Object.assign(pack, { status: 'failed', error, exitCode });
+      }
     }
 
     const agentBlocks = await syncAgentBlocks(loaded, { check });
