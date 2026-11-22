@@ -1,6 +1,6 @@
 # llm-docs
 
-AI coding agents write code for the library versions they were trained on. Your project may use a newer release, or stay on an older one on purpose. `llm-docs` saves the docs for the exact versions you use inside your repository, and tells the agent at the start of each session which of them are newer than its training data and which page to read first.
+AI coding agents write code for the library and language versions they were trained on. Your project may use a newer release, or stay on an older one on purpose. `llm-docs` saves the docs for the exact versions you use inside your repository, and tells the agent at the start of each session which of them are newer than its training data and which page to read first.
 
 This README has two parts: [for humans](#for-humans) and [for agents](#for-agents).
 
@@ -14,9 +14,9 @@ A real case: Zod 4.5 (August 2026) made `z.iso.datetime()` require seconds. Code
 
 ### What it does
 
-- **Saves the right docs in your repo.** For each library you choose, it fetches the official docs for the exact version your project uses and stores them as plain Markdown files, one per page.
-- **Tells the agent what is new to it.** When a session starts, the agent gets a short note: which of your libraries were released after its training data ends, where their docs are, and which page to read first (usually the upgrade guide).
-- **Notices when the docs go stale.** If you upgrade a library, someone edits a saved page, or a link breaks, one check reports it. The check works offline, so it can run in CI.
+- **Saves the right docs in your repo.** For each library or language you choose, it fetches the official docs for the exact version your project uses and stores them as plain Markdown files, one per page.
+- **Tells the agent what is new to it.** When a session starts, the agent gets a short note: which of your libraries and languages were released after its training data ends, where their docs are, and which page to read first (usually the upgrade guide).
+- **Notices when the docs go stale.** If you upgrade a library or move to a new language version, someone edits a saved page, or a link breaks, one check reports it. The check works offline, so it can run in CI.
 - **Records where every page came from.** Each set of docs lists its source (a repository and commit, or a URL), a fingerprint of every file, and the license it found.
 
 ### Get started
@@ -36,6 +36,10 @@ Then ask your agent, in your own words:
 
 > Pin the docs for zod.
 
+It works the same for a language:
+
+> Pin the docs for the Swift version we use.
+
 The agent finds the official docs for your version, saves them under `agent-docs/`, and checks the result. You review and commit the new files. From then on:
 
 - `AGENTS.md` (or `CLAUDE.md`) holds a short list of the saved docs, kept up to date for you.
@@ -50,8 +54,9 @@ Results will be published here with the date, the model, the Claude Code version
 
 ### Good to know
 
-- **It only helps with libraries you pin.** For other new libraries, the session note lists them and suggests pinning their docs.
-- **Language versions can be pinned, but are not tracked yet.** You can save the docs for a language or toolchain version (Swift 6, a specific Swift 5.x, Dart, Go, Python) the same way as a library's, and the agent will see them listed. The tool does not yet read which language version your project uses, so it will not flag a new language version in the session note or notice when you upgrade. Libraries get both.
+- **It only helps with what you pin.** For other new libraries and languages, the session note lists them and suggests pinning their docs.
+- **Languages are tracked by feature release.** The tool reads the Go, Python, Rust, Swift, Dart, Flutter, or Node.js version from your project's own files, such as `.python-version`, `go.mod`, `.swift-version`, or `.nvmrc`. It follows 3.15 or 6.4, not each patch release, because patch releases do not change a language. It knows only what those files say: a project that states a minimum, such as "3.12 or newer", is tracked at that minimum.
+- **Not every language keeps docs for old versions.** Python, Node.js, and Swift publish their docs with each release. Go and Rust do so for the language itself, but keep some guides and release notes where they are not marked by version. Dart and Flutter publish docs for their current release only, so an older version of those cannot be pinned exactly.
 - **Saved docs are copies of someone else's work.** Check each library's license before you commit or share them. The tool records the license it finds and warns when it finds none.
 - **It fetches without logging in.** A private repository or a site behind a login cannot be fetched. Put those docs in a folder inside your project and pin that folder.
 - **Docs take space.** Expect a few hundred kilobytes to a few megabytes per library.
@@ -74,6 +79,8 @@ Follow the `add-docs` skill the plugin installs ([plugin/skills/add-docs/SKILL.m
 2. Run `llm-docs discover --package <ecosystem>:<name>@<version>`. It reports the real repository, the matching tag, the docs folders, and the files that describe what changed. Never fill these in from memory.
 3. Run `llm-docs add` with `--dependency`, so the docs follow the lockfile, and `--read-first` for the page that says what changed. Try it with `--dry-run` first.
 4. Run `llm-docs verify`. It must pass.
+
+A language or toolchain (Go, Python, Rust, Swift, Dart, Flutter, Node.js) has no registry to ask. Bind the pack with `--dependency toolchain:<name>`, so the docs follow the version the project's own files state, and follow the skill's "Languages and toolchains" section to find and confirm the docs repository.
 
 Run the tool as `llm-docs`. If that is not found, run `node <plugin folder>/bin/llm-docs.mjs`. Do not run `npx llm-docs`: the package is not on npm, so a package with that name is not this tool.
 
