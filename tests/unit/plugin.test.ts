@@ -7,7 +7,12 @@ import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import packageJson from '../../package.json';
-import { lintPlugin, parseCapabilities, type Capabilities } from '../../scripts/check-plugin.js';
+import {
+  lintPlugin,
+  parseCapabilities,
+  staleCutoffTableWarning,
+  type Capabilities,
+} from '../../scripts/check-plugin.js';
 import { runSessionStartHook } from '../../src/agent/hook.js';
 import { isRecord } from '../../src/utils/guards.js';
 
@@ -258,4 +263,16 @@ describe('the bin wrappers', () => {
       expect(stdout.trim()).toBe(packageJson.version);
     }
   );
+});
+
+describe('the model cutoff table review reminder', () => {
+  it('stays quiet for 90 days after the review and then names the date and the refresh steps', () => {
+    expect(staleCutoffTableWarning('2026-11-22', new Date('2027-02-20T12:00:00Z'))).toBeNull();
+    expect(staleCutoffTableWarning('2026-11-22', new Date('2027-02-21T12:00:00Z'))).toBe(
+      'data/model-cutoffs.json was last reviewed on 2026-11-22, 91 days ago; refresh it from the vendor pages listed in docs/design/v3-spec.md section 6.3 and set "reviewed" to the day you checked.'
+    );
+    expect(staleCutoffTableWarning('soon', new Date('2026-11-22T00:00:00Z'))).toMatch(
+      /last reviewed on soon; refresh it/
+    );
+  });
 });

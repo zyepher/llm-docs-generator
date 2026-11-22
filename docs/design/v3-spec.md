@@ -612,6 +612,25 @@ source URL is recorded per entry. Resolution order: `--cutoff`, config `model.cu
 `LLM_DOCS_MODEL_CUTOFF`, the table match for `--model` or the hook's model id. No match means
 no cutoff and the after-cutoff analysis is skipped (never guessed).
 
+When a vendor gives two dates for one model (Anthropic's reliable knowledge cutoff and training
+data cutoff; a Google model card's general date and an earlier date some domains stop at), the
+entry uses the earlier one. The table also maps each Claude Code alias (`opus`, `sonnet`,
+`haiku`, `fable`, `best`, `opusplan` as its execution model) to a model per provider, the
+provider being chosen by the `CLAUDE_CODE_USE_*` variables in Claude Code's order.
+
+Maintenance: refresh the table whenever a vendor ships a model, and at least every 90 days
+(`npm run check:plugin` prints a warning, never a failure, once `reviewed` is older). Read the
+cutoff from each source page as it stands that day, keep a more specific pattern before a less
+specific one, set `reviewed` to the day you checked, add a test case for each new id form, and
+run `npm run build:plugin` (the table ships inside the bundle). A model whose vendor publishes
+no cutoff stays out. Sources: Anthropic's models overview, per-model overview pages, and model
+deprecations (`platform.claude.com/docs/en/models/...`), and the Claude Code model
+configuration page with its provider pages (`code.claude.com/docs/en/model-config`); OpenAI's
+model pages (`developers.openai.com/api/docs/models/<id>`); Google's Agent Platform model pages
+and DeepMind model cards (`docs.cloud.google.com/gemini-enterprise-agent-platform/models`,
+`deepmind.google/models/model-cards`) and AI Studio model pages; xAI's model pages
+(`docs.x.ai/developers/models`).
+
 ### 6.4 `status`
 
 Joins the dependency scan, the packs, release dates, and the cutoff:

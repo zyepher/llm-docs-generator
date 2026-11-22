@@ -59,6 +59,11 @@ describe('normalizeModelId', () => {
     ['models/gemini-2.5-flash', 'gemini-2.5-flash'],
     ['Claude Opus 4.7 (fast mode)', 'claude opus 4.7'],
     ['opus[1m]', 'opus'],
+    ['global.anthropic.claude-fable-5-2', 'claude-fable-5-2'],
+    ['jp.anthropic.claude-opus-5-5', 'claude-opus-5-5'],
+    ['Claude-Fable-5-2[1m]', 'claude-fable-5-2'],
+    ['claude-haiku-4-5@20251001', 'claude-haiku-4-5'],
+    ['models/gemini-3.8-flash', 'gemini-3.8-flash'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeModelId(input)).toBe(expected);
   });
@@ -66,13 +71,25 @@ describe('normalizeModelId', () => {
 
 describe('resolveModelCutoff from the table', () => {
   it.each([
+    ['claude-fable-5-2', 'Claude Fable 5.2', '2026-06'],
+    ['global.anthropic.claude-fable-5-2', 'Claude Fable 5.2', '2026-06'],
+    ['claude-fable-5-2-fast', 'Claude Fable 5.2', '2026-06'],
+    ['claude-fable-5-2[1m]', 'Claude Fable 5.2', '2026-06'],
+    ['Claude Fable 5.2', 'Claude Fable 5.2', '2026-06'],
+    ['claude-mythos-5-2', 'Claude Mythos 5.2', '2026-06'],
+    ['claude-mythos-5-1', 'Claude Mythos 5.1', '2026-06'],
+    ['anthropic.claude-mythos-5', 'Claude Mythos 5', '2026-01'],
     ['claude-opus-5-5', 'Claude Opus 5.5', '2026-06'],
+    ['us.anthropic.claude-opus-5-5', 'Claude Opus 5.5', '2026-06'],
     ['claude-opus-5-5-fast', 'Claude Opus 5.5', '2026-06'],
     ['claude-opus-5', 'Claude Opus 5', '2026-05'],
     ['claude-fable-5-1', 'Claude Fable 5.1', '2026-06'],
     ['claude-fable-5', 'Claude Fable 5', '2026-01'],
     ['Claude Fable 5', 'Claude Fable 5', '2026-01'],
     ['claude-sonnet-5', 'Claude Sonnet 5', '2026-01'],
+    ['anthropic.claude-sonnet-5', 'Claude Sonnet 5', '2026-01'],
+    ['claude-opus-4-7-thinking-max', 'Claude Opus 4.7', '2026-01'],
+    ['claude-haiku-4-5@20251001', 'Claude Haiku 4.5', '2025-02'],
     ['claude-opus-4-8', 'Claude Opus 4.8', '2026-01'],
     ['Claude Opus 4.7 (fast mode)', 'Claude Opus 4.7', '2026-01'],
     ['claude-opus-4-6[1m]', 'Claude Opus 4.6', '2025-05'],
@@ -85,7 +102,16 @@ describe('resolveModelCutoff from the table', () => {
     ['claude-4-sonnet-1m', 'Claude Sonnet 4', '2025-01'],
     ['claude-opus-4-0', 'Claude Opus 4', '2025-01'],
     ['claude-3-7-sonnet-20250219', 'Claude Sonnet 3.7', '2024-10'],
+    ['gpt-6.2-sol', 'GPT-6.2 Sol', '2026-06'],
+    ['gpt-6.2-sol-xhigh', 'GPT-6.2 Sol', '2026-06'],
+    ['openai/gpt-6.2-astra', 'GPT-6.2 Astra', '2026-05'],
     ['gpt-5.6-sol', 'GPT-5.6 Sol', '2026-02'],
+    ['gpt-5.6-cyber', 'GPT-5.6 Cyber', '2026-02'],
+    ['gpt-5.5-pro-2026-04-23', 'GPT-5.5 pro', '2025-12'],
+    ['gpt-5-nano', 'GPT-5 nano', '2024-05'],
+    ['gpt-oss-120b', 'gpt-oss-120b', '2024-06'],
+    ['o3-pro-2025-06-10', 'o3-pro', '2024-06'],
+    ['gpt-4o-mini-2024-07-18', 'GPT-4o mini', '2023-10'],
     ['gpt-5.6', 'GPT-5.6 Sol', '2026-02'],
     ['gpt-5.2-high', 'GPT-5.2', '2025-08'],
     ['gpt-5-mini-2025-08-07', 'GPT-5 mini', '2024-05'],
@@ -96,6 +122,12 @@ describe('resolveModelCutoff from the table', () => {
     ['models/gemini-2.5-pro', 'Gemini 2.5 Pro', '2025-01'],
     ['gemini-2.5-flash-lite', 'Gemini 2.5 Flash-Lite', '2025-01'],
     ['gemini-2.0-flash-001', 'Gemini 2.0 Flash', '2024-08'],
+    ['gemini-4-carbon', 'Gemini 4 Carbon', '2026-03'],
+    ['google/gemini-4-argon', 'Gemini 4 Argon', '2026-03'],
+    ['models/gemini-3.8-flash', 'Gemini 3.8 Flash', '2025-01'],
+    ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash-Lite', '2025-01'],
+    ['grok-4.7', 'Grok 4.7', '2026-05'],
+    ['grok-4.7-fast', 'Grok 4.7', '2026-05'],
   ])('%s -> %s (%s)', (modelId, label, cutoff) => {
     expect(resolveModelCutoff({ modelId, env: {} })).toEqual({
       cutoff,
@@ -108,10 +140,12 @@ describe('resolveModelCutoff from the table', () => {
   it.each([
     'claude-opus-4-1-20250805',
     'claude-3-5-haiku-20241022',
-    'claude-mythos-5',
-    'gpt-5-nano',
-    'gpt-5.5-pro',
-    'gemini-3-pro-preview',
+    'claude-mythos-preview',
+    'gpt-6-cyber',
+    'gemini-3.1-pro',
+    'gemini-3-flash-preview',
+    'grok-4.6',
+    'composer-2.5',
     'llama-4-maverick',
     'default',
     '',
@@ -125,7 +159,8 @@ describe('Claude Code aliases', () => {
     expect(tableLabel('opus')).toBe('Claude Opus 5.5 (alias opus)');
     expect(tableLabel('sonnet[1m]')).toBe('Claude Sonnet 5.5 (alias sonnet)');
     expect(tableLabel('haiku')).toBe('Claude Haiku 5.5 (alias haiku)');
-    expect(tableLabel('fable')).toBe('Claude Fable 5.1 (alias fable)');
+    expect(tableLabel('fable')).toBe('Claude Fable 5.2 (alias fable)');
+    expect(tableLabel('best')).toBe('Claude Opus 5.5 (alias best)');
     expect(tableLabel('opusplan')).toBe('Claude Sonnet 5.5 (alias opusplan)');
   });
 
@@ -139,13 +174,43 @@ describe('Claude Code aliases', () => {
     expect(tableLabel('opus', { CLAUDE_CODE_USE_FOUNDRY: '1' })).toBe(
       'Claude Opus 4.6 (alias opus)'
     );
-    expect(tableLabel('fable', { CLAUDE_CODE_USE_BEDROCK: '1' })).toBeUndefined();
+    expect(tableLabel('fable', { CLAUDE_CODE_USE_BEDROCK: '1' })).toBe(
+      'Claude Fable 5.2 (alias fable)'
+    );
+    expect(tableLabel('best', { CLAUDE_CODE_USE_FOUNDRY: '1' })).toBe(
+      'Claude Opus 4.6 (alias best)'
+    );
+    expect(tableLabel('sonnet', { CLAUDE_CODE_USE_ANTHROPIC_AWS: '1' })).toBe(
+      'Claude Sonnet 4.6 (alias sonnet)'
+    );
+    expect(tableLabel('haiku', { CLAUDE_CODE_USE_ANTHROPIC_AWS: '1' })).toBe(
+      'Claude Haiku 4.5 (alias haiku)'
+    );
+    expect(
+      tableLabel('sonnet', {
+        CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: '1',
+        CLAUDE_CODE_USE_VERTEX: '1',
+      })
+    ).toBe('Claude Sonnet 5.5 (alias sonnet)');
+    expect(
+      tableLabel('sonnet', { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_ANTHROPIC_AWS: '1' })
+    ).toBe('Claude Sonnet 4.5 (alias sonnet)');
+    expect(tableLabel('opus', { CLAUDE_CODE_USE_MANTLE: '1' })).toBeUndefined();
+    expect(tableLabel('anthropic.claude-sonnet-5', { CLAUDE_CODE_USE_MANTLE: '1' })).toBe(
+      'Claude Sonnet 5'
+    );
     expect(tableLabel('opus', { CLAUDE_CODE_USE_BEDROCK: '0' })).toBe(
       'Claude Opus 5.5 (alias opus)'
     );
     expect(
       tableLabel('opus', { ANTHROPIC_DEFAULT_OPUS_MODEL: 'us.anthropic.claude-opus-4-8' })
     ).toBe('Claude Opus 4.8 (alias opus)');
+    expect(tableLabel('best', { ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5' })).toBe(
+      'Claude Opus 5 (alias best)'
+    );
+    expect(tableLabel('fable[1m]', { ANTHROPIC_DEFAULT_FABLE_MODEL: 'claude-fable-5-1' })).toBe(
+      'Claude Fable 5.1 (alias fable)'
+    );
   });
 });
 

@@ -24,6 +24,7 @@ import { promisify } from 'node:util';
 
 import { load } from 'js-yaml';
 
+import cutoffTable from '../data/model-cutoffs.json';
 import { errorMessage, isRecord } from '../src/utils/guards.js';
 import { REPO_ROOT, renderPlugin } from './build-plugin.js';
 
@@ -35,6 +36,7 @@ const AGENT_KEYS = new Set(['name', 'description']);
 /** The Agent Skills standard's cap; Claude Code's listing allows more. */
 const DESCRIPTION_MAX_CHARS = 1024;
 const PROGRAM_FLAGS = ['--help', '--version'];
+const CUTOFF_REVIEW_DAYS = 90;
 
 export interface Capabilities {
   commands: ReadonlyArray<{ name: string; flags: readonly string[] }>;
@@ -291,6 +293,24 @@ export async function lintPlugin(pluginDir: string, capabilities: Capabilities):
   return problems;
 }
 
+/**
+ * A reminder, never a failure, when the shipped model cutoff table has not
+ * been reviewed for CUTOFF_REVIEW_DAYS: vendors release models every few
+ * weeks, and a missing model only means the hook stays neutral for it.
+ */
+export function staleCutoffTableWarning(reviewed: string, today: Date): string | null {
+  const ageDays = Math.floor((today.getTime() - Date.parse(`${reviewed}T00:00:00Z`)) / 86_400_000);
+
+  if (!Number.isNaN(ageDays) && ageDays <= CUTOFF_REVIEW_DAYS) {
+    return null;
+  }
+  return (
+    `data/model-cutoffs.json was last reviewed on ${reviewed}` +
+    `${Number.isNaN(ageDays) ? '' : `, ${ageDays} days ago`}; refresh it from the vendor pages ` +
+    `listed in docs/design/v3-spec.md section 6.3 and set "reviewed" to the day you checked.`
+  );
+}
+
 /** Problems from `claude plugin validate --strict`, or null when the claude CLI is not installed. */
 async function claudeValidate(): Promise<string[] | null> {
   const problems: string[] = [];
@@ -344,6 +364,10 @@ async function main(): Promise<void> {
 
   for (const problem of problems) {
     process.stderr.write(`check:plugin: ${problem}\n`);
+  }
+  const stale = staleCutoffTableWarning(cutoffTable.reviewed, new Date());
+  if (stale !== null) {
+    process.stderr.write(`check:plugin: warning: ${stale}\n`);
   }
   process.stderr.write(
     `${validation === null ? 'check:plugin: the claude CLI is not installed; skipped claude plugin validate.\n' : ''}` +
