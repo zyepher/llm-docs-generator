@@ -207,6 +207,23 @@ describe('syncPacks: reStructuredText, HTML, and OpenAPI pages', () => {
     );
   });
 
+  it('rejects a tag page that collides with another page under full case folding', async () => {
+    const root = await makeProject(
+      { demo: PACK },
+      {
+        ...MIXED,
+        'docs/api/petstore.yaml': (MIXED['docs/api/petstore.yaml'] ?? '').replace(
+          '[pets]',
+          '[Straße]'
+        ),
+        'docs/api/petstore/strasse.md': '# Strasse\n',
+      }
+    );
+    expect((await syncPacks(root, undefined)).packs[0]?.error).toBe(
+      'docs/api/petstore.yaml and docs/api/petstore/strasse.md would both be written to pages/api/petstore/straße.md and pages/api/petstore/strasse.md, one path on a case- or normalization-insensitive file system; exclude one of them or give a source a different "mount".'
+    );
+  });
+
   it('carries what the RST and HTML parsers could not convert into the pack warnings', async () => {
     const root = await makeProject(
       { demo: { ...PACK, sources: [{ ...SOURCE, include: ['**/*.{rst,html}'] }] } },

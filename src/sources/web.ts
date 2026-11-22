@@ -17,6 +17,7 @@ import {
 } from '../config/project.js';
 import { extractMarkdownLinkUrls } from '../core/website-discovery.js';
 import type { ManifestFetch } from '../pack/manifest.js';
+import { pathCollisionKey } from '../utils/fs-path.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { compileGlobs, type AcquireContext, type AcquiredFile } from './acquire.js';
 import type { SourceAcquisition } from './acquire.js';
@@ -146,7 +147,7 @@ export function selectIndexedUrls(
     test(pathname) || test(pathname.replace(/^\/+/, ''));
   const prefix = normalizePrefix(source.stripPrefix);
   const seenUrls = new Set<string>();
-  const byPath = new Map<string, string>();
+  const byPath = new Map<string, { url: string; path: string }>();
   const planned: PlannedFetch[] = [];
 
   for (const raw of extractMarkdownLinkUrls(indexText)) {
@@ -176,15 +177,15 @@ export function selectIndexedUrls(
         ? pathname.slice(prefix.length) || '/'
         : pathname;
     const path = storedPathForPathname(stripped);
-    const previous = byPath.get(path);
+    const previous = byPath.get(pathCollisionKey(path));
 
     if (previous !== undefined) {
       throw new ConfigError(
-        `${redactUrl(previous)} and ${redactUrl(url.href)} in ${redactUrl(source.url)} would both be stored at "${path}"; narrow "include" or "exclude".`
+        `${redactUrl(previous.url)} and ${redactUrl(url.href)} in ${redactUrl(source.url)} would both be stored at "${previous.path === path ? path : `${previous.path}" and "${path}`}"${previous.path === path ? '' : ' (one path on a case- or normalization-insensitive file system)'}; narrow "include" or "exclude".`
       );
     }
 
-    byPath.set(path, url.href);
+    byPath.set(pathCollisionKey(path), { url: url.href, path });
     planned.push({ url: url.href, path });
   }
 

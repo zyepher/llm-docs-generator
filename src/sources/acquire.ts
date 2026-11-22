@@ -29,7 +29,7 @@ import {
 import { captureGitState } from '../core/git-state.js';
 import type { DetectedLicense } from '../pack/license.js';
 import type { ManifestFetch, ManifestOrigin } from '../pack/manifest.js';
-import { isSameOrDescendant } from '../utils/fs-path.js';
+import { isSameOrDescendant, pathCollisionKey } from '../utils/fs-path.js';
 import { errorMessage } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
 import { readRegularFile } from '../utils/safe-write.js';
@@ -415,20 +415,6 @@ function windowsSegmentProblem(segment: string): string | undefined {
 
 function describeSelected(selected: SelectedFile): string {
   return `${selected.sourceIndex}:${selected.file.path}`;
-}
-
-/**
- * The key under which two pack paths name one file on a case-insensitive,
- * normalization-insensitive file system. NFKC, then full case folding (upper
- * then lower case, which applies Unicode's full mappings such as ß to ss and
- * ſ to s, where toLowerCase alone does not), then NFKC again. It is
- * deliberately coarser than any one file system: APFS keeps İ and i apart and
- * so does this key, but NFKC also merges compatibility forms (ﬀ and ff) that
- * some file systems keep apart. Refusing a pair that would have been fine is
- * the safe side of that line.
- */
-function pathCollisionKey(path: string): string {
-  return path.normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC');
 }
 
 /**

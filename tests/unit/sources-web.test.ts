@@ -218,6 +218,16 @@ describe('selectIndexedUrls', () => {
         stripPrefix: '',
       })
     ).toThrow(/\/a and https:\/\/docs\.example\.com\/a\.md .* would both be stored at "a\.md"/);
+    expect(() =>
+      selectIndexedUrls('[a](/Guide.md)\n[b](/guide.md)\n', [base], {
+        url: base,
+        include: ['**'],
+        exclude: [],
+        stripPrefix: '',
+      })
+    ).toThrow(
+      'would both be stored at "Guide.md" and "guide.md" (one path on a case- or normalization-insensitive file system)'
+    );
   });
 });
 

@@ -991,6 +991,31 @@ describe('OpenAPI / Swagger parser', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  it('gives tags whose slugs differ only by case folding or Unicode form distinct category ids', async () => {
+    const dir = await createTempDir();
+    const sourcePath = join(dir, 'folded.json');
+    const operation = (tag: string) => ({
+      get: { tags: [tag], responses: { '200': { description: 'ok' } } },
+    });
+    await writeJson(sourcePath, {
+      openapi: '3.0.0',
+      info: { title: 'Folded', version: '1.0.0' },
+      paths: {
+        '/a': operation('Straße'),
+        '/b': operation('STRASSE'),
+        '/c': operation('\ufb00'),
+        '/d': operation('ff'),
+      },
+    });
+
+    const root = await parseOpenApiFile(sourcePath);
+    const categories = root.children
+      .filter((child) => child.type === DocNodeType.CATEGORY)
+      .map((child) => child.id);
+
+    expect(categories).toEqual(['ff', 'strasse', 'straße-2', '\ufb00-2']);
+  });
+
   it('parses a YAML anchor-doubling schema DAG in bounded time (regression: exponential blowup)', async () => {
     const dir = await createTempDir();
     const sourcePath = join(dir, 'anchor-dag.yaml');

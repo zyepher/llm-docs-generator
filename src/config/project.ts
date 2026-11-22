@@ -26,7 +26,11 @@ import {
   type DependencyRef,
   type DependencyVersionLookup,
 } from '../deps/lockfiles.js';
-import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
+import {
+  isSameOrDescendant,
+  pathCollisionKey,
+  resolveEffectiveOutputPath,
+} from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { canonicalJsonStringify } from '../utils/json.js';
@@ -1040,7 +1044,7 @@ function resolveUrlEntries(
   path: string,
   substitute: (value: string, path: string) => string
 ): { url: string; path: string }[] {
-  const seen = new Map<string, string>();
+  const seen = new Map<string, { url: string; path: string }>();
 
   return entries.map((entry, index) => {
     const where = `${path}.urls[${index}]`;
@@ -1064,15 +1068,15 @@ function resolveUrlEntries(
       );
     }
 
-    const previous = seen.get(storedPath);
+    const previous = seen.get(pathCollisionKey(storedPath));
 
     if (previous !== undefined) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${path}.urls: ${previous} and ${url} would both be stored at "${storedPath}"; give one an explicit "path".`
+        `${CONFIG_FILE_NAME} ${path}.urls: ${previous.url} and ${url} would both be stored at "${previous.path === storedPath ? storedPath : `${previous.path}" and "${storedPath}`}"${previous.path === storedPath ? '' : ' (one path on a case- or normalization-insensitive file system)'}; give one an explicit "path".`
       );
     }
 
-    seen.set(storedPath, url);
+    seen.set(pathCollisionKey(storedPath), { url, path: storedPath });
     return { url, path: storedPath };
   });
 }

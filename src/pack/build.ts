@@ -55,7 +55,11 @@ import {
   type DocumentConverter,
   type ManifestConverter,
 } from '../sources/convert.js';
-import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
+import {
+  isSameOrDescendant,
+  pathCollisionKey,
+  resolveEffectiveOutputPath,
+} from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
@@ -1000,8 +1004,8 @@ async function buildPack(
     let plainTextConversions = 0;
     const writtenPages: { path: string; text: string }[] = [];
     // Selection cannot see the tag pages of an OpenAPI document: check those
-    // paths against every other page here.
-    const pagePaths = new Map<string, string>();
+    // paths against every other page here, with selection's collision key.
+    const pagePaths = new Map<string, { path: string; label: string }>();
 
     for (const { page, ref: unit, text, syntax, extraSources } of units) {
       const source = recipe.sources[page.sourceIndex];
@@ -1009,14 +1013,14 @@ async function buildPack(
         throw new Error(`Page ${page.outputPath} has no source.`);
       }
 
-      const folded = unit.outputPath.normalize('NFC').toLowerCase();
-      const previous = pagePaths.get(folded);
+      const key = pathCollisionKey(unit.outputPath);
+      const previous = pagePaths.get(key);
       if (previous !== undefined) {
         throw new ConfigError(
-          `${previous} and ${page.file.sourceLabel} would both be written to ${unit.outputPath}; exclude one of them or give a source a different "mount".`
+          `${previous.label} and ${page.file.sourceLabel} would both be written to ${previous.path === unit.outputPath ? unit.outputPath : `${previous.path} and ${unit.outputPath}, one path on a case- or normalization-insensitive file system`}; exclude one of them or give a source a different "mount".`
         );
       }
-      pagePaths.set(folded, page.file.sourceLabel);
+      pagePaths.set(key, { path: unit.outputPath, label: page.file.sourceLabel });
 
       const result = convertMarkdownPage({
         text,
