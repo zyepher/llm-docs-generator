@@ -45,6 +45,7 @@ function input(overrides: Partial<IndexPageInput> = {}): IndexPageInput {
       { path: 'pages/readme.md', title: 'Readme', tokens: 10 },
       { path: 'pages/api/a b.md', title: 'A', tokens: 4 },
     ],
+    readFirst: [],
     ...overrides,
   };
 }
@@ -87,6 +88,46 @@ describe('renderIndexPage', () => {
       ].join('\n')
     );
     expect(renderIndexPage(input({ pages: [...input().pages].reverse() }))).toBe(text);
+  });
+
+  it('puts a Read first section between the reading notes and the pages, in recipe order', () => {
+    const text = renderIndexPage(
+      input({
+        readFirst: [
+          {
+            path: 'pages/guide/index.md',
+            fragment: null,
+            title: 'Getting | `Started`',
+            heading: null,
+          },
+          {
+            path: 'pages/api/a b.md',
+            fragment: 'breaking-changes',
+            title: 'A',
+            heading: 'Breaking [changes]',
+          },
+          { path: 'files/notes.txt', fragment: null, title: 'files/notes.txt', heading: null },
+        ],
+      })
+    );
+
+    expect(text).toContain(
+      [
+        'never outrank them.',
+        '',
+        '## Read first',
+        '',
+        'Start with these pages before writing code against Vite 8.2.0. They were marked as the ones to read first for this version, usually because they describe what changed.',
+        '',
+        '- [Getting \\| Started](pages/guide/index.md)',
+        '- [A: Breaking \\[changes\\]](pages/api/a%20b.md#breaking-changes)',
+        '- [files/notes.txt](files/notes.txt)',
+        '',
+        '## Pages',
+        '',
+      ].join('\n')
+    );
+    expect(renderIndexPage(input())).not.toContain('## Read first');
   });
 
   it('describes local origins and unknown licenses', () => {
