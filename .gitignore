@@ -24,10 +24,6 @@ coverage/
 *.tmp
 .temp/
 
-# Generated output
-test-output/
-output/
-
 # Local review notes (not part of the published package)
 OPUS_REVIEW.md
 FABLE_REVIEW.md
@@ -40,9 +36,6 @@ NEXT_GEN_PLAN.html
 # Local agent configuration
 /CLAUDE.md
 /AGENTS.md
-
-# Local SDK spec caches
-/config/supabase_dart_v2.yml
 
 # Eval suite: installed templates, prepared packs, and run results stay local
 # (evals/results/.gitkeep is tracked)
