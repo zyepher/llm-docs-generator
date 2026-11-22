@@ -430,6 +430,7 @@ function renderIndexFor(
     license: manifest.license,
     sources: manifest.sources,
     pages: outputs.filter((output) => output.kind === 'page'),
+    files: outputs.filter((output) => output.kind === 'passthrough'),
     readFirst,
   });
 }

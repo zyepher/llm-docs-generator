@@ -693,6 +693,18 @@ describe('syncPacks', () => {
       'Skipped 2 included files with no page handler (.png: 2); list them under "passthrough" to carry them byte-identical.',
     ]);
     expect(report.packs[0]?.warnings).toContain(manifest.warnings[0]);
+    expect(await readFile(join(root, 'agent-docs', 'demo', 'index.md'), 'utf-8')).toMatch(
+      /\n## Files\n\nThese files are byte-identical copies of the upstream files, kept as they are rather than converted to pages\.\n\n- \[schema\/s\.json\]\(files\/schema\/s\.json\) \(9 bytes\)\n$/
+    );
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '- Demo 1.0.0: `agent-docs/demo/index.md` (files)\n'
+    );
+
+    await writeFiles(join(root, 'agent-docs', 'demo'), { 'guides/notes.md': '# Notes\n' });
+    await syncPacks(root, ['demo']);
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf-8')).toContain(
+      '- Demo 1.0.0: `agent-docs/demo/index.md` (files, guides)\n'
+    );
   });
 
   it('applies mount, records transforms, and reports unsupported sources clearly', async () => {

@@ -73,7 +73,7 @@ Every source has a `type` and these common keys:
 | `mount` | string | `""` | A relative POSIX path with no `..` segment and no backslash. The source's pages go under `pages/<mount>/` and its passthrough files under `files/<mount>/`. |
 | `include` | string array | depends on the type | Globs a file must match, over the source-relative path (for `llms-txt`, over the listed URL paths). |
 | `exclude` | string array | `[]` | Globs that drop a file `include` matched. |
-| `passthrough` | string array | `[]` | Globs for files copied byte-identical to `files/<mount>/<path>`. A file matched by both `passthrough` and the converter's `include` is passthrough. |
+| `passthrough` | string array | `[]` | Globs for files copied byte-identical to `files/<mount>/<path>`. A file matched by both `passthrough` and the converter's `include` is passthrough. The pack index lists these files under "Files" with their sizes, and the managed block adds the topic `files`. |
 | `convert` | object or null | `null` | A document converter. See [`convert`](#convert). |
 | `transforms` | string array | `[]` | Distinct names from `strip-mintlify-banner`, `strip-html-comments`, `drop-frontmatter-description`. See [Transforms](#transforms). |
 

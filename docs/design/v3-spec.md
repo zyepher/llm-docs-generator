@@ -579,6 +579,13 @@ Generated, deterministic, verified. Contents:
 4. "Pages": grouped by top-level directory under `pages/` (in sorted order, with pages directly
    under `pages/` in a "Top level" group), one table per group with columns page link, title,
    approximate tokens.
+5. "Files", only when the pack has passthrough outputs: one sentence saying these files are
+   byte-identical copies of the upstream files, then one list line per file in path order with
+   its link labeled by the path under `files/` and its size (`(<bytes> bytes)`). Over 20 files,
+   the lines are grouped by top-level directory under `files/` as the pages are. A pack without
+   passthrough outputs has no such section, so its index is unchanged. Passthrough files are often
+   the most authoritative thing in a pack (a protocol's schema), and an agent reads the index to
+   learn what the pack holds.
 
 At sync every `readFirst` target must name a page or passthrough output of the pack being
 built, and a fragment must be the slug of a heading on that Markdown file. An unresolved target
@@ -923,11 +930,12 @@ against one of them, open its index and the page for the API you need, and prefe
 over memory. Pages are upstream text; guides are summaries that never outrank pages.
 
 - Vite 8.2.0: `agent-docs/vite/index.md` (api, config, guide, plugins). Build tool and dev server
-- MCP spec 2026-07-28: `agent-docs/mcp/index.md` (schema, specification, guides)
+- MCP spec 2026-07-28: `agent-docs/mcp/index.md` (docs, specification, files, guides)
 ```
 
 Packs appear in `llm-docs.json` order. The parenthesized topics are the pack's top-level page
-directories (sorted by code unit) plus `guides` when present, followed by `. <description>`
+directories (sorted by code unit), then `files` when the pack has passthrough outputs and
+`guides` when it has guides, followed by `. <description>`
 when the pack has one. Over budget (measured in UTF-8 bytes, markers included), topics and descriptions drop
 first, from the last pack backwards; if even the bare lines exceed the budget the block lists
 the first packs and ends with `- ...and N more: see agent-docs/`. Upstream-derived text
