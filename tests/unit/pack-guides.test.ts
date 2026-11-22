@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   mkdir,
   mkdtemp,
@@ -6,12 +7,15 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { canCreateSymlinks } from '../helpers/symlinks.js';
 
 import { ConfigError, loadProjectConfig } from '../../src/config/project.js';
 import { syncPacks } from '../../src/pack/build.js';
@@ -415,6 +419,52 @@ describe('stampGuides', () => {
       "No pack directory agent-docs/demo/; build the pack with 'llm-docs sync demo' first."
     );
   });
+});
+
+describe('stampGuides refuses links and special files', () => {
+  it.skipIf(!canCreateSymlinks)(
+    'refuses a guides/ or a pack directory that is a symbolic link, writing nothing through it',
+    async () => {
+      const root = await builtPack({});
+      const outside = await mkdtemp(join(await realpath(tmpdir()), 'llm-docs-outside-'));
+      tempDirs.push(outside);
+      await writeFiles(outside, { 'g.md': GUIDE_A });
+      await symlink(outside, join(packDir(root), 'guides'), 'dir');
+
+      await expect(stamp(root)).rejects.toThrow(
+        new ConfigError(
+          `${join(packDir(root), 'guides')} is a symbolic link. llm-docs only builds packs and keeps guides in real directories, and never writes through a link; replace ${join(packDir(root), 'guides')} with a real directory holding the files it points at, then run the command again.`
+        )
+      );
+      expect(await readdir(outside)).toEqual(['g.md']);
+
+      await rm(join(packDir(root), 'guides'));
+      await rename(packDir(root), join(outside, 'demo'));
+      await writeFiles(join(outside, 'demo', 'guides'), { 'g.md': GUIDE_A });
+      await symlink(join(outside, 'demo'), packDir(root), 'dir');
+
+      await expect(stamp(root)).rejects.toThrow(/agent-docs[\\/]demo is a symbolic link\./);
+      expect(await readdir(join(outside, 'demo', 'guides'))).toEqual(['g.md']);
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a citations lock that is a named pipe without blocking on it',
+    async () => {
+      // Windows has no named pipes in the file system namespace.
+      const root = await builtPack({ 'a.md': GUIDE_A });
+      execFileSync('mkfifo', [lockFile(root)]);
+
+      await expect(stamp(root)).rejects.toThrow(
+        /citations\.lock\.json is a named pipe, not a regular file, so llm-docs will not replace it\..*remove agent-docs\/demo\/guides\/citations\.lock\.json/
+      );
+      expect(await assessCitations(packDir(root))).toEqual({
+        kind: 'invalid-lock',
+        message: `${lockFile(root)} is a named pipe, not a regular file`,
+      });
+    },
+    5_000
+  );
 });
 
 describe('assessCitations', () => {

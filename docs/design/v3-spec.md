@@ -217,20 +217,31 @@ including `manifest.json`. Consequences:
 ### 2.6 Atomic builds and locking
 
 A pack is built in `<packsDir>/.staging/<id>-<random>/`, verified in place, and swapped in:
-`guides/` is moved from the old pack into the staging pack, the old pack is renamed to
-`<packsDir>/.staging/<id>-old-<random>`, the staging pack is renamed into place, and the old
-pack is removed. `EPERM`, `EBUSY`, and `EACCES` on rename (Windows holds files open) are
+the old pack is renamed to `<packsDir>/.staging/<id>-old-<random>`, the staging pack is renamed
+into place, `guides/` is moved from the old pack into the new one, and the old pack is removed.
+Guides only ever move between two pack directories, never into a staging pack, so no cleanup
+path can delete them. `EPERM`, `EBUSY`, and `EACCES` on rename (Windows holds files open) are
 retried with exponential backoff, at most 7 times. A crash never leaves a mix of old and new
-files: between the two renames no pack is at the target path, and the next sync recovers by
-moving the old pack (and any guides moved into the staging pack) back before it does anything
-else; other leftover staging directories are removed. `.staging/` and `.llm-docs.lock` are created with a
-`.gitignore` in `packsDir` that ignores them.
+files: between the two renames no pack is at the target path. Sync reconciles `.staging` before
+it builds (after a crash) and again before it writes the agent blocks (after a swap that failed
+part-way): an old pack with no pack in its place is renamed back, and `guides/` in a leftover is
+moved into its pack when the pack has none. A leftover that holds guides is never deleted; when
+its guides cannot be put back it stays, and the end-of-run pass fails its pack with the path.
+Other leftovers are removed. The pack directory and its `guides/` must be real directories: a
+symbolic link at either fails that pack with a config error naming it, in `sync`, `guides
+stamp`, and this recovery, and nothing is followed or deleted through it. `.staging/` and
+`.llm-docs.lock` are created with a `.gitignore` in `packsDir` that ignores them.
 
-`.llm-docs.lock` is created with exclusive create, holds `{pid, startedAt, command}`, and is
-considered stale when the pid is not alive, it is older than 1 hour, `pid` or `startedAt` is
-missing, or it cannot be read and is older than 5 seconds; a stale lock is replaced once. A
-second sync fails fast (exit 3) with a clear message instead of waiting. `sync --check` takes
-no lock.
+`.llm-docs.lock` is created with exclusive create, holds `{pid, startedAt, command, token}`
+(`token` is random per run, so a run can tell its own lock from another's), and is considered
+stale when the pid is not alive, `startedAt` is more than 1 hour from now in either direction,
+`pid` or `startedAt` is missing, or it cannot be read and is older than 5 seconds. A run takes
+over a stale lock by renaming it to a name only that run uses, and goes on only when what it
+moved is still the stale lock it judged; anything else is renamed back. It then checks that the
+lock on disk is the one it wrote before doing any work, and on release removes the lock only
+when it is still its own. A lock path that is not a regular file (a link, a directory, a named
+pipe) is a config error, never read through or deleted. A second sync fails fast (exit 3) with a
+clear message instead of waiting. `sync --check` takes no lock.
 
 ## 3. Manifest v3
 
@@ -839,15 +850,22 @@ spaces, Unicode format characters (zero-width and bidirectional controls) and ba
 removed, `@` is removed (Claude Code expands `@path` in `CLAUDE.md`), `<`/`>` become `&lt;` and
 `&gt;`, whitespace collapses to a single line, and the result is capped at 80 code points (77
 plus `...`). Blocks
-are inserted at the end of the file when absent, with one blank line before, in the file's own
-line endings. Text outside the markers is never touched: agent files are read as bytes and
+are inserted at the end of the file when absent, with one blank line before. The block uses
+`\r\n` when every line feed outside it is part of a `\r\n` (judged by the whole file when
+there is no line feed outside the block), else `\n`; bare `\r` line endings are kept as they
+are, and one sync reaches a fixed point for every style. Text outside the markers is never touched: agent files are read as bytes and
 decoded strictly, a byte order mark is kept, and a file that is not valid UTF-8 is an error
 (exit 2), never rewritten. Marker lines inside fenced or indented code are not markers. A file
 with mismatched markers is an error, never a guess; any `<!-- BEGIN llm-docs ... -->` line
 counts as a begin marker, and writing always uses the exact text above. A block that would land
 inside an unclosed code fence at the end of the file, a `block.maxBytes` too small for even the
-heading and the `...and N more` line, an agent file that is a directory, and a symlinked agent
-file whose target is missing are errors too. A problem with one agent file is reported for that
+heading and the `...and N more` line, an agent file that is not a regular file (a directory, a
+named pipe, a socket, or a device: it is never opened), a read-only agent file (the user's
+protection is kept), an agent file with other hard links (replacing it would leave them on the
+old text), a symlinked agent file whose target is missing, and an agent file whose real path is
+inside `.git` (or `.hg`, `.svn`), inside the packs directory, or is `llm-docs.json` or a
+lockfile are errors too: an agent file must be a regular file outside tool-owned and VCS-owned
+locations. A rewritten agent file keeps its permission bits. A problem with one agent file is reported for that
 file and never stops the others or loses the sync's pack report.
 
 ### 7.2 Session-start hook
@@ -928,7 +946,9 @@ context for the agent. Behavior:
   deadline for rendering and writing. The lockfile scan and the lookups stop when the deadline
   nears. A run that misses the deadline prints nothing.
 - Failure policy: always exit 0. Errors go to `<cache dir>/hook.log` (rotated at 1 MB, one
-  previous file kept), never to stdout or stderr. An invalid `llm-docs.json` is logged and the
+  previous file kept), never to stdout or stderr. The log is only appended to a regular file
+  with one link, and the warm-up marker only written in a real `hook-warm/` directory. An agent
+  file that is not a regular file counts as absent for the block-visibility check, and is logged. An invalid `llm-docs.json` is logged and the
   hook continues with the dependency analysis only. A malformed `LLM_DOCS_MODEL_CUTOFF` costs the
   override, not the note: it is logged, that source is ignored, and cutoff resolution goes on
   with the next source, ending at the neutral heading when none resolves. (A malformed
@@ -1090,8 +1110,11 @@ writes files.
   pruned packs, and the user cache directory (release dates, conversions, `hook.log`,
   `hook-warm/`). Paths are checked with `isSameOrDescendant`, after resolving symlinks for
   `packsDir`, local sources, and agent files; collisions and reserved names are errors; writes
-  are atomic (`writeTextFileSafely`, `writeJsonFileSafely`) and refuse to replace anything but a
-  regular file. `docs/security.md` lists every control with the file that implements it.
+  are atomic (`writeTextFileSafely`, `writeJsonFileSafely`), keep the replaced file's permission
+  bits, and refuse to replace anything but a regular, writable file with one link. Files read by
+  a fixed name (agent files, the packs lock, `citations.lock.json`, `<packsDir>/.gitignore`, the
+  hook's warm-up marker) are read only when they are regular files, so a named pipe can never
+  block a command. `docs/security.md` lists every control with the file that implements it.
 - Converters run with `execFile`, a timeout, and paths the engine chose; `command` converters
   are trusted local configuration, documented as such.
 - The hook never writes outside the cache directory and never prints secrets or tokens.

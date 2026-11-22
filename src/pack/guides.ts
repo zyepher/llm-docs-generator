@@ -12,7 +12,8 @@
  * function of the recipe and the upstream bytes (spec 2.5).
  */
 
-import { lstat, readFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { lstat } from 'node:fs/promises';
 import { join, posix, relative, resolve, sep } from 'node:path';
 
 import { z } from 'zod';
@@ -21,8 +22,8 @@ import { ConfigError, formatSchemaIssues, type LoadedProjectConfig } from '../co
 import { isSameOrDescendant, realpathIfExists } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
-import { canonicalJsonStringify, readJsonFile } from '../utils/json.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { canonicalJsonStringify } from '../utils/json.js';
+import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { withPacksLock } from './lock.js';
@@ -37,6 +38,37 @@ export const CITATIONS_LOCK_PATH = 'guides/citations.lock.json';
 // ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------
+
+/**
+ * The pack directory and its guides/ must each be a real directory, or absent.
+ * Sync builds into, moves, and deletes the pack directory and carries guides/
+ * across rebuilds, and stamp writes the citations lock into guides/, so a
+ * symbolic link at either would carry those writes to wherever it points.
+ * Refused, never followed and never repaired by deleting anything.
+ */
+export async function assertRealPackDirectories(packDir: string): Promise<void> {
+  for (const dir of [packDir, join(packDir, 'guides')]) {
+    let stats: Stats;
+
+    try {
+      stats = await lstat(dir);
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    if (stats.isSymbolicLink()) {
+      throw new ConfigError(
+        `${dir} is a symbolic link. llm-docs only builds packs and keeps guides in real directories, and never writes through a link; replace ${dir} with a real directory holding the files it points at, then run the command again.`
+      );
+    }
+    if (!stats.isDirectory()) {
+      throw new ConfigError(`${dir} is not a directory; move it away, then run the command again.`);
+    }
+  }
+}
 
 /** Pack-relative paths of the Markdown guides under `<packDir>/guides`, sorted. */
 export async function listGuides(packDir: string): Promise<string[]> {
@@ -237,9 +269,9 @@ function packFileReader(packDir: string): (path: string) => Promise<Buffer | und
       return undefined;
     }
     try {
-      return (await lstat(absolute)).isFile() ? await readFile(absolute) : undefined;
+      return await readRegularFile(absolute, { followLinks: false });
     } catch (error) {
-      if (isFileNotFoundError(error)) {
+      if (isFileNotFoundError(error) || error instanceof RefusedFileError) {
         return undefined;
       }
       throw error;
@@ -336,11 +368,24 @@ async function readCitationsLock(packDir: string): Promise<LockRead> {
   let raw: unknown;
 
   try {
-    raw = await readJsonFile(join(packDir, ...CITATIONS_LOCK_PATH.split('/')));
+    raw = JSON.parse(
+      (
+        await readRegularFile(join(packDir, ...CITATIONS_LOCK_PATH.split('/')), {
+          followLinks: false,
+        })
+      ).toString('utf-8')
+    );
   } catch (error) {
-    return isFileNotFoundError(error)
-      ? { kind: 'absent' }
-      : { kind: 'invalid', message: `not readable JSON (${errorMessage(error)})` };
+    if (isFileNotFoundError(error)) {
+      return { kind: 'absent' };
+    }
+    return {
+      kind: 'invalid',
+      message:
+        error instanceof RefusedFileError
+          ? error.message
+          : `not readable JSON (${errorMessage(error)})`,
+    };
   }
 
   const parsed = citationsLockSchema.safeParse(raw);
@@ -461,6 +506,7 @@ export async function stampGuides(
   const lockPath = `${packLabel}/${CITATIONS_LOCK_PATH}`;
 
   return withPacksLock(loaded.packsDir, `llm-docs guides stamp ${packId}`, async () => {
+    await assertRealPackDirectories(packDir);
     if ((await realpathIfExists(packDir)) === undefined) {
       throw new ConfigError(
         `No pack directory ${packLabel}/; build the pack with 'llm-docs sync ${packId}' first.`
@@ -565,15 +611,25 @@ export async function stampGuides(
     let current: string | undefined;
 
     try {
-      current = await readFile(target, 'utf-8');
+      current = (await readRegularFile(target, { followLinks: false })).toString('utf-8');
+      // Equal bytes skip the write; a refused file still reaches the write, which refuses it.
     } catch (error) {
-      if (!isFileNotFoundError(error)) {
+      if (!isFileNotFoundError(error) && !(error instanceof RefusedFileError)) {
         throw error;
       }
     }
 
     if (current !== text) {
-      await writeTextFileSafely(target, text);
+      try {
+        await writeTextFileSafely(target, text);
+      } catch (error) {
+        if (error instanceof RefusedFileError) {
+          throw new ConfigError(
+            `${error.message}, so llm-docs will not replace it. The citations lock is a regular file only 'llm-docs guides stamp' writes; remove ${lockPath} (or make it writable), then run 'llm-docs guides stamp ${packId}' again.`
+          );
+        }
+        throw error;
+      }
     }
 
     return {

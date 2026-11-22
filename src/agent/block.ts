@@ -10,17 +10,18 @@
  * `syncAgentBlocks`; the pure helpers are exported for tests.
  */
 
-import { lstat, mkdir, readFile, stat } from 'node:fs/promises';
-import { dirname, join, posix, resolve } from 'node:path';
+import { lstat, mkdir, stat } from 'node:fs/promises';
+import { basename, dirname, join, posix, relative, resolve, sep } from 'node:path';
 
 import { CONFIG_FILE_NAME, ConfigError, type LoadedProjectConfig } from '../config/project.js';
+import { lockfileEcosystem } from '../deps/lockfiles.js';
 import { listGuides } from '../pack/guides.js';
 import { readProjectPacks, type PackManifest, type ProjectPack } from '../pack/manifest.js';
 import { scanMarkdownRegions } from '../pack/markdown.js';
 import type { CheckFinding } from '../pack/verify.js';
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 
 export const BLOCK_BEGIN =
@@ -59,7 +60,11 @@ const MAX_ANCESTOR_DIRECTORIES = 64;
 
 /** An agent file as read from disk, never a thrown error, so one bad file cannot stop another. */
 type AgentFileRead =
-  { kind: 'absent' } | { kind: 'text'; text: string } | { kind: 'unreadable'; error: Error };
+  | { kind: 'absent' }
+  | { kind: 'text'; text: string }
+  | { kind: 'unreadable'; error: Error }
+  /** A directory, named pipe, socket, or device: never read, never written. */
+  | { kind: 'not-a-file'; error: ConfigError };
 
 // ignoreBOM keeps a byte order mark in the decoded text, so writing the text back keeps it.
 const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -67,25 +72,30 @@ const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 /**
  * Read an agent file as bytes and decode it strictly. A lenient decode would
  * turn invalid bytes into replacement characters, and writing that text back
- * would corrupt the user's file outside the markers.
+ * would corrupt the user's file outside the markers. Only a regular file is
+ * read: opening a named pipe would block every command until something
+ * writes to it.
  */
 async function readAgentFile(absolutePath: string, path: string): Promise<AgentFileRead> {
   let bytes: Buffer;
 
   try {
-    bytes = await readFile(absolutePath);
+    bytes = await readRegularFile(absolutePath, { followLinks: true });
   } catch (error) {
     if (isFileNotFoundError(error)) {
       return { kind: 'absent' };
     }
-    const isDirectory = error instanceof Error && 'code' in error && error.code === 'EISDIR';
+    if (error instanceof RefusedFileError && error.refusal.kind === 'not-regular') {
+      return {
+        kind: 'not-a-file',
+        error: new ConfigError(
+          `${path} is ${error.refusal.found}, not a regular file; replace it with a regular file, or set "agentFiles" in ${CONFIG_FILE_NAME} to the files the llm-docs block goes into.`
+        ),
+      };
+    }
     return {
       kind: 'unreadable',
-      error: isDirectory
-        ? new ConfigError(
-            `${path} is a directory, not a file; rename it, or set "agentFiles" in ${CONFIG_FILE_NAME} to the files the llm-docs block goes into.`
-          )
-        : new Error(`${path} could not be read: ${errorMessage(error)}`),
+      error: new Error(`${path} could not be read: ${errorMessage(error)}`),
     };
   }
 
@@ -160,8 +170,41 @@ type AgentFileTarget =
   | { path: string; kind: 'file'; absolutePath: string }
   | { path: string; kind: 'invalid'; error: Error };
 
-/** Where one agent file is written: its real path, which must stay inside the project. */
-async function resolveAgentFile(projectRoot: string, path: string): Promise<AgentFileTarget> {
+/** Directories a version control system owns; a write there can break the repository. */
+const VCS_DIRECTORIES: ReadonlySet<string> = new Set(['.git', '.hg', '.svn']);
+
+/** Which tool-owned or VCS-owned location a real path is in, if any. */
+async function ownedLocation(
+  loaded: LoadedProjectConfig,
+  realRoot: string,
+  absolutePath: string
+): Promise<string | undefined> {
+  const vcsDirectory = relative(realRoot, absolutePath)
+    .split(sep)
+    .find((segment) => VCS_DIRECTORIES.has(segment));
+  if (vcsDirectory !== undefined) {
+    return `inside ${vcsDirectory}`;
+  }
+  if (isSameOrDescendant(await resolveEffectiveOutputPath(loaded.packsDir), absolutePath)) {
+    return `inside the packs directory ${loaded.packsDirRelative}`;
+  }
+  if (absolutePath === (await resolveEffectiveOutputPath(join(realRoot, CONFIG_FILE_NAME)))) {
+    return `the project's ${CONFIG_FILE_NAME}`;
+  }
+  return lockfileEcosystem(basename(absolutePath)) === undefined ? undefined : 'a lockfile';
+}
+
+/**
+ * Where one agent file is written: its real path, which must stay inside the
+ * project and outside tool-owned and VCS-owned locations. A committed
+ * `AGENTS.md -> .git/config` passes the inside-the-project check, and
+ * appending the block there breaks the repository.
+ */
+async function resolveAgentFile(
+  loaded: LoadedProjectConfig,
+  path: string
+): Promise<AgentFileTarget> {
+  const projectRoot = loaded.projectRoot;
   const realRoot = await resolveEffectiveOutputPath(projectRoot);
   const absolutePath = await resolveEffectiveOutputPath(join(projectRoot, ...path.split('/')));
 
@@ -182,6 +225,17 @@ async function resolveAgentFile(projectRoot: string, path: string): Promise<Agen
       kind: 'invalid',
       error: new ConfigError(
         `${path} is a symbolic link to a file that does not exist; create the target, replace the link with a file, or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}.`
+      ),
+    };
+  }
+
+  const owner = await ownedLocation(loaded, realRoot, absolutePath);
+  if (owner !== undefined) {
+    return {
+      path,
+      kind: 'invalid',
+      error: new ConfigError(
+        `${path} resolves to ${absolutePath}, ${owner}. An agent file must be a regular file outside tool-owned and VCS-owned locations (.git, the packs directory, ${CONFIG_FILE_NAME}, lockfiles); replace ${path} with a file of its own, or leave it out of "agentFiles" in ${CONFIG_FILE_NAME}.`
       ),
     };
   }
@@ -217,7 +271,7 @@ async function resolveAgentFiles(loaded: LoadedProjectConfig): Promise<AgentFile
   const targets: AgentFileTarget[] = [];
 
   for (const path of candidates) {
-    const target = await resolveAgentFile(loaded.projectRoot, path).catch(
+    const target = await resolveAgentFile(loaded, path).catch(
       (error: unknown): AgentFileTarget => ({
         path,
         kind: 'invalid',
@@ -240,20 +294,30 @@ async function resolveAgentFiles(loaded: LoadedProjectConfig): Promise<AgentFile
  * Whether a file this harness reads holds a block (markers present, content
  * possibly stale), read from disk regardless of `agentFiles`. A harness that
  * could not be identified is assumed not to see it, so doubt resolves toward
- * injecting the pack list. Never throws.
+ * injecting the pack list. An agent file that is not a regular file counts as
+ * absent and is passed to `ignored`. Never throws.
  */
 export async function harnessSeesBlock(
   projectRoot: string,
-  harness: Harness | 'unknown'
+  harness: Harness | 'unknown',
+  ignored: (problem: string) => void = () => undefined
 ): Promise<boolean> {
   if (harness === 'unknown') {
     return false;
   }
 
+  const read = async (name: ProjectAgentFileName): Promise<AgentFileRead> => {
+    const file = await readAgentFile(join(projectRoot, name), name);
+    if (file.kind !== 'not-a-file') {
+      return file;
+    }
+    ignored(`${file.error.message} (treated as absent)`);
+    return { kind: 'absent' };
+  };
   const [agents, claude, claudeLocal, claudeFileAbove] = await Promise.all([
-    readAgentFile(join(projectRoot, 'AGENTS.md'), 'AGENTS.md'),
-    readAgentFile(join(projectRoot, 'CLAUDE.md'), 'CLAUDE.md'),
-    readAgentFile(join(projectRoot, 'CLAUDE.local.md'), 'CLAUDE.local.md'),
+    read('AGENTS.md'),
+    read('CLAUDE.md'),
+    read('CLAUDE.local.md'),
     isClaudeFileAbove(projectRoot),
   ]);
   const files = { 'AGENTS.md': agents, 'CLAUDE.md': claude, 'CLAUDE.local.md': claudeLocal };
@@ -486,15 +550,25 @@ export function locateBlock(text: string): BlockLocation {
 /**
  * The file text with the block set to `body`: replaced in place when
  * present, appended after one blank line when absent (alone in an empty or
- * new file). The block's line endings follow the file's, and text outside
- * the markers stays byte-identical.
+ * new file). Text outside the markers stays byte-identical, bare `\r` line
+ * endings included. The block is written with `\r\n` when every line feed
+ * outside it is part of a `\r\n` (and there is one), else with `\n`; a file
+ * with no line feed outside the block is judged by the block itself. Judging
+ * by the text outside the block makes one sync a fixed point: the line
+ * breaks a sync adds before the block never change the judgement, even when
+ * the file's last line ends in a bare `\r` and the added `\n` pairs with it.
  */
 export function spliceBlock(text: string | null, body: string): string {
   const current = text ?? '';
-  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  const location = locateBlock(current);
+  const outside =
+    location.kind === 'present'
+      ? current.slice(0, location.start) + current.slice(location.end)
+      : current;
+  const sample = outside.includes('\n') ? outside : current;
+  const eol = sample.includes('\r\n') && !/(?:^|[^\r])\n/.test(sample) ? '\r\n' : '\n';
   const lines = body === '' ? [] : body.replace(/\n$/, '').split('\n');
   const block = `${[BLOCK_BEGIN, ...lines, BLOCK_END].join(eol)}${eol}`;
-  const location = locateBlock(current);
 
   switch (location.kind) {
     case 'present':
@@ -573,7 +647,7 @@ export async function planAgentBlocks(loaded: LoadedProjectConfig): Promise<Agen
       }
 
       const file = await readAgentFile(target.absolutePath, target.path);
-      if (file.kind === 'unreadable') {
+      if (file.kind === 'unreadable' || file.kind === 'not-a-file') {
         return { path: target.path, kind: 'invalid', error: file.error };
       }
 
@@ -626,6 +700,30 @@ export interface AgentBlockOutcome {
 }
 
 /**
+ * Why an agent file is not rewritten. A read-only file is the user's
+ * protection, and is kept. A file with other hard links cannot be replaced
+ * atomically without leaving the other links on the old text, and writing it
+ * in place would give up atomicity, so it is refused too.
+ */
+function refusedAgentFile(path: string, error: RefusedFileError): ConfigError {
+  const leaveOut = `or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}`;
+  switch (error.refusal.kind) {
+    case 'read-only':
+      return new ConfigError(
+        `${path} is read-only, so llm-docs will not rewrite it; make it writable to let sync update the llm-docs block, ${leaveOut}.`
+      );
+    case 'hard-linked':
+      return new ConfigError(
+        `${path} has ${error.refusal.links} hard links, so replacing it would leave the other links without the llm-docs block; replace the links with a single file (a symbolic link to it is fine), or list the real file in "agentFiles" in ${CONFIG_FILE_NAME}.`
+      );
+    case 'not-regular':
+      return new ConfigError(
+        `${path} is ${error.refusal.found}, not a regular file; replace it with a regular file, ${leaveOut}.`
+      );
+  }
+}
+
+/**
  * Apply the plan: write each file whose text changes (atomically, through
  * its real path), or under `check` write nothing and report `would-*`. A
  * problem with one file is a `failed` outcome, never a throw, so the report
@@ -660,7 +758,14 @@ export async function syncAgentBlocks(
         await writeTextFileSafely(plan.absolutePath, plan.next);
         outcomes.push({ path: plan.path, status: plan.current === null ? 'created' : 'updated' });
       } catch (error) {
-        outcomes.push(failed(plan.path, new Error(errorMessage(error))));
+        outcomes.push(
+          failed(
+            plan.path,
+            error instanceof RefusedFileError
+              ? refusedAgentFile(plan.path, error)
+              : new Error(errorMessage(error))
+          )
+        );
       }
     }
   }

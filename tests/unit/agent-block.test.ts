@@ -1,4 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import {
+  chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -180,6 +183,121 @@ describe('agent file resolution', () => {
         /^CLAUDE\.md resolves through a symbolic link to .*, outside the project/
       );
       expect(await readFile(join(outside, 'CLAUDE.md'), 'utf-8')).toBe('# Elsewhere\n');
+    }
+  );
+});
+
+describe('agent files the tool refuses to write', () => {
+  it('keeps the permission bits of an agent file it rewrites', async () => {
+    const root = await makeProject({ 'AGENTS.md': '# Agents\n' });
+    await chmod(join(root, 'AGENTS.md'), 0o600);
+
+    expect(await syncBlocks(root)).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+    // Windows keeps only the read-only attribute, which a writable file does not have.
+    expect((await stat(join(root, 'AGENTS.md'))).mode & 0o777).toBe(
+      process.platform === 'win32' ? 0o666 : 0o600
+    );
+  });
+
+  it('refuses a read-only agent file, leaving it untouched', async () => {
+    const root = await makeProject({ 'AGENTS.md': '# Agents\n' });
+    await chmod(join(root, 'AGENTS.md'), 0o444);
+
+    expect(await syncBlocks(root)).toEqual([
+      {
+        path: 'AGENTS.md',
+        status: 'failed',
+        exitCode: 2,
+        error:
+          'AGENTS.md is read-only, so llm-docs will not rewrite it; make it writable to let sync update the llm-docs block, or leave AGENTS.md out of "agentFiles" in llm-docs.json.',
+      },
+    ]);
+    expect(await read(root, 'AGENTS.md')).toBe('# Agents\n');
+    await chmod(join(root, 'AGENTS.md'), 0o644);
+  });
+
+  it('refuses a hard-linked agent file, so the other link never misses the block', async () => {
+    const root = await makeProject({ 'shared.md': '# Shared\n' });
+    await link(join(root, 'shared.md'), join(root, 'AGENTS.md'));
+
+    expect(await syncBlocks(root)).toEqual([
+      {
+        path: 'AGENTS.md',
+        status: 'failed',
+        exitCode: 2,
+        error:
+          'AGENTS.md has 2 hard links, so replacing it would leave the other links without the llm-docs block; replace the links with a single file (a symbolic link to it is fine), or list the real file in "agentFiles" in llm-docs.json.',
+      },
+    ]);
+    expect((await stat(join(root, 'AGENTS.md'))).nlink).toBe(2);
+    expect(await read(root, 'shared.md')).toBe('# Shared\n');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a named pipe as an agent file without blocking, and a harness treats it as absent',
+    async () => {
+      // Windows has no named pipes in the file system namespace.
+      const root = await makeProject({});
+      execFileSync('mkfifo', [join(root, 'AGENTS.md')]);
+      const message =
+        'AGENTS.md is a named pipe, not a regular file; replace it with a regular file, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into.';
+
+      expect(await syncBlocks(root)).toEqual([
+        { path: 'AGENTS.md', status: 'failed', exitCode: 2, error: message },
+      ]);
+      expect(await checkAgentBlocks(await loadProjectConfig(root))).toEqual([
+        { status: 'fail', path: 'AGENTS.md', message },
+      ]);
+      const ignored: string[] = [];
+      expect(await harnessSeesBlock(root, 'codex', (problem) => ignored.push(problem))).toBe(false);
+      expect(ignored).toEqual([`${message} (treated as absent)`]);
+    },
+    5_000
+  );
+
+  it.skipIf(!canCreateSymlinks)(
+    'refuses an agent file that resolves into .git, the packs directory, llm-docs.json, or a lockfile',
+    async () => {
+      const root = await makeProject({
+        '.git/config': '[core]\n\tbare = false\n',
+        'agent-docs/notes.md': '# Notes\n',
+        'package-lock.json': '{}\n',
+      });
+      const config = await read(root, 'llm-docs.json');
+      const targets: Record<string, string> = {
+        'AGENTS.md': '.git/config',
+        'CLAUDE.md': 'agent-docs/notes.md',
+        'A.md': 'llm-docs.json',
+        'B.md': 'package-lock.json',
+      };
+      for (const [path, target] of Object.entries(targets)) {
+        await symlink(target, join(root, path));
+      }
+      await writeFile(
+        join(root, 'llm-docs.json'),
+        JSON.stringify({ ...JSON.parse(config), agentFiles: Object.keys(targets) })
+      );
+      const configText = await read(root, 'llm-docs.json');
+
+      const outcomes = await syncBlocks(root);
+
+      expect(outcomes.map(({ path, status, exitCode }) => ({ path, status, exitCode }))).toEqual(
+        Object.keys(targets).map((path) => ({ path, status: 'failed', exitCode: 2 }))
+      );
+      expect(outcomes.map((outcome) => outcome.error)).toEqual([
+        expect.stringMatching(
+          /^AGENTS\.md resolves to .*\.git[\\/]config, inside \.git\. An agent file must be a regular file outside tool-owned and VCS-owned locations/
+        ),
+        expect.stringMatching(
+          /^CLAUDE\.md resolves to .*, inside the packs directory agent-docs\./
+        ),
+        expect.stringMatching(/^A\.md resolves to .*, the project's llm-docs\.json\./),
+        expect.stringMatching(/^B\.md resolves to .*, a lockfile\./),
+      ]);
+      expect(await read(root, '.git/config')).toBe('[core]\n\tbare = false\n');
+      expect(await read(root, 'agent-docs/notes.md')).toBe('# Notes\n');
+      expect(await read(root, 'llm-docs.json')).toBe(configText);
+      expect(await read(root, 'package-lock.json')).toBe('{}\n');
     }
   );
 });
@@ -386,6 +504,34 @@ describe('locating and splicing the block', () => {
     );
   });
 
+  it('reaches a fixed point in one sync for every line-ending style, keeping the bytes outside', async () => {
+    const styles: Record<string, string> = {
+      LF: '# A\nb\n',
+      CRLF: '# A\r\nb\r\n',
+      'bare CR': 'line1\rline2\r',
+      mixed: '# A\r\nb\nc\r\n',
+      'no trailing newline': '# A\nb',
+      'CRLF without a trailing newline': '# A\r\nb',
+      'a last line ending in a bare CR': '# A\nb\r',
+      'CRLF with a last line ending in a bare CR': '# A\r\nb\r',
+    };
+
+    for (const [style, text] of Object.entries(styles)) {
+      const root = await makeProject({ 'AGENTS.md': text });
+      expect(await syncBlocks(root), style).toEqual([{ path: 'AGENTS.md', status: 'updated' }]);
+      expect((await read(root, 'AGENTS.md')).startsWith(text), style).toBe(true);
+      expect(await syncBlocks(root), style).toEqual([{ path: 'AGENTS.md', status: 'unchanged' }]);
+      expect(await checkAgentBlocks(await loadProjectConfig(root)), style).toEqual([]);
+    }
+  });
+
+  it('writes the block with the line feeds the file uses outside it', () => {
+    expect(spliceBlock('line1\rline2\r', '')).toBe(`line1\rline2\r\n\n${EMPTY_BLOCK}`);
+    expect(spliceBlock('# A\r\nb\nc\r\n', '')).toBe(`# A\r\nb\nc\r\n\n${EMPTY_BLOCK}`);
+    const crlfBlockOnly = `${BLOCK_BEGIN}\r\n${BLOCK_END}\r\n`;
+    expect(spliceBlock(crlfBlockOnly, '')).toBe(crlfBlockOnly);
+  });
+
   it('ignores markers inside fenced and indented code', () => {
     const documented = `# Docs\n\n\`\`\`md\n${BLOCK_BEGIN}\n${BLOCK_END}\n\`\`\`\n`;
     expect(locateBlock(documented)).toEqual({ kind: 'absent' });
@@ -482,7 +628,7 @@ describe('syncAgentBlocks', () => {
       { packs: { docs: { version: '1.0.0', sources: [{ type: 'local', path: 'docs' }] } } }
     );
     const message =
-      'AGENTS.md is a directory, not a file; rename it, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into.';
+      'AGENTS.md is a directory, not a regular file; replace it with a regular file, or set "agentFiles" in llm-docs.json to the files the llm-docs block goes into.';
 
     const report = await syncPacks(root, undefined);
     expect(report.packs).toMatchObject([{ id: 'docs', status: 'built' }]);

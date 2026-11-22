@@ -68,7 +68,7 @@ Use it to create a pack. The [`add-docs` skill](../plugin/skills/add-docs/SKILL.
 
 Brings packs in line with `llm-docs.json` and the lockfiles, then rewrites the managed blocks. With ids, it syncs only those packs.
 
-A pack is skipped when its manifest's `recipeHash` matches the config and its files match the manifest. It is rebuilt when the recipe changed, the lockfile moved its bound dependency to another version, a pack file was edited, added, or removed, it was never built, or (for `local` sources, which are read again on every sync) a source file changed. A rebuild happens in a staging directory and is swapped in only after it verifies. The previous pack stays in place when a build fails.
+A pack is skipped when its manifest's `recipeHash` matches the config and its files match the manifest. It is rebuilt when the recipe changed, the lockfile moved its bound dependency to another version, a pack file was edited, added, or removed, it was never built, or (for `local` sources, which are read again on every sync) a source file changed. A rebuild happens in a staging directory and is swapped in only after it verifies. The previous pack stays in place when a build fails, and `guides/` is never lost: a swap that fails part-way is put back before the sync ends, and one interrupted by a crash is put back by the next sync. Guides that cannot be put back stay in `.staging` and fail their pack until they can.
 
 Use it after editing `llm-docs.json`, after a dependency upgrade, and to repair an edited pack.
 
@@ -76,6 +76,8 @@ Use it after editing `llm-docs.json`, after a dependency upgrade, and to repair 
 - `--offline` fails any pack that needs a rebuild from a network source, instead of fetching. Local sources still build.
 - `--prune` deletes pack directories that are not in the config. It keeps a directory without a `manifest.json` and a pack that holds guides, and reports why. Orphans are handled only when no ids are given. Without `--prune`, orphans are reported.
 - After a rebuild, sync lists the guides whose cited sections changed or no longer resolve, with the `guides stamp` command to run once they are reviewed.
+- A rebuild that finds a git tag or branch resolving to another commit than the previous build recorded warns, naming the ref and both commits. For a tag this means upstream moved it, so the content may differ from what was reviewed.
+- A pack directory or `guides/` that is a symbolic link fails that pack (exit `2`): sync never builds into, moves, or deletes through a link.
 - Only one sync runs per project at a time. A second one fails at once (exit `3`). `--check` takes no lock.
 
 | Exit | When |
@@ -204,7 +206,7 @@ Records, in `guides/citations.lock.json`, the hash of the guide and of every sec
 
 Use it after writing or reviewing a guide, as the [`write-docs-guide` skill](../plugin/skills/write-docs-guide/SKILL.md) describes. From then on, `verify`, `sync`, and `refresh` report the guide when its cited text changes.
 
-Stamping writes nothing and exits `2` when a citation does not resolve, a link climbs out of the pack, a cited file differs from the manifest, a named guide does not exist, the pack has no guides, or the pack is not built.
+Stamping writes nothing and exits `2` when a citation does not resolve, a link climbs out of the pack, a cited file differs from the manifest, a named guide does not exist, the pack has no guides, the pack is not built, the pack directory or `guides/` is a symbolic link, or `citations.lock.json` is not a writable regular file.
 
 | Exit | When |
 |---|---|
@@ -272,8 +274,8 @@ The plugin's session-start hook. It reads the harness's payload on stdin, prints
 
 The block has a fixed heading and paragraph, then one line per built pack in `llm-docs.json` order: the escaped title and version, the path to its `index.md`, and in parentheses the pack's top-level page directories (sorted) plus `guides` when it has guides, followed by its description. Over `block.maxBytes`, topics and descriptions are dropped first, from the last pack backwards; if the bare lines still do not fit, the block lists the first packs and ends with a line saying how many more there are and where.
 
-- A missing block is appended at the end of the file after one blank line, in the file's own line endings.
-- Text outside the markers is never changed. A file that is not valid UTF-8, has mismatched markers, would put the block inside an unclosed code fence, or has a `block.maxBytes` too small for even one line is an error for that file only. A problem with one agent file never stops the others or the pack report.
+- A missing block is appended at the end of the file after one blank line. The block uses `\r\n` line endings when every line feed outside it is part of a `\r\n`, and `\n` otherwise, so one sync is enough for every line-ending style, bare `\r` included.
+- Text outside the markers is never changed, and a rewritten file keeps its permission bits. A file that is not valid UTF-8, has mismatched markers, would put the block inside an unclosed code fence, or has a `block.maxBytes` too small for even one line is an error for that file only. So is an agent file that is not a regular file (a directory or a named pipe), is read-only, has other hard links, or resolves into `.git`, the packs directory, `llm-docs.json`, or a lockfile. A problem with one agent file never stops the others or the pack report.
 
 ### Managed block outcomes
 
