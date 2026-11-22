@@ -30,6 +30,7 @@ Pin the version in the URL rather than fetching the latest release, so a new rel
 
 - Node.js 22.19 or newer on the PATH that your editor or terminal passes to hooks. If `node` is missing, the hook command fails, the host treats that as a non-blocking hook error, and the session starts without the note.
 - Git, for packs built from a git repository. The hook itself never runs git.
+- Public sources. llm-docs never sends credentials, so it cannot fetch a private repository or a page behind a login. Copy those docs into a folder in your project and pin that folder as a `local` source.
 - Claude Code or Cursor. Codex support is unverified; see the Codex section below.
 
 ## Install
@@ -57,7 +58,7 @@ Codex reads `AGENTS.md`, so the pack list that `llm-docs sync` writes there reac
 
 The note has up to four parts. The hook leaves out any part with nothing in it.
 
-1. Packs to fix because the lockfile moved, no lockfile resolves the pack's dependency, the lockfiles disagree on it, the recipe changed, or the pack was never built, each with the step that fixes it.
+1. Packs to fix, each with the step that fixes it: the lockfile moved, no lockfile resolves the pack's dependency, the lockfiles install it from another registry, the lockfiles disagree on it, the recipe changed, its local source files changed, its files no longer match its manifest, sync could not use it as it is (a symbolic link where the pack or its `guides/` should be, for example), or it was never built.
 2. Packs for library versions released after the model's training data cutoff, or within 90 days before it, newest first, with the path to each pack's index. The note tells the agent its memory of these libraries predates these versions and to read the pinned pages before writing code against them.
 3. Direct dependencies in the same window that have no pack, newest first, at most 8, with their release dates.
 4. The pack list itself, when the agent file this host reads has no managed block. This covers projects that keep `AGENTS.md` out of git, and Claude Code sessions where a `CLAUDE.md` hides `AGENTS.md`.
@@ -88,7 +89,7 @@ The cache directory is the first of these that applies:
 
 ## Privacy and network
 
-The hook lists your project's folders to find lockfiles, skipping `node_modules`, `.git`, build output, and the packs directory. It reads the lockfiles and the package manifests beside them, `llm-docs.json`, the packs' manifests, `AGENTS.md`, `CLAUDE.md`, and `CLAUDE.local.md` (to see whether the managed block reaches this host), and `.claude/settings.local.json`, `.claude/settings.json`, and `~/.claude/settings.json` (for the model id when the host does not send one). It writes only inside the cache directory: `release-dates.json`, `hook.log`, and one marker file per project in `hook-warm/`.
+The hook lists your project's folders to find lockfiles, skipping `node_modules`, `.git`, build output, and the packs directory. It reads the lockfiles and the package manifests beside them, `llm-docs.json`, the packs' manifests and files, the local folders packs are built from (to see whether a pack is out of date, for at most 400 ms), `AGENTS.md`, `CLAUDE.md`, and `CLAUDE.local.md` (to see whether the managed block reaches this host), and `.claude/settings.local.json`, `.claude/settings.json`, and `~/.claude/settings.json` (for the model id when the host does not send one). It ignores an `llm-docs.json` that another user owns, or that sits in a folder another user owns, and logs that it did. It writes files only inside the cache directory: `release-dates.json`, `hook.log`, and one marker file per project in `hook-warm/`. It never runs git.
 
 To compare release dates with the cutoff, it needs the publish date of each direct dependency's resolved version and of each pack's version. It looks in `release-dates.json` first. A found date never expires, because a version's publish date never changes. For dates the cache does not have, it may send HTTPS GET requests to these hosts:
 
@@ -101,6 +102,6 @@ To compare release dates with the cutoff, it needs the publish date of each dire
 | pub | `pub.dev` |
 | Swift packages on GitHub | `api.github.com`, with `GITHUB_TOKEN` when it is set |
 
-Each request URL names one dependency, and for most registries its version. Requests identify themselves as `llm-docs/<version>` in the User-Agent header. Nothing else from your project leaves your machine. The hook never sends file contents, file paths, project names, or code anywhere.
+A dependency that a lockfile installs from a registry other than the public one is never looked up: the public registry's date for a package of the same name says nothing about it. Each request URL names one dependency, and for most registries its version. Requests identify themselves as `llm-docs/<version>` in the User-Agent header. Nothing else from your project leaves your machine. The hook never sends file contents, file paths, project names, or code anywhere.
 
 All lookups in one session start share a budget of 1,000 ms. Dates still missing after that are fetched by a background `llm-docs status` process, started at most once per project every 6 hours, so the next session has them. That process makes the same requests to the same hosts, without the 1,000 ms budget.

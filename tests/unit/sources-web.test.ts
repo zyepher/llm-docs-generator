@@ -94,6 +94,30 @@ const common = {
 };
 
 describe('acquireUrls', () => {
+  it('records a redirect to a presigned URL redacted', async () => {
+    const signed = '/guide/api.md?X-Amz-Signature=abc&page=2';
+    const { origin } = await serveSite({
+      '/old': (_request, response) => {
+        response.writeHead(302, { location: signed });
+        response.end();
+      },
+      [signed]: '# API\n',
+    });
+    const result = await acquireUrls(
+      {
+        type: 'urls',
+        urls: [{ url: `${origin}/old`, path: 'api.md' }],
+        include: ['**'],
+        ...common,
+      },
+      await context()
+    );
+
+    expect(result.files[0]?.fetch?.finalUrl).toBe(
+      `${origin}/guide/api.md?X-Amz-Signature=***&page=2`
+    );
+  });
+
   it('fetches exactly the listed URLs with fetch metadata and redirects recorded', async () => {
     const { origin, requests } = await serveSite({
       '/guide/start': '# Start\n\nSee [other](/guide/other).\n',
@@ -218,6 +242,16 @@ describe('selectIndexedUrls', () => {
         stripPrefix: '',
       })
     ).toThrow(/\/a and https:\/\/docs\.example\.com\/a\.md .* would both be stored at "a\.md"/);
+    expect(() =>
+      selectIndexedUrls('[a](/Guide.md)\n[b](/guide.md)\n', [base], {
+        url: base,
+        include: ['**'],
+        exclude: [],
+        stripPrefix: '',
+      })
+    ).toThrow(
+      'would both be stored at "Guide.md" and "guide.md" (one path on a case- or normalization-insensitive file system)'
+    );
   });
 });
 

@@ -18,7 +18,12 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-import { findProjectRoot, loadProjectConfigIfPresent } from '../config/project.js';
+import {
+  CONFIG_FILE_NAME,
+  describeForeignOwner,
+  findProjectRoot,
+  loadProjectConfigIfPresent,
+} from '../config/project.js';
 import { defaultCacheDir, type RegistryEndpoints } from '../deps/registries.js';
 import { formatStatusBrief, gatherProjectStatus, type ProjectStatus } from '../deps/status.js';
 import { errorMessage, isNonEmptyString, isRecord } from '../utils/guards.js';
@@ -35,6 +40,12 @@ export const HOOK_LIMITS = {
   stdinMaxBytes: 1024 * 1024,
   /** Network time for release dates missing from the cache. */
   networkMs: 1_000,
+  /**
+   * Checking packs against their manifests and local sources (the offline
+   * half of `sync --check`). Measured warm, about 0.35 ms per page of a
+   * local pack, so this covers packs of roughly a thousand pages.
+   */
+  packCheckMs: 400,
   /** Kept at the end of the deadline for the block check, rendering, and the write. */
   reserveMs: 150,
   /**
@@ -359,20 +370,29 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
         io.cwd
     );
     const projectRoot = (await findProjectRoot(start)) ?? start;
-    const loaded = await loadProjectConfigIfPresent(projectRoot).catch(async (error: unknown) => {
+    let loaded = await loadProjectConfigIfPresent(projectRoot).catch(async (error: unknown) => {
       await log(`${errorMessage(error)} (continuing with the dependency analysis only)`);
       return null;
     });
+    if (loaded?.foreignOwner != null) {
+      await log(
+        `${describeForeignOwner(loaded.foreignOwner)}, so the session note ignores ${CONFIG_FILE_NAME} (continuing with the dependency analysis only)`
+      );
+      loaded = null;
+    }
 
     if (loaded?.config.hook?.enabled === false) {
       return;
     }
 
     const ignoredCutoffs: string[] = [];
+    const ignoredProblems: string[] = [];
     const status = await gatherProjectStatus(
       { projectRoot, loaded },
       {
         ignoreInvalidCutoff: (problem) => ignoredCutoffs.push(problem),
+        ignoredProblem: (problem) => ignoredProblems.push(problem),
+        packCheckBudgetMs: HOOK_LIMITS.packCheckMs,
         offline: false,
         budgetMs: HOOK_LIMITS.networkMs,
         maxLockfileBytes: HOOK_LIMITS.maxLockfileBytes,
@@ -385,8 +405,11 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
         now: io.now(),
       }
     );
-    for (const problem of ignoredCutoffs) {
-      await log(`${problem}; ignored it`);
+    for (const problem of [
+      ...ignoredCutoffs.map((problem) => `${problem}; ignored it`),
+      ...ignoredProblems,
+    ]) {
+      await log(problem);
     }
     const ignored: string[] = [];
     const text = await sessionBrief(status, harness, (problem) => ignored.push(problem));

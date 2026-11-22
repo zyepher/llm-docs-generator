@@ -1,11 +1,12 @@
 import type { Dirent } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { dirname, join, posix, resolve, sep } from 'node:path';
 
 import { FAILSAFE_SCHEMA } from 'js-yaml';
 import { parse as parseToml } from 'smol-toml';
 
 import { errorMessage, isFileNotFoundError, isNonEmptyString, isRecord } from '../utils/guards.js';
+import { readRegularFile, RefusedFileError } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { loadYaml } from '../utils/yaml.js';
@@ -79,6 +80,13 @@ export interface DependencyScan {
    * their ecosystem says so instead of answering from the others.
    */
   unread: UnreadLockfile[];
+  /**
+   * Dependencies a lockfile installs from a registry other than the
+   * ecosystem's public one. They are left out of `dependencies`, so no
+   * release date is ever looked up for them, but a lookup by name says
+   * `other-registry` instead of `missing`.
+   */
+  otherRegistry: { ecosystem: Ecosystem; name: string; lockfile: string }[];
   warnings: string[];
 }
 
@@ -100,6 +108,7 @@ export type DependencyVersionLookup =
   | { kind: 'found'; version: string; lockfiles: string[] }
   | { kind: 'conflict'; versions: { version: string; lockfile: string }[] }
   | { kind: 'missing'; searched: string[] }
+  | { kind: 'other-registry'; lockfiles: string[] }
   | { kind: 'unread'; lockfiles: UnreadLockfile[] };
 
 /** The lockfile size a command reads; a larger one is skipped with a warning. */
@@ -341,7 +350,7 @@ export async function scanDependencies(
         projectRoot: root,
         lockfile: entry.lockfile,
         directory: dirname(absolutePath),
-        text: await readFile(absolutePath, 'utf-8'),
+        text: (await readRegularFile(absolutePath, { followLinks: false })).toString('utf-8'),
       });
 
       for (const dependency of result.dependencies) {
@@ -362,7 +371,13 @@ export async function scanDependencies(
         skipped.push({ lockfile: entry.lockfile, ...skip });
       }
     } catch (error) {
-      warnings.push(`${entry.lockfile}: could not be parsed: ${errorMessage(error)}`);
+      if (error instanceof RefusedFileError) {
+        const reason = `could not be read: ${errorMessage(error)}`;
+        unread.push({ lockfile: entry.lockfile, ecosystems: ecosystem ? [ecosystem] : [], reason });
+        warnings.push(`${entry.lockfile}: ${reason}.`);
+      } else {
+        warnings.push(`${entry.lockfile}: could not be parsed: ${errorMessage(error)}`);
+      }
     }
   }
 
@@ -376,6 +391,12 @@ export async function scanDependencies(
     dependencies: mergeDependencies(dependencies),
     lockfiles: found.map((entry) => entry.lockfile),
     unread,
+    otherRegistry: skipped.flatMap(({ lockfile, name, reason }) => {
+      const ecosystem = lockfileEcosystem(lockfile);
+      return reason === 'alternate-registry' && ecosystem !== undefined
+        ? [{ ecosystem, name, lockfile }]
+        : [];
+    }),
     warnings: [...new Set(warnings)].sort(compareStringsByCodeUnit),
   };
 }
@@ -412,10 +433,12 @@ export function projectDependencies(
  * any exist, so a transitive copy at another version (common in npm trees)
  * does not turn a clear answer into a conflict. A lockfile of its ecosystem
  * that was never read makes the answer unknown (`unread`), since it could
- * resolve the dependency to anything.
+ * resolve the dependency to anything. A dependency the lockfiles install only
+ * from another registry is `other-registry`: found, but not the public
+ * package of that name.
  */
 export function findDependencyVersion(
-  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread'>,
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread' | 'otherRegistry'>,
   ref: DependencyRef
 ): DependencyVersionLookup {
   const unread = scan.unread.filter((entry) => entry.ecosystems.includes(ref.ecosystem));
@@ -437,6 +460,17 @@ export function findDependencyVersion(
   const relevant = direct.length > 0 && ref.ecosystem !== 'go' ? direct : matches;
 
   if (relevant.length === 0) {
+    const elsewhere = scan.otherRegistry.filter(
+      (entry) =>
+        entry.ecosystem === ref.ecosystem &&
+        normalizeDependencyName(entry.ecosystem, entry.name) === wanted
+    );
+    if (elsewhere.length > 0) {
+      return {
+        kind: 'other-registry',
+        lockfiles: uniqueSorted(elsewhere.map((entry) => entry.lockfile)),
+      };
+    }
     return {
       kind: 'missing',
       searched: scan.lockfiles.filter((lockfile) => lockfileEcosystem(lockfile) === ref.ecosystem),
@@ -561,9 +595,14 @@ export function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+/**
+ * A file beside a lockfile (a manifest, `.npmrc`, `go.work`), or undefined when
+ * absent. Only a regular file is read: a named pipe there would block the scan
+ * (and the session-start hook) forever, so it rejects with RefusedFileError.
+ */
 export async function readTextIfExists(path: string): Promise<string | undefined> {
   try {
-    return await readFile(path, 'utf-8');
+    return (await readRegularFile(path, { followLinks: true })).toString('utf-8');
   } catch (error) {
     if (isFileNotFoundError(error)) {
       return undefined;

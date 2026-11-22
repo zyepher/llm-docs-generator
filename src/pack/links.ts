@@ -44,7 +44,13 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
  * plain text: an agent reading the pack has no use for them, and a reader
  * that follows them could run code or open local files.
  */
-const LIVE_SCHEMES = new Set(['https', 'http', 'mailto']);
+export const LIVE_SCHEMES: ReadonlySet<string> = new Set(['https', 'http', 'mailto']);
+
+/** The live schemes in words: `https, http, or mailto`. */
+export function liveSchemeList(): string {
+  const schemes = [...LIVE_SCHEMES];
+  return `${schemes.slice(0, -1).join(', ')}, or ${schemes.at(-1) ?? ''}`;
+}
 
 const NAMED_CHARACTERS: Readonly<Record<string, string>> = {
   colon: ':',
@@ -61,7 +67,7 @@ const NAMED_CHARACTERS: Readonly<Record<string, string>> = {
  * line breaks dropped, leading spaces and control characters skipped, case
  * folded. A percent-encoded colon does not end a scheme (`a%3Ab` is a path).
  */
-function linkScheme(target: string): string | undefined {
+export function linkScheme(target: string): string | undefined {
   const decoded = target
     .replace(/&#(?:x([0-9a-f]+)|([0-9]+));?/gi, (_reference, hex?: string, decimal?: string) => {
       const code = hex === undefined ? Number(decimal) : Number.parseInt(hex, 16);

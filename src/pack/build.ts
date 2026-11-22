@@ -55,12 +55,17 @@ import {
   type DocumentConverter,
   type ManifestConverter,
 } from '../sources/convert.js';
-import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
+import {
+  isSameOrDescendant,
+  pathCollisionKey,
+  resolveEffectiveOutputPath,
+} from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
+import { redactUrl } from '../utils/url-credentials.js';
 import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type ReadFirstLink } from './index-page.js';
 import {
@@ -70,7 +75,7 @@ import {
   reviewGuidesForRefreshCheck,
   type GuideReviewReport,
 } from './guides.js';
-import { createPackLinkRewriter } from './links.js';
+import { createPackLinkRewriter, liveSchemeList } from './links.js';
 import { resolvePackLicense } from './license.js';
 import {
   MANIFEST_FILE_NAME,
@@ -690,6 +695,7 @@ async function acquireAll(
         packsDir: context.loaded.packsDir,
         workDir,
         maxFileBytes: recipe.limits.maxFileBytes,
+        ...(context.options.check === true ? { skipHostGitState: true } : {}),
       })
     );
   }
@@ -704,6 +710,52 @@ function withPlaceholders(
   return acquisitions.map(
     (acquisition) => acquisition ?? { origin: { type: 'urls' }, files: [], warnings: [] }
   );
+}
+
+/**
+ * The offline half of `sync --check`: acquire the sources that need no
+ * network and decide from them, the recipe, and the pack's own files.
+ */
+async function offlineStaleReason(
+  context: SyncContext,
+  resolved: ResolvedPack,
+  existing: ExistingPack,
+  workRoot: string
+): Promise<{
+  local: (SourceAcquisition | null)[];
+  stale: { reason: StaleReason; detail: string } | undefined;
+}> {
+  const local = await acquireAll(context, resolved.recipe, workRoot, (index) => {
+    const source = resolved.recipe.sources[index];
+    return source !== undefined && !sourceUsesNetwork(source);
+  });
+  return { local, stale: await staleReason(context, resolved, existing, local) };
+}
+
+/**
+ * What `sync --check` decides for one pack without the network: undefined
+ * when it would skip the pack, else why it would rebuild it. Throws what sync
+ * would fail with (a ConfigError for a pack it refuses to touch). `status`
+ * calls this, so the two never disagree on a reason that needs no network.
+ */
+export async function packOfflineStaleness(
+  loaded: LoadedProjectConfig,
+  resolved: ResolvedPack
+): Promise<{ reason: StaleReason; detail: string } | undefined> {
+  assertBuildable(resolved.recipe);
+  const existing = await inspectExistingPack(loaded.packsDir, resolved.id);
+  const context: SyncContext = {
+    loaded,
+    projectRoot: await resolveEffectiveOutputPath(loaded.projectRoot),
+    options: { check: true },
+  };
+  const workRoot = await mkdtemp(join(tmpdir(), 'llm-docs-'));
+
+  try {
+    return (await offlineStaleReason(context, resolved, existing, workRoot)).stale;
+  } finally {
+    await rm(workRoot, { recursive: true, force: true });
+  }
 }
 
 /** Why `existing` is out of date, or undefined when the pack can be skipped. */
@@ -747,11 +799,15 @@ async function staleReason(
     checks: ['outputs', 'unlisted-files'],
   });
 
-  const differing = integrity.flatMap((entry) =>
-    entry.findings.flatMap((finding) =>
-      finding.status === 'fail' && finding.path !== undefined ? [finding.path] : []
-    )
-  );
+  const differing = [
+    ...new Set(
+      integrity.flatMap((entry) =>
+        entry.findings.flatMap((finding) =>
+          finding.status === 'fail' && finding.path !== undefined ? [finding.path] : []
+        )
+      )
+    ),
+  ];
   if (integrity.some((entry) => entry.status === 'fail')) {
     const shown = differing.slice(0, 3).join(', ');
     const more = differing.length > 3 ? ` and ${differing.length - 3} more` : '';
@@ -775,11 +831,35 @@ async function staleReason(
   return undefined;
 }
 
+/** One warning for every HTML element a pack's pages lost before parsing, naming up to three pages. */
+function strippedElementsWarning(
+  stripped: readonly { page: string; counts: Record<string, number> }[]
+): string | undefined {
+  if (stripped.length === 0) {
+    return undefined;
+  }
+  const byTag = new Map<string, number>();
+  for (const { counts } of stripped) {
+    for (const [tag, count] of Object.entries(counts)) {
+      byTag.set(tag, (byTag.get(tag) ?? 0) + count);
+    }
+  }
+  const total = [...byTag.values()].reduce((sum, count) => sum + count, 0);
+  const tags = [...byTag]
+    .sort(([a], [b]) => compareStringsByCodeUnit(a, b))
+    .map(([tag, count]) => `${count} <${tag}>`)
+    .join(', ');
+  const pages = stripped.map((entry) => entry.page).sort(compareStringsByCodeUnit);
+  const named = pages.slice(0, 3).join(', ');
+  const more = pages.length > 3 ? `, and ${pages.length - 3} more` : '';
+  return `Stripped ${total} element${total === 1 ? '' : 's'} (${tags}) from ${pages.length} HTML page${pages.length === 1 ? '' : 's'} before parsing: ${named}${more}.`;
+}
+
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
 async function readUtf8(selected: SelectedFile): Promise<string> {
   try {
-    return utf8.decode(await readFile(selected.file.absolutePath));
+    return utf8.decode(await readRegularFile(selected.file.absolutePath, { followLinks: false }));
   } catch (error) {
     throw new ConfigError(
       `${selected.file.sourceLabel} is not valid UTF-8 text (${errorMessage(error)}); exclude it or carry it with "passthrough".`
@@ -821,7 +901,7 @@ function movedRefWarnings(
     if (before?.type !== 'git' || before.commit === origin.commit) {
       return [];
     }
-    const moved = `git ${origin.refKind} ${origin.ref} of ${origin.repo} now resolves to commit ${origin.commit}; the previous build recorded ${before.commit}`;
+    const moved = `git ${origin.refKind} ${origin.ref} of ${redactUrl(origin.repo)} now resolves to commit ${origin.commit}; the previous build recorded ${before.commit}`;
     return [
       origin.refKind === 'branch'
         ? `${moved}. A branch is expected to move, but the pack's content may differ from what was reviewed; pin a tag or a commit as the ref to build a fixed version.`
@@ -890,6 +970,7 @@ async function buildPack(
     extraSources: readonly string[];
   }[] = [];
   const renderWarnings: string[] = [];
+  const stripped: { page: string; counts: Record<string, number> }[] = [];
   for (const page of pages) {
     if (page.format === 'markdown' || page.format === 'mdx') {
       units.push({
@@ -904,6 +985,9 @@ async function buildPack(
 
     const rendered = await renderSourcePage(page);
     renderWarnings.push(...rendered.warnings);
+    if (Object.keys(rendered.strippedElements).length > 0) {
+      stripped.push({ page: page.file.sourceLabel, counts: rendered.strippedElements });
+    }
     for (const unit of rendered.pages) {
       const ref = fileRef(page);
       if (page.format === 'openapi') {
@@ -926,6 +1010,11 @@ async function buildPack(
     }
   }
 
+  const strippedWarning = strippedElementsWarning(stripped);
+  if (strippedWarning !== undefined) {
+    renderWarnings.push(strippedWarning);
+  }
+
   // Convert documents before links are rewritten, so links to a converted
   // document resolve to its page. One converter per source, resolved (tool on
   // PATH, version) on first use.
@@ -941,6 +1030,7 @@ async function buildPack(
     if (converter === undefined) {
       converter = await createDocumentConverter(spec, {
         projectRoot: context.projectRoot,
+        foreignOwner: context.loaded.foreignOwner,
         workDir: join(workRoot, `convert-${conversion.sourceIndex}`),
       });
       converters.set(conversion.sourceIndex, converter);
@@ -998,10 +1088,11 @@ async function buildPack(
     const unknownComponents = new Map<string, number>();
     const links: PackManifest['links'] = { rewritten: 0, external: 0, unresolved: [] };
     let plainTextConversions = 0;
+    let disallowedSchemes = 0;
     const writtenPages: { path: string; text: string }[] = [];
     // Selection cannot see the tag pages of an OpenAPI document: check those
-    // paths against every other page here.
-    const pagePaths = new Map<string, string>();
+    // paths against every other page here, with selection's collision key.
+    const pagePaths = new Map<string, { path: string; label: string }>();
 
     for (const { page, ref: unit, text, syntax, extraSources } of units) {
       const source = recipe.sources[page.sourceIndex];
@@ -1009,14 +1100,14 @@ async function buildPack(
         throw new Error(`Page ${page.outputPath} has no source.`);
       }
 
-      const folded = unit.outputPath.normalize('NFC').toLowerCase();
-      const previous = pagePaths.get(folded);
+      const key = pathCollisionKey(unit.outputPath);
+      const previous = pagePaths.get(key);
       if (previous !== undefined) {
         throw new ConfigError(
-          `${previous} and ${page.file.sourceLabel} would both be written to ${unit.outputPath}; exclude one of them or give a source a different "mount".`
+          `${previous.label} and ${page.file.sourceLabel} would both be written to ${previous.path === unit.outputPath ? unit.outputPath : `${previous.path} and ${unit.outputPath}, one path on a case- or normalization-insensitive file system`}; exclude one of them or give a source a different "mount".`
         );
       }
-      pagePaths.set(folded, page.file.sourceLabel);
+      pagePaths.set(key, { path: unit.outputPath, label: page.file.sourceLabel });
 
       const result = convertMarkdownPage({
         text,
@@ -1059,6 +1150,9 @@ async function buildPack(
         ...result.links.unresolved.map((entry) => ({ page: unit.outputPath, ...entry }))
       );
       plainTextConversions += result.links.plainTextConversions;
+      disallowedSchemes += result.links.unresolved.filter(
+        (entry) => entry.reason === 'disallowed-scheme'
+      ).length;
     }
 
     const sources = baseSources.map((entry) => {
@@ -1086,9 +1180,15 @@ async function buildPack(
         .join(', ');
       warnings.push(`Pages keep MDX components the tool does not unwrap: ${detail}.`);
     }
-    if (plainTextConversions > 0) {
+    const unresolvable = plainTextConversions - disallowedSchemes;
+    if (unresolvable > 0) {
       warnings.push(
-        `${plainTextConversions} unresolvable relative link${plainTextConversions === 1 ? ' was' : 's were'} converted to plain text.`
+        `${unresolvable} unresolvable relative link${unresolvable === 1 ? ' was' : 's were'} converted to plain text.`
+      );
+    }
+    if (disallowedSchemes > 0) {
+      warnings.push(
+        `${disallowedSchemes} link${disallowedSchemes === 1 ? '' : 's'} whose scheme is not ${liveSchemeList()} ${disallowedSchemes === 1 ? 'was' : 'were'} converted to plain text: pages never keep any other scheme live.`
       );
     }
 
@@ -1219,6 +1319,7 @@ async function refreshOnePack(
     if (spec !== undefined && spec !== null && spec.tool !== 'agent') {
       const converter = await createDocumentConverter(spec, {
         projectRoot: context.projectRoot,
+        foreignOwner: context.loaded.foreignOwner,
         workDir: join(workRoot, `convert-${index}`),
       });
       converters.set(index, { tool: converter.tool, version: converter.version });
@@ -1286,11 +1387,7 @@ async function syncOnePack(
       return await refreshOnePack(context, resolved, existing, workRoot);
     }
 
-    const local = await acquireAll(context, resolved.recipe, workRoot, (index) => {
-      const source = resolved.recipe.sources[index];
-      return source !== undefined && !sourceUsesNetwork(source);
-    });
-    const stale = await staleReason(context, resolved, existing, local);
+    const { local, stale } = await offlineStaleReason(context, resolved, existing, workRoot);
 
     if (stale === undefined) {
       return { id, status: 'unchanged', warnings: [] };

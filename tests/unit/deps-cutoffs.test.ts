@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -289,60 +290,85 @@ describe('resolveModelIdFromEnvironment', () => {
     return { projectRoot, homeDir };
   }
 
+  const refused: string[] = [];
+  const resolveModel = (input: Parameters<typeof resolveModelIdFromEnvironment>[0]) =>
+    resolveModelIdFromEnvironment(input, (problem) => refused.push(problem));
+
   it('uses the stated model, then ANTHROPIC_MODEL, then settings files in order, saying which', async () => {
     const dirs = await makeDirs();
     const settings = (root: string, name: string) => join(root, '.claude', name);
     await writeFile(settings(dirs.homeDir, 'settings.json'), '{"model": "fable"}');
 
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toEqual({
+    expect(await resolveModel({ ...dirs, env: {} })).toEqual({
       id: 'fable',
       source: 'settings',
       file: settings(dirs.homeDir, 'settings.json'),
     });
 
     await writeFile(settings(dirs.projectRoot, 'settings.json'), '{"model": "sonnet"}');
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toEqual({
+    expect(await resolveModel({ ...dirs, env: {} })).toEqual({
       id: 'sonnet',
       source: 'settings',
       file: settings(dirs.projectRoot, 'settings.json'),
     });
 
     await writeFile(settings(dirs.projectRoot, 'settings.local.json'), '{"model": "opus[1m]"}');
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })).toEqual({
+    expect(await resolveModel({ ...dirs, env: {} })).toEqual({
       id: 'opus[1m]',
       source: 'settings',
       file: settings(dirs.projectRoot, 'settings.local.json'),
     });
 
     const env = { ANTHROPIC_MODEL: 'claude-opus-4-8' };
-    expect(resolveModelIdFromEnvironment({ ...dirs, env })).toEqual({
+    expect(await resolveModel({ ...dirs, env })).toEqual({
       id: 'claude-opus-4-8',
       source: 'env',
     });
     expect(
-      resolveModelIdFromEnvironment({
+      await resolveModel({
         ...dirs,
         stated: { id: ' claude-fable-5-1 ', source: 'payload' },
         env,
       })
     ).toEqual({ id: 'claude-fable-5-1', source: 'payload' });
-    expect(
-      resolveModelIdFromEnvironment({ ...dirs, stated: { id: 'opus', source: 'flag' }, env })
-    ).toEqual({ id: 'opus', source: 'flag' });
+    expect(await resolveModel({ ...dirs, stated: { id: 'opus', source: 'flag' }, env })).toEqual({
+      id: 'opus',
+      source: 'flag',
+    });
   });
 
-  it('skips unreadable, invalid, and model-less settings silently', async () => {
+  it('skips invalid and model-less settings silently, and reports one that is not a regular file', async () => {
     const dirs = await makeDirs();
+    refused.length = 0;
     await writeFile(join(dirs.projectRoot, '.claude', 'settings.local.json'), '{ broken');
     await writeFile(join(dirs.projectRoot, '.claude', 'settings.json'), '{"permissions": {}}');
     await mkdir(join(dirs.homeDir, '.claude', 'settings.json'));
 
     expect(
-      resolveModelIdFromEnvironment({ ...dirs, stated: { id: '  ', source: 'payload' }, env: {} })
+      await resolveModel({ ...dirs, stated: { id: '  ', source: 'payload' }, env: {} })
     ).toBeUndefined();
+    expect(refused).toEqual([
+      `${join(dirs.homeDir, '.claude', 'settings.json')} is a directory, not a regular file; skipped it when looking for the model in Claude Code settings`,
+    ]);
 
     await rm(join(dirs.homeDir, '.claude', 'settings.json'), { recursive: true });
     await writeFile(join(dirs.homeDir, '.claude', 'settings.json'), '{"model": "haiku"}');
-    expect(resolveModelIdFromEnvironment({ ...dirs, env: {} })?.id).toBe('haiku');
+    expect((await resolveModel({ ...dirs, env: {} }))?.id).toBe('haiku');
+  });
+
+  it('skips a named pipe at a settings file instead of blocking on it', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const dirs = await makeDirs();
+    refused.length = 0;
+    const pipe = join(dirs.projectRoot, '.claude', 'settings.json');
+    execFileSync('mkfifo', [pipe]);
+    await writeFile(join(dirs.homeDir, '.claude', 'settings.json'), '{"model": "opus"}');
+
+    expect((await resolveModel({ ...dirs, env: {} }))?.id).toBe('opus');
+    expect(refused).toEqual([
+      `${pipe} is a named pipe, not a regular file; skipped it when looking for the model in Claude Code settings`,
+    ]);
   });
 });

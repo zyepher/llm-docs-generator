@@ -26,7 +26,8 @@ import {
   type GitRunner,
   type TreeEntry,
 } from '../sources/git.js';
-import { createHttpClient, redactUrl } from '../sources/http.js';
+import { createHttpClient } from '../sources/http.js';
+import { redactUrl } from '../utils/url-credentials.js';
 import { errorMessage } from '../utils/guards.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { isSkippedTraversalDirectory } from '../utils/traversal.js';
@@ -643,7 +644,7 @@ export async function discoverPackage(
         throw error;
       }
       result.tags = { status: 'unreachable', error: errorMessage(error) };
-      result.docDirectories = skipped(`${url} could not be reached; see tags.error.`);
+      result.docDirectories = skipped(`${redactUrl(url)} could not be reached; see tags.error.`);
       return result;
     }
 
@@ -698,7 +699,7 @@ export async function discoverPackage(
     const listed = first.form === 'suffix' ? undefined : first;
     if (listed === undefined) {
       result.docDirectories = skipped(
-        `Only tags that end in ${version} matched (${matches.map((match) => match.tag).join(', ')}); none has an exact form, so none was listed. Pass the one you mean to 'llm-docs add --git ${url} --ref <tag>'.`
+        `Only tags that end in ${version} matched (${matches.map((match) => match.tag).join(', ')}); none has an exact form, so none was listed. Pass the one you mean to 'llm-docs add --git ${redactUrl(url)} --ref <tag>'.`
       );
     } else {
       if (matches.length > 1) {

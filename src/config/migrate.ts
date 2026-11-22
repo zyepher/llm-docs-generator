@@ -32,7 +32,9 @@ import { projectDependencies } from '../deps/lockfiles.js';
 import { normalizeTakenPaths } from '../sources/git.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { readJsonFile } from '../utils/json.js';
+import { RefusedFileError } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
+import { redactUrl } from '../utils/url-credentials.js';
 
 const MANIFEST_FILE_NAME = 'manifest.json';
 const V2_SCHEMA_VERSION = '0.1.0';
@@ -182,7 +184,9 @@ async function readV2Manifest(
       'not-a-v2-pack',
       isFileNotFoundError(error)
         ? `No ${MANIFEST_FILE_NAME} in ${packDir}; pass the directory of a v2 pack (the one holding its ${MANIFEST_FILE_NAME}).`
-        : `${path} is not valid JSON (${errorMessage(error)}); pass the directory of a v2 pack.`
+        : error instanceof RefusedFileError
+          ? `${errorMessage(error)}; pass the directory of a v2 pack, whose ${MANIFEST_FILE_NAME} is a regular file.`
+          : `${path} is not valid JSON (${errorMessage(error)}); pass the directory of a v2 pack.`
     );
   }
 
@@ -248,7 +252,7 @@ function planMigration(manifest: V2Manifest, facts: MigrationFacts): MigrationPl
 
     if (!/^(?:https|file):/i.test(git.remoteUrl)) {
       warnings.push(
-        `the v2 remote ${git.remoteUrl} is fetched over https as ${repo}, because v3 git sources take https URLs only.`
+        `the v2 remote ${redactUrl(git.remoteUrl)} is fetched over https as ${redactUrl(repo)}, because v3 git sources take https URLs only.`
       );
     }
     if (git.dirty) {

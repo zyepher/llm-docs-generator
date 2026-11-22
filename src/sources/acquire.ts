@@ -11,7 +11,7 @@
  * src/sources/convert.ts runs the `convert` selections.
  */
 
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { posix, relative, resolve, sep } from 'node:path';
 
@@ -29,9 +29,10 @@ import {
 import { captureGitState } from '../core/git-state.js';
 import type { DetectedLicense } from '../pack/license.js';
 import type { ManifestFetch, ManifestOrigin } from '../pack/manifest.js';
-import { isSameOrDescendant } from '../utils/fs-path.js';
+import { isSameOrDescendant, pathCollisionKey } from '../utils/fs-path.js';
 import { errorMessage } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
+import { readRegularFile } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { acquireGit } from './git.js';
@@ -74,6 +75,13 @@ export interface AcquireContext {
   /** Empty temp directory for this source's downloads; the caller removes it. */
   workDir: string;
   maxFileBytes: number;
+  /**
+   * Leave a local origin's hostCommit and hostDirty null instead of running
+   * git in the project. A check that only decides staleness never reads them,
+   * and `status` and the session-start hook must not run git there: a
+   * repository's own config can make git run a program.
+   */
+  skipHostGitState?: boolean;
 }
 
 export interface SourceAcquirer<S extends ResolvedSource> {
@@ -215,7 +223,9 @@ function extensionOf(path: string): string {
 
 /** An OpenAPI or Swagger document, detected by its top-level `openapi:` / `swagger:` key. */
 async function isOpenApiDocument(file: AcquiredFile): Promise<boolean> {
-  const head = (await readFile(file.absolutePath, 'utf-8')).slice(0, 64 * 1024);
+  const head = (await readRegularFile(file.absolutePath, { followLinks: false }))
+    .toString('utf-8')
+    .slice(0, 64 * 1024);
   return /^\s*\{?\s*["']?(?:openapi|swagger)["']?\s*:/m.test(head);
 }
 
@@ -412,20 +422,6 @@ function windowsSegmentProblem(segment: string): string | undefined {
 
 function describeSelected(selected: SelectedFile): string {
   return `${selected.sourceIndex}:${selected.file.path}`;
-}
-
-/**
- * The key under which two pack paths name one file on a case-insensitive,
- * normalization-insensitive file system. NFKC, then full case folding (upper
- * then lower case, which applies Unicode's full mappings such as ß to ss and
- * ſ to s, where toLowerCase alone does not), then NFKC again. It is
- * deliberately coarser than any one file system: APFS keeps İ and i apart and
- * so does this key, but NFKC also merges compatibility forms (ﬀ and ff) that
- * some file systems keep apart. Refusing a pair that would have been fine is
- * the safe side of that line.
- */
-function pathCollisionKey(path: string): string {
-  return path.normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC');
 }
 
 /**
@@ -652,7 +648,7 @@ async function acquireLocal(
     );
   }
 
-  const gitState = await captureGitState(root);
+  const gitState = context.skipHostGitState === true ? undefined : await captureGitState(root);
 
   return {
     origin: {

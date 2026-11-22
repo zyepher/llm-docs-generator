@@ -466,28 +466,74 @@ describe('git over https', () => {
 });
 
 describe('fetched object checks', () => {
-  it('refuses a repository whose commit is malformed', async () => {
-    const repo = await makeRepo();
-    const tree = await git(repo.dir, 'rev-parse', 'v1^{tree}');
-    const malformed = join(await temp('llm-docs-malformed-'), 'commit');
-    await writeFile(
-      malformed,
-      `tree ${tree}\nauthor Test <test@example.com> 1700000000 +99999\ncommitter Test <test@example.com> 1700000000 +0000\n\nbad timezone\n`
-    );
-    const commit = await git(
-      repo.dir,
-      'hash-object',
-      '-t',
-      'commit',
-      '--literally',
-      '-w',
-      malformed
-    );
-    await git(repo.dir, 'tag', 'malformed', commit);
+  /** Write `bytes` as an object of `type`, past the checks git applies to objects it creates. */
+  async function writeLiteral(repo: Fixture, type: string, bytes: Buffer): Promise<string> {
+    const file = join(await temp('llm-docs-literal-'), type);
+    await writeFile(file, bytes);
+    return git(repo.dir, 'hash-object', '-t', type, '--literally', '-w', file);
+  }
 
-    await expect(acquireGit(gitSource(repo.url, 'malformed'), await context())).rejects.toThrow(
-      /badTimezone/
+  /** A tree of `[mode, name, object]` entries, in the order given. */
+  function treeBytes(entries: [string, string, string][]): Buffer {
+    return Buffer.concat(
+      entries.flatMap(([mode, name, object]) => [
+        Buffer.from(`${mode} ${name}\0`),
+        Buffer.from(object, 'hex'),
+      ])
     );
+  }
+
+  it('accepts the legacy date and file-mode defects git documents for old repositories', async () => {
+    const repo = await makeRepo();
+    const tree = await writeLiteral(
+      repo,
+      'tree',
+      treeBytes([
+        ['100644', 'LICENSE', await git(repo.dir, 'rev-parse', 'v1:LICENSE')],
+        ['040000', 'docs', await git(repo.dir, 'rev-parse', 'v1:docs')],
+      ])
+    );
+    const commit = await writeLiteral(
+      repo,
+      'commit',
+      Buffer.from(
+        `tree ${tree}\nauthor Test <test@example.com> 1700000000 +99999\ncommitter Test <test@example.com> 01700000000 +0000\n\nbad timezone, zero-padded date and file mode\n`
+      )
+    );
+    await git(repo.dir, 'tag', 'legacy', commit);
+
+    const acquired = await acquireGit(gitSource(repo.url, 'legacy'), await context());
+    expect(acquired.files.map((file) => file.path)).toEqual(['guide/start.md', 'index.md']);
+  });
+
+  it('refuses a repository whose tree carries an entry named .git', async () => {
+    const repo = await makeRepo();
+    const blob = await git(repo.dir, 'rev-parse', 'v1:README.md');
+    const docs = await git(repo.dir, 'rev-parse', 'v1:docs');
+    const tree = await writeLiteral(
+      repo,
+      'tree',
+      treeBytes([
+        ['100644', '.git', blob],
+        ['40000', 'docs', docs],
+      ])
+    );
+    await git(repo.dir, 'tag', 'hostile', await git(repo.dir, 'commit-tree', tree, '-m', 'x'));
+    // A legacy defect alongside it takes the fetch down its unfiltered retry, which refuses too.
+    const legacy = await writeLiteral(
+      repo,
+      'commit',
+      Buffer.from(
+        `tree ${tree}\nauthor Test <test@example.com> 1700000000 +99999\ncommitter Test <test@example.com> 1700000000 +0000\n\nhostile\n`
+      )
+    );
+    await git(repo.dir, 'tag', 'hostile-legacy', legacy);
+
+    for (const ref of ['hostile', 'hostile-legacy']) {
+      await expect(acquireGit(gitSource(repo.url, ref), await context())).rejects.toThrow(
+        /hasDotgit/
+      );
+    }
   });
 });
 

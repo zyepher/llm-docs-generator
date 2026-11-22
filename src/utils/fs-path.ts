@@ -76,3 +76,17 @@ export async function resolveEffectiveOutputPath(outputDir: string): Promise<str
     currentPath = parentPath;
   }
 }
+
+/**
+ * The key under which two pack paths name one file on a case-insensitive,
+ * normalization-insensitive file system. NFKC, then full case folding (upper
+ * then lower case, which applies Unicode's full mappings such as ß to ss and
+ * ſ to s, where toLowerCase alone does not), then NFKC again. It is
+ * deliberately coarser than any one file system: APFS keeps İ and i apart and
+ * so does this key, but NFKC also merges compatibility forms (ﬀ and ff) that
+ * some file systems keep apart. Refusing a pair that would have been fine is
+ * the safe side of that line.
+ */
+export function pathCollisionKey(path: string): string {
+  return path.normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC');
+}

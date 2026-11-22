@@ -9,7 +9,7 @@
  * an unknown key is an error, so a typo can never silently disable behavior.
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 
 import { applyEdits, modify } from 'jsonc-parser';
@@ -26,11 +26,16 @@ import {
   type DependencyRef,
   type DependencyVersionLookup,
 } from '../deps/lockfiles.js';
-import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
+import {
+  isSameOrDescendant,
+  pathCollisionKey,
+  resolveEffectiveOutputPath,
+} from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { canonicalJsonStringify } from '../utils/json.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { redactUrl, urlCredentials } from '../utils/url-credentials.js';
+import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 
 export const CONFIG_FILE_NAME = 'llm-docs.json';
 const DEFAULT_PACKS_DIR = 'agent-docs';
@@ -109,10 +114,6 @@ const mountSchema = z
 const globSchema = z.string().min(1);
 const globListSchema = z.array(globSchema);
 
-function hasCredentials(url: URL): boolean {
-  return url.username !== '' || url.password !== '';
-}
-
 function parsedUrl(value: string): URL | undefined {
   try {
     return new URL(value);
@@ -132,13 +133,20 @@ function isDocsUrl(url: URL): boolean {
   );
 }
 
-/** An https URL without credentials; `{version}`-style placeholders may appear in it. */
+/**
+ * An https URL that carries no credential (urlCredentials, the HTTP client's
+ * rule): pack manifests record these URLs, so one is refused when the config
+ * is read, before `add` writes it. `{version}`-style placeholders may appear.
+ */
 const httpsUrlSchema = z.string().refine(
   (value) => {
     const url = parsedUrl(value);
-    return url !== undefined && isDocsUrl(url) && !hasCredentials(url);
+    return url !== undefined && isDocsUrl(url) && urlCredentials(url).length === 0;
   },
-  { error: 'must be an https:// URL without credentials' }
+  {
+    error:
+      'must be an https:// URL without credentials (no user name or password, and no token, key, signature, or similar parameter)',
+  }
 );
 
 const gitRepoSchema = z.string().refine(
@@ -147,12 +155,12 @@ const gitRepoSchema = z.string().refine(
     return (
       url !== undefined &&
       (url.protocol === 'https:' || url.protocol === 'file:') &&
-      !hasCredentials(url)
+      urlCredentials(url).length === 0
     );
   },
   {
     error:
-      'must be an https:// (or file://) URL without credentials; ssh and git@ remotes are not supported',
+      'must be an https:// (or file://) URL without credentials (no user name or password, and no token, key, or similar parameter); ssh and git@ remotes are not supported',
   }
 );
 
@@ -504,6 +512,12 @@ export interface LoadedProjectConfig {
   /** Absolute project root (the directory holding llm-docs.json). */
   projectRoot: string;
   configPath: string;
+  /**
+   * Set when llm-docs.json or the directory holding it belongs to another
+   * user (projectConfigOwner): such a config may say what to fetch and read,
+   * but its converters never run. Null when the config was not read from disk.
+   */
+  foreignOwner: ForeignOwner | null;
   config: ProjectConfig;
   /** Project-relative POSIX packs directory, normalized. */
   packsDirRelative: string;
@@ -511,12 +525,22 @@ export interface LoadedProjectConfig {
   packsDir: string;
 }
 
-/** The nearest ancestor of `cwd` (inclusive) holding llm-docs.json, or undefined. */
+/**
+ * The nearest ancestor of `cwd` (inclusive) holding an entry named
+ * llm-docs.json, or undefined. Any entry stops the walk, so a named pipe or
+ * directory there is reported by the load instead of letting a config
+ * further up take over.
+ */
 export async function findProjectRoot(cwd: string): Promise<string | undefined> {
   let current = resolve(cwd);
 
   while (true) {
-    if (await isFile(join(current, CONFIG_FILE_NAME))) {
+    if (
+      await lstat(join(current, CONFIG_FILE_NAME)).then(
+        () => true,
+        () => false
+      )
+    ) {
       return current;
     }
 
@@ -538,11 +562,48 @@ export async function projectRootForCreate(cwd: string): Promise<string> {
   return (await findProjectRoot(cwd)) ?? (await gitTopLevel(cwd)) ?? resolve(cwd);
 }
 
-async function isFile(path: string): Promise<boolean> {
+/**
+ * The text of llm-docs.json at `configPath`, or null when it does not exist.
+ * Only a regular file is read (a link to one is followed): a named pipe there
+ * would block every command, so anything else is a ConfigError naming it.
+ */
+export async function readProjectConfigText(configPath: string): Promise<string | null> {
   try {
-    return (await stat(path)).isFile();
-  } catch {
-    return false;
+    return (await readRegularFile(configPath, { followLinks: true })).toString('utf-8');
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return null;
+    }
+    throw refusedConfigFile(error);
+  }
+}
+
+/** Replace llm-docs.json atomically; a refused target is a ConfigError that says what to do. */
+export async function writeProjectConfigText(configPath: string, text: string): Promise<void> {
+  try {
+    await writeTextFileSafely(configPath, text);
+  } catch (error) {
+    throw refusedConfigFile(error);
+  }
+}
+
+function refusedConfigFile(error: unknown): unknown {
+  if (!(error instanceof RefusedFileError)) {
+    return error;
+  }
+  switch (error.refusal.kind) {
+    case 'not-regular':
+      return new ConfigError(
+        `${error.message}; llm-docs reads and writes ${CONFIG_FILE_NAME} only as a regular file, so replace it with one (move the current one away first), then run the command again.`
+      );
+    case 'read-only':
+      return new ConfigError(
+        `${error.message}, so llm-docs did not change it; make it writable (chmod u+w ${CONFIG_FILE_NAME}), then run the command again.`
+      );
+    case 'hard-linked':
+      return new ConfigError(
+        `${error.message}, so replacing it would leave the other links holding the old text; make it a single file (copy it, delete the original, and rename the copy), then run the command again.`
+      );
   }
 }
 
@@ -554,18 +615,53 @@ export async function loadProjectConfigIfPresent(
   projectRoot: string
 ): Promise<LoadedProjectConfig | null> {
   const root = resolve(projectRoot);
-  let text: string;
+  const configPath = join(root, CONFIG_FILE_NAME);
+  const text = await readProjectConfigText(configPath);
 
-  try {
-    text = await readFile(join(root, CONFIG_FILE_NAME), 'utf-8');
-  } catch (error) {
-    if (isFileNotFoundError(error)) {
-      return null;
-    }
-    throw error;
+  if (text === null) {
+    return null;
   }
+  const loaded = await assertPacksDirInsideProject(parseProjectConfig(root, text));
+  return { ...loaded, foreignOwner: await projectConfigOwner(root, configPath) };
+}
 
-  return assertPacksDirInsideProject(parseProjectConfig(root, text));
+/** A config file, or the directory holding it, that another user owns. */
+export interface ForeignOwner {
+  path: string;
+  owner: number;
+  you: number;
+}
+
+/**
+ * Who else owns llm-docs.json or its directory, or null when the user running
+ * llm-docs owns both. Project discovery takes the nearest config walking up,
+ * so below a directory another user can write to (a shared /tmp) it could be
+ * theirs, and a `command` converter in it would run with this user's
+ * privileges; git refuses such a repository for the same reason
+ * (`safe.directory`). Root is another user too, unless running as root.
+ * Windows has no uids, so the check does not apply there.
+ */
+async function projectConfigOwner(
+  projectRoot: string,
+  configPath: string
+): Promise<ForeignOwner | null> {
+  const you = process.getuid?.();
+  if (you === undefined) {
+    return null;
+  }
+  for (const path of [configPath, projectRoot]) {
+    const owner = (await lstat(path)).uid;
+    if (owner !== you) {
+      return { path, owner, you };
+    }
+  }
+  return null;
+}
+
+/** `<path> is owned by user id 0 (root), not by you (user id 501)`. */
+export function describeForeignOwner(foreign: ForeignOwner): string {
+  const user = (uid: number) => `user id ${uid}${uid === 0 ? ' (root)' : ''}`;
+  return `${foreign.path} is owned by ${user(foreign.owner)}, not by you (${user(foreign.you)})`;
 }
 
 export async function loadProjectConfig(projectRoot: string): Promise<LoadedProjectConfig> {
@@ -657,6 +753,7 @@ export function parseProjectConfig(projectRoot: string, text: string): LoadedPro
   return {
     projectRoot,
     configPath: join(projectRoot, CONFIG_FILE_NAME),
+    foreignOwner: null,
     config,
     packsDirRelative,
     packsDir,
@@ -690,7 +787,7 @@ export async function initProjectConfig(
 ): Promise<{ created: boolean; configPath: string }> {
   const configPath = join(projectRoot, CONFIG_FILE_NAME);
 
-  if (await isFile(configPath)) {
+  if ((await readProjectConfigText(configPath)) !== null) {
     return { created: false, configPath };
   }
 
@@ -706,7 +803,7 @@ export async function initProjectConfig(
   const text = newConfigText(options.packsDir);
   // Validate the text we are about to write with the same rules a load applies.
   await assertPacksDirInsideProject(parseProjectConfig(projectRoot, text));
-  await writeTextFileSafely(configPath, text);
+  await writeProjectConfigText(configPath, text);
   return { created: true, configPath };
 }
 
@@ -722,23 +819,14 @@ export async function saveProjectConfig(
   pack: PackConfig
 ): Promise<LoadedProjectConfig> {
   const configPath = join(projectRoot, CONFIG_FILE_NAME);
-  let text: string;
-
-  try {
-    text = await readFile(configPath, 'utf-8');
-  } catch (error) {
-    if (!isFileNotFoundError(error)) {
-      throw error;
-    }
-    text = newConfigText(undefined);
-  }
+  const text = (await readProjectConfigText(configPath)) ?? newConfigText(undefined);
 
   const edits = modify(text, ['packs', id], pack, {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
   });
   const updated = `${applyEdits(text, edits).replace(/\s*$/, '')}\n`;
   const loaded = await assertPacksDirInsideProject(parseProjectConfig(projectRoot, updated));
-  await writeTextFileSafely(configPath, updated);
+  await writeProjectConfigText(configPath, updated);
   return loaded;
 }
 
@@ -903,6 +991,10 @@ async function resolvePackVersion(
         `Pack "${id}": lockfiles resolve ${label} to different versions (${versions}); set packs.${id}.version in ${CONFIG_FILE_NAME} to the one these docs describe.`
       );
     }
+    case 'other-registry':
+      throw new ConfigError(
+        `Pack "${id}": ${lookup.lockfiles.join(', ')} install${lookup.lockfiles.length === 1 ? 's' : ''} ${label} from a registry other than the public one, so its version is not taken from the lockfile (the public package of that name is another package); set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe.`
+      );
     case 'unread': {
       const unread = lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`);
       throw new ConfigError(
@@ -1011,7 +1103,7 @@ function resolveUrlEntries(
   path: string,
   substitute: (value: string, path: string) => string
 ): { url: string; path: string }[] {
-  const seen = new Map<string, string>();
+  const seen = new Map<string, { url: string; path: string }>();
 
   return entries.map((entry, index) => {
     const where = `${path}.urls[${index}]`;
@@ -1020,7 +1112,7 @@ function resolveUrlEntries(
 
     if (parsed === undefined || !isDocsUrl(parsed)) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${where}: "${url}" is not an https:// URL; only https:// pages are fetched, so fix the URL.`
+        `${CONFIG_FILE_NAME} ${where}: "${redactUrl(url)}" is not an https:// URL; only https:// pages are fetched, so fix the URL.`
       );
     }
 
@@ -1035,15 +1127,15 @@ function resolveUrlEntries(
       );
     }
 
-    const previous = seen.get(storedPath);
+    const previous = seen.get(pathCollisionKey(storedPath));
 
     if (previous !== undefined) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${path}.urls: ${previous} and ${url} would both be stored at "${storedPath}"; give one an explicit "path".`
+        `${CONFIG_FILE_NAME} ${path}.urls: ${redactUrl(previous.url)} and ${redactUrl(url)} would both be stored at "${previous.path === storedPath ? storedPath : `${previous.path}" and "${storedPath}`}"${previous.path === storedPath ? '' : ' (one path on a case- or normalization-insensitive file system)'}; give one an explicit "path".`
       );
     }
 
-    seen.set(storedPath, url);
+    seen.set(pathCollisionKey(storedPath), { url, path: storedPath });
     return { url, path: storedPath };
   });
 }

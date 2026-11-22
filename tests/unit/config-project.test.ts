@@ -471,6 +471,18 @@ describe('resolvePackRecipe', () => {
     ).rejects.toThrow(
       /https:\/\/x\.dev\/a and https:\/\/y\.dev\/a\.md would both be stored at "a\.md"/
     );
+    await expect(
+      resolvePackRecipe(
+        config({
+          version: '1',
+          sources: [{ type: 'urls', urls: ['https://x.dev/Straße', 'https://x.dev/STRASSE'] }],
+        }),
+        'vite',
+        PINNED
+      )
+    ).rejects.toThrow(
+      'https://x.dev/Straße and https://x.dev/STRASSE would both be stored at "Straße.md" and "STRASSE.md" (one path on a case- or normalization-insensitive file system)'
+    );
   });
 
   it('resolves the version from lockfiles through the resolver', async () => {

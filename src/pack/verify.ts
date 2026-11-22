@@ -7,7 +7,7 @@
  * citations (from src/pack/guides.ts), conversion, license.
  */
 
-import { lstat, readFile, stat } from 'node:fs/promises';
+import { lstat, stat } from 'node:fs/promises';
 import { join, posix, resolve, sep } from 'node:path';
 
 import { checkAgentBlocks } from '../agent/block.js';
@@ -27,7 +27,9 @@ import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { checkCitations } from './guides.js';
 import { MANIFEST_FILE_NAME, readProjectPacks, type PackManifest } from './manifest.js';
+import { LIVE_SCHEMES, linkScheme, liveSchemeList } from './links.js';
 import { findLinkTargets, headingAnchors } from './markdown.js';
+import { readRegularFile } from '../utils/safe-write.js';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'info' | 'skipped';
 
@@ -239,7 +241,9 @@ async function readPackText(
     return fail(file.kind === 'missing' ? 'file is missing' : `file is ${file.why}`);
   }
   try {
-    return { text: await readFile(file.absolutePath, 'utf-8') };
+    return {
+      text: (await readRegularFile(file.absolutePath, { followLinks: false })).toString('utf-8'),
+    };
   } catch (error) {
     return fail(`file is unreadable (${errorMessage(error)})`);
   }
@@ -383,6 +387,15 @@ async function checkLinks(context: PackCheckContext): Promise<CheckOutcome> {
     for (const link of findLinkTargets(text)) {
       const target = link.target.trim();
 
+      const scheme = linkScheme(target);
+      if (scheme !== undefined && !LIVE_SCHEMES.has(scheme)) {
+        findings.push({
+          status: 'fail',
+          path: output.path,
+          message: `link scheme is not ${liveSchemeList()}, so a reader could run code or open local files through it: ${target}`,
+        });
+        continue;
+      }
       if (target === '' || URL_SCHEME.test(target) || target.startsWith('//')) {
         continue;
       }
@@ -529,6 +542,15 @@ async function boundDependencyFindings(context: PackCheckContext): Promise<Check
         },
       ];
     }
+    case 'other-registry':
+      return pinned
+        ? []
+        : [
+            {
+              status: 'fail',
+              message: `${label} is installed from a registry other than the public one (${lookup.lockfiles.join(', ')}), so the lockfile cannot pin these docs; set packs.${context.packId}.version in llm-docs.json to the version these docs describe`,
+            },
+          ];
     case 'unread':
       return [
         {

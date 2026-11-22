@@ -134,7 +134,7 @@ async function readCache(path: string, warnings: string[]): Promise<Map<string, 
   let raw: unknown;
 
   try {
-    raw = await readJsonFile(path);
+    raw = await readJsonFile(path, { followLinks: false });
   } catch (error) {
     if (!isFileNotFoundError(error)) {
       warnings.push(

@@ -5,7 +5,20 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  cp,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -14,6 +27,7 @@ import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { installFakeConverters } from '../helpers/fake-converters.js';
+import { canCreateSymlinks } from '../helpers/symlinks.js';
 import { runHookProcess } from '../helpers/hook-process.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -27,6 +41,10 @@ interface CliResult {
   stderr: string;
 }
 
+/** A run still going after this long is killed and reported as RUN_KILLED: a blocked read never ends. */
+const RUN_LIMIT_MS = 20_000;
+const RUN_KILLED = -1;
+
 function runCli(cwd: string, args: string[], env: Record<string, string> = {}): Promise<CliResult> {
   return new Promise((resolveResult) => {
     execFile(
@@ -35,13 +53,51 @@ function runCli(cwd: string, args: string[], env: Record<string, string> = {}): 
       {
         cwd,
         env: { ...process.env, NO_COLOR: '1', LLM_DOCS_ALLOW_TEMP_SOURCES: '1', ...env },
+        timeout: RUN_LIMIT_MS,
+        killSignal: 'SIGKILL',
       },
       (error, stdout, stderr) => {
-        const code = error === null ? 0 : typeof error.code === 'number' ? error.code : 1;
+        const code =
+          error === null
+            ? 0
+            : error.killed === true
+              ? RUN_KILLED
+              : typeof error.code === 'number'
+                ? error.code
+                : 1;
         resolveResult({ code, stdout, stderr });
       }
     );
   });
+}
+
+/** `hook session-start` with `payload` on stdin, killed like runCli; returns what it printed and logged. */
+async function runHook(
+  cwd: string,
+  payload: string,
+  env: Record<string, string>,
+  cacheDir: string
+): Promise<CliResult & { log: string }> {
+  const logPath = join(cacheDir, 'hook.log');
+  await rm(logPath, { force: true });
+  const result = await new Promise<CliResult>((resolveResult) => {
+    const child = execFile(
+      process.execPath,
+      [cliPath, 'hook', 'session-start'],
+      {
+        cwd,
+        env: { ...process.env, ...env, LLM_DOCS_CACHE_DIR: cacheDir },
+        timeout: RUN_LIMIT_MS,
+        killSignal: 'SIGKILL',
+      },
+      (error, stdout, stderr) => {
+        const code = error === null ? 0 : error.killed === true ? RUN_KILLED : 1;
+        resolveResult({ code, stdout, stderr });
+      }
+    );
+    child.stdin?.end(payload);
+  });
+  return { ...result, log: await readFile(logPath, 'utf-8').catch(() => '') };
 }
 
 async function makeProject(files: Record<string, string>): Promise<string> {
@@ -818,7 +874,9 @@ describe('llm-docs v3 CLI', () => {
       }),
     });
     // Isolated from the session running the suite: no inherited model, project, or settings.
+    // The hook checks the pack's local source as sync does, so it needs the temp-source opt-in.
     const env = {
+      LLM_DOCS_ALLOW_TEMP_SOURCES: '1',
       LLM_DOCS_CACHE_DIR: cache,
       HOME: await makeProject({}),
       CLAUDECODE: '1',
@@ -1569,6 +1627,446 @@ describe('--json: one document on stdout when the command runs, nothing when it 
     );
     expectJsonFailure(await runCli(root, ['capabilities', '--yaml', '--json']), 2);
   });
+});
+
+describe('fixed-name files llm-docs reads and rewrites', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a named pipe at every fixed-name file instead of blocking on it',
+    async () => {
+      const root = await makeProject(DOCS);
+      const home = await makeProject({});
+      const cache = await makeProject({});
+      const env = {
+        HOME: home,
+        LLM_DOCS_CACHE_DIR: cache,
+        CLAUDE_PROJECT_DIR: '',
+        ANTHROPIC_MODEL: '',
+        LLM_DOCS_MODEL_CUTOFF: '',
+      };
+      const payload = JSON.stringify({ cwd: root });
+      const add = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0'], env);
+      expect(add.code, add.stderr).toBe(0);
+      const pipe = async (path: string): Promise<string> => {
+        const target = join(root, ...path.split('/'));
+        await rm(target, { force: true });
+        await mkdir(dirname(target), { recursive: true });
+        await execFileAsync('mkfifo', [target]);
+        return target;
+      };
+      const notRegular = (path: string) => `${path} is a named pipe, not a regular file`;
+
+      const manifestText = await readFile(join(root, 'agent-docs', 'demo', 'manifest.json'));
+      const manifest = await pipe('agent-docs/demo/manifest.json');
+      const check = await runCli(root, ['sync', '--check'], env);
+      expect(check.code).toBe(1);
+      expect(check.stderr).toContain(
+        'demo: would rebuild (the manifest is unreadable: manifest.json is a named pipe, not a regular file, so llm-docs never reads it)'
+      );
+      const verify = await runCli(root, ['verify'], env);
+      expect(verify.code).toBe(1);
+      expect(verify.stderr).toContain(
+        'manifest.json: is a named pipe, not a regular file, so llm-docs never reads it'
+      );
+      expect((await runCli(root, ['status', '--offline', '--json'], env)).code).toBe(0);
+      expect((await runHook(root, payload, env, cache)).code).toBe(0);
+      await rm(manifest);
+      await writeFile(manifest, manifestText);
+
+      const configPath = join(root, 'llm-docs.json');
+      const configText = await readFile(configPath, 'utf-8');
+      await pipe('llm-docs.json');
+      const status = await runCli(root, ['status', '--offline'], env);
+      expect(status.code).toBe(2);
+      expect(status.stderr).toContain(notRegular(configPath));
+      const hook = await runHook(root, payload, env, cache);
+      expect(hook.code).toBe(0);
+      expect(hook.log).toContain(
+        `${notRegular(configPath)}; llm-docs reads and writes llm-docs.json only as a regular file`
+      );
+      expect(hook.log).toContain('(continuing with the dependency analysis only)');
+      await rm(configPath);
+      await writeFile(configPath, configText);
+
+      await writeFile(join(root, 'package.json'), '{"name":"app","dependencies":{"x":"1"}}');
+      await writeFile(join(root, 'package-lock.json'), npmLockfile('x', '1.0.0'));
+      const npmrc = await pipe('.npmrc');
+      const settings = await pipe('.claude/settings.json');
+      const scan = await runCli(root, ['status', '--offline'], env);
+      expect(scan.code).toBe(0);
+      expect(scan.stderr).toContain(
+        `warning: package-lock.json: could not be read: ${notRegular(npmrc)}.`
+      );
+      expect(scan.stderr).toContain(
+        `warning: ${notRegular(settings)}; skipped it when looking for the model in Claude Code settings`
+      );
+      const settingsHook = await runHook(root, payload, env, cache);
+      expect(settingsHook.code).toBe(0);
+      expect(settingsHook.log).toContain(
+        `${notRegular(settings)}; skipped it when looking for the model in Claude Code settings`
+      );
+    },
+    60_000
+  );
+
+  it('refuses to rewrite a read-only or hard-linked llm-docs.json as a config error', async () => {
+    const root = await makeProject(DOCS);
+    const configPath = join(root, 'llm-docs.json');
+    expect((await runCli(root, ['init'])).code).toBe(0);
+    await chmod(configPath, 0o444);
+
+    const readOnly = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0']);
+    expect(readOnly).toEqual({
+      code: 2,
+      stdout: '',
+      stderr: `llm-docs: ${configPath} is read-only, so llm-docs did not change it; make it writable (chmod u+w llm-docs.json), then run the command again.\n`,
+    });
+
+    await chmod(configPath, 0o644);
+    await link(configPath, join(root, 'second-name.json'));
+    const linked = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0']);
+    expect(linked.code).toBe(2);
+    expect(linked.stderr).toBe(
+      `llm-docs: ${configPath} has 2 hard links, so replacing it would leave the other links holding the old text; make it a single file (copy it, delete the original, and rename the copy), then run the command again.\n`
+    );
+  });
+});
+
+describe('status and sync --check', () => {
+  it('agree on every stale reason that needs no network', async () => {
+    const root = await makeProject({
+      ...DOCS,
+      'package.json': '{"name":"app","dependencies":{"x":"^1.0.0"}}\n',
+      'package-lock.json': npmLockfile('x', '1.0.0'),
+    });
+    const env = {
+      HOME: await makeProject({}),
+      LLM_DOCS_CACHE_DIR: await makeProject({}),
+      CLAUDE_PROJECT_DIR: '',
+      ANTHROPIC_MODEL: '',
+    };
+    const add = await runCli(
+      root,
+      ['add', 'demo', '--local', 'docs', '--dependency', 'npm:x'],
+      env
+    );
+    expect(add.code, add.stderr).toBe(0);
+    const pack = join(root, 'agent-docs', 'demo');
+    const configPath = join(root, 'llm-docs.json');
+    const append = async (path: string, text: string) =>
+      writeFile(path, `${await readFile(path, 'utf-8')}${text}`);
+
+    const scenarios: [string, () => Promise<void>, string, string][] = [
+      ['nothing changed', async () => undefined, 'unchanged', 'ok'],
+      [
+        'a local source file changed',
+        () => append(join(root, 'docs', 'index.md'), '\nMore.\n'),
+        'sources-changed',
+        'sources-changed',
+      ],
+      [
+        'a pack page was edited',
+        () => append(join(pack, 'pages', 'index.md'), '\nEdited.\n'),
+        'files-differ',
+        'pack-changed',
+      ],
+      [
+        'the manifest is not JSON',
+        () => writeFile(join(pack, 'manifest.json'), '{'),
+        'manifest-unreadable',
+        'missing',
+      ],
+      [
+        'the recipe was edited',
+        async () => {
+          const config = JSON.parse(await readFile(configPath, 'utf-8'));
+          config.packs.demo.title = 'Renamed';
+          await writeFile(configPath, JSON.stringify(config));
+        },
+        'recipe-edited',
+        'recipe-changed',
+      ],
+      [
+        'the lockfile moved',
+        () => writeFile(join(root, 'package-lock.json'), npmLockfile('x', '1.1.0')),
+        'lockfile-moved',
+        'stale-pack',
+      ],
+      ['the pack was deleted', () => rm(pack, { recursive: true }), 'not-built', 'missing'],
+    ];
+
+    for (const [label, change, reason, state] of scenarios) {
+      await change();
+      const check = JSON.parse((await runCli(root, ['sync', '--check', '--json'], env)).stdout);
+      const status = JSON.parse(
+        (await runCli(root, ['status', '--offline', '--json'], env)).stdout
+      );
+      expect(
+        {
+          label,
+          sync: check.packs[0].reason ?? check.packs[0].status,
+          status: status.packs[0].state,
+        },
+        label
+      ).toEqual({ label, sync: reason, status: state });
+      expect((await runCli(root, ['sync'], env)).code, label).toBe(0);
+    }
+  });
+});
+
+describe('status and the hook in a git repository', () => {
+  it.skipIf(process.platform === 'win32')(
+    'never run git there, so a repository config cannot make them run a program',
+    async () => {
+      const root = await makeProject(DOCS);
+      const marker = join(root, 'fsmonitor-ran');
+      const script = join(await makeProject({}), 'fsmonitor.sh');
+      await writeFile(script, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+      const git = (...args: string[]) =>
+        execFileAsync('git', args, {
+          cwd: root,
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: '/dev/null',
+            GIT_CONFIG_NOSYSTEM: '1',
+            GIT_AUTHOR_NAME: 'Test',
+            GIT_AUTHOR_EMAIL: 'test@example.com',
+            GIT_COMMITTER_NAME: 'Test',
+            GIT_COMMITTER_EMAIL: 'test@example.com',
+          },
+        });
+      await git('init', '--quiet');
+      await git('add', '-A');
+      await git('commit', '--quiet', '-m', 'docs');
+      const cache = await makeProject({});
+      const env = {
+        HOME: await makeProject({}),
+        LLM_DOCS_CACHE_DIR: cache,
+        CLAUDE_PROJECT_DIR: '',
+        ANTHROPIC_MODEL: '',
+      };
+      const add = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0'], env);
+      expect(add.code, add.stderr).toBe(0);
+      await git('config', 'core.fsmonitor', script);
+      await rm(marker, { force: true });
+
+      expect((await runCli(root, ['status', '--offline'], env)).code).toBe(0);
+      expect((await runCli(root, ['sync', '--check'], env)).code).toBe(0);
+      expect((await runHook(root, JSON.stringify({ cwd: root }), env, cache)).code).toBe(0);
+      expect(
+        await readFile(marker).then(
+          () => 'ran',
+          () => 'not run'
+        )
+      ).toBe('not run');
+    }
+  );
+});
+
+describe('a pack bound to a dependency from another registry', () => {
+  it('has its own state and next step, and no release date from the public registry', async () => {
+    const lock = {
+      name: 'app',
+      lockfileVersion: 3,
+      packages: {
+        '': { name: 'app', dependencies: { '@corp/ui': '^2.0.0' } },
+        'node_modules/@corp/ui': {
+          version: '2.0.0',
+          resolved: 'https://npm.corp.example/@corp/ui/-/ui-2.0.0.tgz',
+        },
+      },
+    };
+    const root = await makeProject({
+      ...DOCS,
+      'package.json': '{"name":"app","dependencies":{"@corp/ui":"^2.0.0"}}\n',
+      'package-lock.json': JSON.stringify(lock),
+    });
+    const cache = await makeProject({
+      'release-dates.json': JSON.stringify({
+        schemaVersion: 1,
+        entries: {
+          'npm:@corp/ui@2.0.0': {
+            publishedAt: '2026-10-01T00:00:00.000Z',
+            source: 'npm',
+            fetchedAt: '2026-11-01T00:00:00.000Z',
+          },
+        },
+      }),
+    });
+    const env = {
+      HOME: await makeProject({}),
+      LLM_DOCS_CACHE_DIR: cache,
+      CLAUDE_PROJECT_DIR: '',
+      ANTHROPIC_MODEL: '',
+    };
+
+    const unpinned = await runCli(
+      root,
+      ['add', 'ui', '--local', 'docs', '--dependency', 'npm:@corp/ui'],
+      env
+    );
+    expect(unpinned.code).toBe(2);
+    expect(unpinned.stderr).toContain(
+      `Pack "ui": package-lock.json installs npm:@corp/ui from a registry other than the public one, so its version is not taken from the lockfile (the public package of that name is another package); set packs.ui.version in llm-docs.json to the version these docs describe.`
+    );
+
+    const pinned = await runCli(
+      root,
+      ['add', 'ui', '--local', 'docs', '--dependency', 'npm:@corp/ui', '--version', '2.0.0'],
+      env
+    );
+    expect(pinned.code, pinned.stderr).toBe(0);
+    const status = async () =>
+      JSON.parse((await runCli(root, ['status', '--offline', '--json'], env)).stdout).packs[0];
+    expect(await status()).toMatchObject({
+      state: 'ok',
+      lockfile: { kind: 'other-registry', lockfiles: ['package-lock.json'] },
+      publishedAt: null,
+    });
+
+    const configPath = join(root, 'llm-docs.json');
+    const config = JSON.parse(await readFile(configPath, 'utf-8'));
+    delete config.packs.ui.version;
+    await writeFile(configPath, JSON.stringify(config));
+    expect(await status()).toMatchObject({
+      state: 'other-registry',
+      publishedAt: null,
+      nextStep:
+        'set packs.ui.version in llm-docs.json to the version these docs describe: npm:@corp/ui comes from another registry, so its version is not taken from the lockfile',
+    });
+  });
+});
+
+describe('URLs that carry a credential', () => {
+  it('are refused in every URL-valued key before add writes llm-docs.json', async () => {
+    const root = await makeProject({});
+    const refused = 'must be an https:// URL without credentials';
+    for (const args of [
+      ['--url', 'https://docs.example.com/a?token=abc'],
+      ['--llms-txt', 'https://docs.example.com/llms.txt?api_key=abc', '--include', '**'],
+      ['--git', 'https://github.com/o/r?access_token=abc', '--ref', 'v1'],
+      ['--local', 'docs', '--site', 'https://docs.example.com/?sig=abc'],
+    ]) {
+      const add = await runCli(root, ['add', 'demo', ...args, '--version', '1.0.0', '--dry-run']);
+      expect(add.code, args.join(' ')).toBe(2);
+      expect(add.stderr, args.join(' ')).toContain(
+        args[0] === '--git' ? 'without credentials' : refused
+      );
+      expect(add.stderr, args.join(' ')).not.toContain('abc');
+    }
+    expect(await readdir(root)).toEqual([]);
+
+    const config = JSON.stringify({
+      schemaVersion: 3,
+      packs: {
+        demo: {
+          version: '1.0.0',
+          sources: [
+            { type: 'urls', urls: [{ url: 'https://x.dev/a?X-Amz-Signature=s', path: 'a.md' }] },
+          ],
+        },
+      },
+    });
+    await writeFile(join(root, 'llm-docs.json'), config);
+    const sync = await runCli(root, ['sync']);
+    expect(sync.code).toBe(2);
+    expect(sync.stderr).toContain('packs.demo.sources[0].urls[0].url');
+    expect(sync.stderr).toContain(refused);
+  });
+});
+
+describe('a symbolic link planted in a pack', () => {
+  // Each link points at a copy of what it replaces, outside the project, so a
+  // command that followed it would find a pack that looks valid.
+  const PLANTS = {
+    'the pack directory': '',
+    'guides/': 'guides',
+    'manifest.json': 'manifest.json',
+    'index.md': 'index.md',
+    'a page': 'pages/guide/start.md',
+  } as const;
+
+  async function snapshot(dir: string): Promise<string[]> {
+    const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+    return Promise.all(
+      entries
+        .map((entry) => join(entry.parentPath, entry.name))
+        .sort()
+        .map(async (path) =>
+          (await lstat(path)).isFile() ? `${path} ${await readFile(path, 'utf-8')}` : path
+        )
+    );
+  }
+
+  it.skipIf(!canCreateSymlinks)(
+    'makes sync, sync --check, verify, status, guides stamp, and the hook agree the pack is unusable, and writes nothing through it',
+    async () => {
+      const template = await makeProject(DOCS);
+      const cache = await makeProject({});
+      const env = {
+        HOME: await makeProject({}),
+        LLM_DOCS_CACHE_DIR: cache,
+        CLAUDE_PROJECT_DIR: '',
+        ANTHROPIC_MODEL: '',
+      };
+      expect(
+        (await runCli(template, ['add', 'demo', '--local', 'docs', '--version', '1.0.0'], env)).code
+      ).toBe(0);
+      await mkdir(join(template, 'agent-docs', 'demo', 'guides'));
+      await writeFile(
+        join(template, 'agent-docs', 'demo', 'guides', 'g.md'),
+        '# G\n\nSee [start](../pages/guide/start.md).\n'
+      );
+      expect((await runCli(template, ['guides', 'stamp', 'demo'], env)).code).toBe(0);
+
+      for (const [label, path] of Object.entries(PLANTS)) {
+        const root = await makeProject({});
+        const outside = await makeProject({});
+        await cp(template, root, { recursive: true });
+        const planted = join(root, 'agent-docs', 'demo', ...path.split('/').filter(Boolean));
+        const copy = join(outside, 'copy');
+        await cp(planted, copy, { recursive: true });
+        await rm(planted, { recursive: true });
+        await symlink(copy, planted);
+        const before = await snapshot(outside);
+        const where = `${label}: `;
+
+        const check = await runCli(root, ['sync', '--check'], env);
+        expect(check.code, where + check.stderr).not.toBe(0);
+        const verify = await runCli(root, ['verify'], env);
+        expect(verify.code, where + verify.stderr).toBe(1);
+        const status = await runCli(root, ['status', '--offline', '--json'], env);
+        expect(status.code, where + status.stderr).toBe(0);
+        const state = JSON.parse(status.stdout).packs[0];
+        expect(state.state, where).not.toBe('ok');
+        if (label === 'guides/') {
+          expect(state).toMatchObject({
+            state: 'unusable',
+            nextStep:
+              "agent-docs/demo/guides is a symbolic link; run 'llm-docs sync demo' for what to do",
+          });
+        }
+        const stamp = await runCli(root, ['guides', 'stamp', 'demo'], env);
+        expect(stamp.code, where + stamp.stderr).toBe(2);
+        const hook = await runHook(root, JSON.stringify({ cwd: root }), env, cache);
+        expect(
+          JSON.parse(hook.stdout || '{}').hookSpecificOutput?.additionalContext,
+          where + hook.log
+        ).toContain('Pinned docs packs to fix:\n- demo: ');
+
+        const sync = await runCli(root, ['sync'], env);
+        if (sync.code === 0) {
+          expect(sync.stderr, where).toContain('demo: built');
+          expect((await lstat(planted)).isSymbolicLink(), where).toBe(false);
+          expect((await runCli(root, ['verify'], env)).code, where).toBe(0);
+        } else {
+          expect(sync.code, where + sync.stderr).toBe(2);
+          expect((await lstat(planted)).isSymbolicLink(), where).toBe(true);
+        }
+        expect(await snapshot(outside), where).toEqual(before);
+      }
+    },
+    120_000
+  );
 });
 
 describe('help', () => {

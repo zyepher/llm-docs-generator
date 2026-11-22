@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { syncPacks } from '../../src/pack/build.js';
 import { readPackManifest } from '../../src/pack/manifest.js';
@@ -319,6 +319,37 @@ describe('command converters', { timeout: SPAWN_HEAVY_TIMEOUT_MS }, () => {
     expect(await page(root, 'pages/spec.md')).toContain('Converted by command');
     expect(await conversionLog()).toEqual(['command spec.pdf', 'command spec.pdf']);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'never runs a converter named by a config another user owns',
+    async () => {
+      const script = await writeCommandConverter(await tempDir('llm-docs-command-'));
+      const command = [process.execPath, script, '{input}'];
+      const root = await makeProject(
+        { convert: { tool: 'command', include: ['**/*.pdf'], command } },
+        DOCS
+      );
+      const you = process.getuid?.() ?? 0;
+      const someoneElse = you === 0 ? 501 : 0;
+      const spy = vi.spyOn(process, 'getuid').mockReturnValue(someoneElse);
+      let report: Awaited<ReturnType<typeof syncPacks>>;
+      try {
+        report = await syncPacks(root, undefined);
+      } finally {
+        spy.mockRestore();
+      }
+      const user = (uid: number) => `user id ${uid}${uid === 0 ? ' (root)' : ''}`;
+      expect(report.packs[0]).toMatchObject({
+        status: 'failed',
+        exitCode: 2,
+        error: `${join(root, 'llm-docs.json')} is owned by ${user(you)}, not by you (${user(someoneElse)}), so llm-docs did not run the converter its convert.command names (${process.execPath}): a config another user can write could run anything as you. Run llm-docs in a project you own, or make yourself the owner of llm-docs.json and its directory once you have read the command.`,
+      });
+      expect(await conversionLog()).toEqual([]);
+
+      expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+      expect(await conversionLog()).toEqual(['command spec.pdf']);
+    }
+  );
 
   it('requires an {input} placeholder', async () => {
     const root = await makeProject(

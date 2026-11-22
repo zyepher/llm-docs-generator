@@ -6,7 +6,6 @@
  * crawl websites, or infer source truth from implementation code.
  */
 
-import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 
 import {
@@ -19,8 +18,10 @@ import {
 } from '../../core/models.js';
 import { ParserError } from '../parser-error.js';
 import { errorMessage, isRecord } from '../../utils/guards.js';
+import { pathCollisionKey } from '../../utils/fs-path.js';
 import { slugifyText } from '../../utils/slug.js';
 import { loadYaml } from '../../utils/yaml.js';
+import { readRegularFile } from '../../utils/safe-write.js';
 
 const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
 const PARAMETER_LOCATION_ORDER = ['path', 'query', 'header', 'cookie', 'formData', 'body'] as const;
@@ -106,7 +107,7 @@ export async function parseOpenApiFile(sourcePath: string): Promise<DocNode> {
 
 async function loadDocument(sourcePath: string): Promise<ApiDocument> {
   const fileFormat = getOpenApiFileFormat(sourcePath, 'OpenAPI / Swagger Parser');
-  const content = await readFile(sourcePath, 'utf-8');
+  const content = (await readRegularFile(sourcePath, { followLinks: false })).toString('utf-8');
 
   let parsed: unknown;
 
@@ -208,7 +209,7 @@ function convertDocument(
   const operations = collectOperationEntries(document, paths, versionInfo, omissions);
   // The authentication category claims its id first so a real tag named
   // "Authentication" is disambiguated by the shared uniqueId guard.
-  const usedCategoryIds = new Map<string, number>();
+  const usedCategoryIds = new Set<string>();
   const authenticationNode = buildAuthenticationNode(document, versionInfo, usedCategoryIds);
   const categories = groupOperationsByCategory(
     operations,
@@ -871,7 +872,7 @@ function summarizeSecurityRequirements(security: unknown[]): string[] {
 function buildAuthenticationNode(
   document: ApiDocument,
   versionInfo: ApiVersionInfo,
-  usedCategoryIds: Map<string, number>
+  usedCategoryIds: Set<string>
 ): DocNode | undefined {
   const schemes =
     versionInfo.sourceKind === 'swagger'
@@ -1285,7 +1286,7 @@ function groupOperationsByCategory(
   operations: OperationEntry[],
   tagDescriptions: Map<string, string>,
   versionInfo: ApiVersionInfo,
-  usedCategoryIds: Map<string, number>
+  usedCategoryIds: Set<string>
 ): DocNode[] {
   const grouped = new Map<string, OperationEntry[]>();
 
@@ -1544,11 +1545,23 @@ function defaultRootTitle(sourceKind: ApiSourceKind): string {
   return sourceKind === 'swagger' ? 'Swagger API' : 'OpenAPI API';
 }
 
-function uniqueSlug(value: string, used: Map<string, number>): string {
-  // Route through uniqueId so a slugified id that collides with an already-used
-  // id (e.g. an explicit category whose name slugs to `foo-bar-2`) is
-  // disambiguated by the same while-loop guard, instead of silently colliding.
-  return uniqueId(slugify(value), used);
+/**
+ * A category id, unique under pathCollisionKey: each one names a tag page, so
+ * two tags whose slugs differ only by case or Unicode form (Straße and
+ * STRASSE) would otherwise be written to one file on macOS or Windows. A slug
+ * already taken, including by a category named like `foo-bar-2`, gets the
+ * next free numeric suffix.
+ */
+function uniqueSlug(value: string, used: Set<string>): string {
+  const slug = slugify(value);
+  let candidate = slug;
+
+  for (let suffix = 2; used.has(pathCollisionKey(candidate)); suffix++) {
+    candidate = `${slug}-${suffix}`;
+  }
+
+  used.add(pathCollisionKey(candidate));
+  return candidate;
 }
 
 function uniqueId(value: string, used: Map<string, number>): string {

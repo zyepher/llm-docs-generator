@@ -368,7 +368,7 @@ describe('stampGuides', () => {
     await writeFile(join(packDir(root), 'pages', 'guide', 'start.md'), '# Start\n\nEdited.\n');
 
     await expect(stamp(root)).rejects.toThrow(
-      "cited files differ from the manifest (pages/guide/start.md); run 'llm-docs sync demo' first"
+      `Pack "demo" cannot be stamped: its files differ from the manifest or are not regular files (pages/guide/start.md); run 'llm-docs sync demo' first.`
     );
     expect(await pathExists(lockFile(root))).toBe(false);
   });
@@ -576,6 +576,28 @@ describe('assessCitations', () => {
         'must be a path under pages/ or files/',
       ],
       [JSON.stringify({ ...valid, guides: { 'guides/../x.md': {} } }), 'guides'],
+      ...['guides/..\\..\\x.md', 'guides/a\u0007.md'].map(
+        (key) =>
+          [
+            JSON.stringify({ ...valid, guides: { [key]: valid.guides['guides/a.md'] } }),
+            'must be a normalized path inside guides/',
+          ] as const
+      ),
+      ...['pages/..\\..\\x.md', 'pages/a\nb.md', 'files/a\u0000b'].map(
+        (target) =>
+          [
+            JSON.stringify({
+              ...valid,
+              guides: {
+                'guides/a.md': {
+                  ...valid.guides['guides/a.md'],
+                  citations: [{ target, sectionSha256: valid.guides['guides/a.md'].sha256 }],
+                },
+              },
+            }),
+            'must be a path under pages/ or files/',
+          ] as const
+      ),
     ] as const) {
       await writeFile(lockFile(root), lock);
       const assessment = await assessCitations(packDir(root));

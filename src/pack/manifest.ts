@@ -26,7 +26,7 @@ import {
 import { ECOSYSTEMS } from '../deps/lockfiles.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { canonicalJsonStringify, readJsonFile } from '../utils/json.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 
 export const MANIFEST_FILE_NAME = 'manifest.json';
@@ -42,10 +42,11 @@ const hashSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/, {
 /**
  * A relative POSIX path that cannot leave the directory it is joined to: no
  * absolute form, no empty, `.`, or `..` segment, no backslash, and no control
- * character (NUL included). Every path a manifest records is one, so no
- * reader can be steered outside the pack or the origin.
+ * character (NUL included). Every path a manifest or the citations lock
+ * records is one, so no reader can be steered outside the pack or the origin
+ * (on Windows a backslash separates segments, so `pages\..\..\x` climbs).
  */
-function isContainedRelativePath(value: string): boolean {
+export function isContainedRelativePath(value: string): boolean {
   return (
     !value.includes('\\') &&
     !/\p{Cc}/u.test(value) &&
@@ -328,6 +329,7 @@ export class ManifestError extends Error {
 
   constructor(
     message: string,
+    /** `link`: the pack directory itself is a symbolic link. */
     readonly reason: 'missing' | 'invalid' | 'other-version' | 'link'
   ) {
     super(message);
@@ -343,29 +345,30 @@ export async function readPackManifest(packDir: string): Promise<PackManifest> {
   const path = join(packDir, MANIFEST_FILE_NAME);
   let raw: unknown;
 
-  for (const [target, label] of [
-    [packDir, 'the pack directory'],
-    [path, MANIFEST_FILE_NAME],
-  ] as const) {
-    let isLink = false;
-    try {
-      isLink = (await lstat(target)).isSymbolicLink();
-    } catch {
-      // Reading the manifest below reports a missing or unreadable one.
-    }
-    if (isLink) {
-      throw new ManifestError(
-        `${label} is a symbolic link, which llm-docs never reads a pack through`,
-        'link'
-      );
-    }
+  let packDirIsLink = false;
+  try {
+    packDirIsLink = (await lstat(packDir)).isSymbolicLink();
+  } catch {
+    // Reading the manifest below reports a missing or unreadable one.
+  }
+  if (packDirIsLink) {
+    throw new ManifestError(
+      'the pack directory is a symbolic link, which llm-docs never reads a pack through',
+      'link'
+    );
   }
 
   try {
-    raw = await readJsonFile(path);
+    raw = await readJsonFile(path, { followLinks: false });
   } catch (error) {
     if (isFileNotFoundError(error)) {
       throw new ManifestError(`${MANIFEST_FILE_NAME} is missing`, 'missing');
+    }
+    if (error instanceof RefusedFileError && error.refusal.kind === 'not-regular') {
+      throw new ManifestError(
+        `${MANIFEST_FILE_NAME} is ${error.refusal.found}, not a regular file, so llm-docs never reads it`,
+        'invalid'
+      );
     }
     throw new ManifestError(
       `${MANIFEST_FILE_NAME} ${error instanceof SyntaxError ? 'is not valid JSON' : 'cannot be read'}: ${errorMessage(error)}`,

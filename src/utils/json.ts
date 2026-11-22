@@ -1,20 +1,21 @@
-import { readFile } from 'node:fs/promises';
-
 import { isRecord } from './guards.js';
-import { writeTextFileSafely } from './safe-write.js';
+import { readRegularFile, writeTextFileSafely } from './safe-write.js';
 import { compareStringsByCodeUnit } from './sort.js';
 
 /**
  * Read and JSON-parse a UTF-8 file, returning the parsed value as `unknown`.
+ * The file must be a regular file (readRegularFile): a named pipe or device
+ * at a fixed name is refused with RefusedFileError instead of blocking the
+ * command. Links are followed unless `followLinks` is false.
  *
- * Centralizes the read-then-parse that callers all performed inline. It
- * deliberately does NOT catch: every caller wraps it in its own try/catch and
- * maps ENOENT (missing file) versus SyntaxError (malformed JSON) to a
- * domain-specific error, so the rejection behavior is identical to the inline
- * `JSON.parse(await readFile(path, 'utf-8'))` it replaces.
+ * It deliberately does NOT catch: every caller maps ENOENT (missing file),
+ * RefusedFileError, and SyntaxError (malformed JSON) to its own error.
  */
-export async function readJsonFile(path: string): Promise<unknown> {
-  return JSON.parse(await readFile(path, 'utf-8'));
+export async function readJsonFile(
+  path: string,
+  options: { followLinks: boolean } = { followLinks: true }
+): Promise<unknown> {
+  return JSON.parse((await readRegularFile(path, options)).toString('utf-8'));
 }
 
 /**

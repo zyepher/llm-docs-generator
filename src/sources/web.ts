@@ -17,10 +17,12 @@ import {
 } from '../config/project.js';
 import { extractMarkdownLinkUrls } from '../core/website-discovery.js';
 import type { ManifestFetch } from '../pack/manifest.js';
+import { pathCollisionKey } from '../utils/fs-path.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { compileGlobs, type AcquireContext, type AcquiredFile } from './acquire.js';
 import type { SourceAcquisition } from './acquire.js';
-import { createHttpClient, redactUrl, type HttpClient, type HttpResponse } from './http.js';
+import { createHttpClient, type HttpClient, type HttpResponse } from './http.js';
+import { redactUrl } from '../utils/url-credentials.js';
 
 /** Requests in flight per source; the client also caps each host at 4. */
 const FETCH_CONCURRENCY = 8;
@@ -33,7 +35,8 @@ interface PlannedFetch {
 
 function fetchMetadata(response: HttpResponse): ManifestFetch {
   return {
-    finalUrl: response.finalUrl,
+    // A redirect may lead to a presigned URL: manifests record it redacted.
+    finalUrl: redactUrl(response.finalUrl),
     status: response.status,
     ...(response.etag === undefined ? {} : { etag: response.etag }),
     ...(response.lastModified === undefined ? {} : { lastModified: response.lastModified }),
@@ -89,7 +92,7 @@ async function fetchAll(
         sha256: sha256Prefixed(response.body),
         bytes: response.body.byteLength,
         url: entry.url,
-        sourceLabel: entry.url,
+        sourceLabel: redactUrl(entry.url),
         fetch: fetchMetadata(response),
       };
     }
@@ -146,7 +149,7 @@ export function selectIndexedUrls(
     test(pathname) || test(pathname.replace(/^\/+/, ''));
   const prefix = normalizePrefix(source.stripPrefix);
   const seenUrls = new Set<string>();
-  const byPath = new Map<string, string>();
+  const byPath = new Map<string, { url: string; path: string }>();
   const planned: PlannedFetch[] = [];
 
   for (const raw of extractMarkdownLinkUrls(indexText)) {
@@ -176,15 +179,15 @@ export function selectIndexedUrls(
         ? pathname.slice(prefix.length) || '/'
         : pathname;
     const path = storedPathForPathname(stripped);
-    const previous = byPath.get(path);
+    const previous = byPath.get(pathCollisionKey(path));
 
     if (previous !== undefined) {
       throw new ConfigError(
-        `${redactUrl(previous)} and ${redactUrl(url.href)} in ${redactUrl(source.url)} would both be stored at "${path}"; narrow "include" or "exclude".`
+        `${redactUrl(previous.url)} and ${redactUrl(url.href)} in ${redactUrl(source.url)} would both be stored at "${previous.path === path ? path : `${previous.path}" and "${path}`}"${previous.path === path ? '' : ' (one path on a case- or normalization-insensitive file system)'}; narrow "include" or "exclude".`
       );
     }
 
-    byPath.set(path, url.href);
+    byPath.set(pathCollisionKey(path), { url: url.href, path });
     planned.push({ url: url.href, path });
   }
 
@@ -225,7 +228,9 @@ export async function acquireLlmsTxt(
         type: 'llms-txt',
         url: source.url,
         sha256: sha256Prefixed(index.body),
-        ...(index.finalUrl === new URL(source.url).href ? {} : { finalUrl: index.finalUrl }),
+        ...(index.finalUrl === new URL(source.url).href
+          ? {}
+          : { finalUrl: redactUrl(index.finalUrl) }),
       },
       files,
       warnings: [],

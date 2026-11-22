@@ -46,16 +46,32 @@ function fileType(stats: Stats): string {
 }
 
 /**
- * Read a file only when it is a regular file. Opening a named pipe for reading
- * blocks until something writes to it, so the open is non-blocking and the
- * type is checked on the opened descriptor. With `followLinks: false` a
- * symbolic link is refused too, including one swapped in after the check.
- * A missing file rejects with ENOENT, as readFile does.
+ * Read a file only when it is a regular file (see openRegularFile). A missing
+ * file rejects with ENOENT, as readFile does.
  */
 export async function readRegularFile(
   path: string,
   options: { followLinks: boolean }
 ): Promise<Buffer> {
+  const handle = await openRegularFile(path, options);
+  try {
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Open a file for reading only when it is a regular file; the caller closes
+ * the handle. Opening a named pipe for reading blocks until something writes
+ * to it, so the open is non-blocking and the type is checked on the opened
+ * descriptor. With `followLinks: false` a symbolic link is refused too,
+ * including one swapped in after the check.
+ */
+export async function openRegularFile(
+  path: string,
+  options: { followLinks: boolean }
+): Promise<FileHandle> {
   if (!options.followLinks && (await lstat(path)).isSymbolicLink()) {
     throw new RefusedFileError(path, { kind: 'not-regular', found: 'a symbolic link' });
   }
@@ -85,10 +101,11 @@ export async function readRegularFile(
     if (!stats.isFile()) {
       throw new RefusedFileError(path, { kind: 'not-regular', found: fileType(stats) });
     }
-    return await handle.readFile();
-  } finally {
+  } catch (error) {
     await handle.close();
+    throw error;
   }
+  return handle;
 }
 
 /**

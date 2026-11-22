@@ -5,6 +5,8 @@
  * (`formatStatusHuman`) or an agent (`formatStatusBrief`).
  */
 
+import { sep } from 'node:path';
+
 import {
   CONFIG_FILE_NAME,
   ConfigError,
@@ -12,7 +14,9 @@ import {
   type DependencyVersionResolver,
   type LoadedProjectConfig,
 } from '../config/project.js';
+import { packOfflineStaleness, type StaleReason } from '../pack/build.js';
 import { readProjectPacks, type ProjectPack } from '../pack/manifest.js';
+import { errorMessage } from '../utils/guards.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import {
   resolveModelCutoff,
@@ -40,16 +44,29 @@ import {
   type ReleaseInfo,
   type ReleaseQuery,
 } from './registries.js';
+import { urlCredentials } from '../utils/url-credentials.js';
 
 export type PackState =
   | 'ok'
   | 'stale-pack'
   | 'lockfile-conflict'
   | 'not-in-lockfile'
+  | 'other-registry'
   | 'lockfile-unread'
   | 'recipe-changed'
+  | 'sources-changed'
+  | 'pack-changed'
   | 'missing'
+  | 'unusable'
   | 'orphan';
+
+/**
+ * What `sync --check` decides for a pack without the network
+ * (packOfflineStaleness): why it would rebuild, or the refusal sync would
+ * fail with. Absent when sync would skip the pack, or for an orphan.
+ */
+export type OfflineStaleness =
+  { kind: 'stale'; reason: StaleReason; detail: string } | { kind: 'refused'; message: string };
 
 /**
  * Where a release date falls for the model in use: after its cutoff month,
@@ -79,6 +96,7 @@ export interface PackStatusInput {
   covers: DependencyRef[];
   /** llm-docs.json lists the pack. */
   inConfig: boolean;
+  offline?: OfflineStaleness;
 }
 
 /** A package a pack covers, at a version the lockfiles resolve for it. */
@@ -172,6 +190,8 @@ export interface ComputeStatusInput {
   recentDays?: number;
   /** Lockfiles the scan found but did not read; a pack bound through one is `lockfile-unread`. */
   unread?: UnreadLockfile[];
+  /** Dependencies installed from another registry; a pack bound to one is `other-registry`. */
+  otherRegistry?: DependencyScan['otherRegistry'];
 }
 
 const DEFAULT_RECENT_DAYS = 180;
@@ -202,6 +222,10 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
     return 'orphan';
   }
 
+  if (pack.offline?.kind === 'refused') {
+    return 'unusable';
+  }
+
   if (pack.indexPath === null) {
     return 'missing';
   }
@@ -218,13 +242,36 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
         : 'stale-pack';
     case 'missing':
       return 'not-in-lockfile';
+    case 'other-registry':
+      if (!pack.versionPinned) {
+        return 'other-registry';
+      }
+      break;
     case 'unread':
       return 'lockfile-unread';
     case undefined:
       break;
   }
 
-  return pack.recipeChanged ? 'recipe-changed' : 'ok';
+  if (pack.recipeChanged) {
+    return 'recipe-changed';
+  }
+
+  switch (pack.offline?.kind === 'stale' ? pack.offline.reason : undefined) {
+    case 'not-built':
+    case 'manifest-unreadable':
+      return 'missing';
+    case 'recipe-edited':
+      return 'recipe-changed';
+    case 'lockfile-moved':
+      return 'stale-pack';
+    case 'files-differ':
+      return 'pack-changed';
+    case 'sources-changed':
+      return 'sources-changed';
+    default:
+      return 'ok';
+  }
 }
 
 const MESSAGE_TEXT_CAP = 200;
@@ -293,6 +340,8 @@ function packNextStep(
         : `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe, then run '${sync}'`;
     case 'not-in-lockfile':
       return `install ${dependency} so a lockfile resolves it, or remove packs.${id}.dependency from ${CONFIG_FILE_NAME}`;
+    case 'other-registry':
+      return `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe: ${dependency} comes from another registry, so its version is not taken from the lockfile`;
     case 'lockfile-unread': {
       const unread =
         lookup?.kind === 'unread'
@@ -300,7 +349,14 @@ function packNextStep(
           : [];
       return `check by hand that the lockfiles resolve ${dependency} to ${messageText(pack.version ?? 'the pack version')}: ${unread.join('; ')}`;
     }
+    case 'unusable': {
+      const refusal = pack.offline?.kind === 'refused' ? pack.offline.message : '';
+      const first = refusal.split(/(?<=\.) /)[0]?.replace(/\.$/, '') ?? '';
+      return `${messageText(first)}; run '${sync}' for what to do`;
+    }
     case 'recipe-changed':
+    case 'sources-changed':
+    case 'pack-changed':
     case 'missing':
       return sync;
   }
@@ -313,7 +369,7 @@ function discoverCommand(dependency: ResolvedDependency): string {
     dependency.ecosystem === 'swiftpm' &&
     repository !== undefined &&
     URL.canParse(repository) &&
-    new URL(repository).username === ''
+    urlCredentials(new URL(repository)).length === 0
       ? repository
       : dependency.name;
   return `llm-docs discover --package ${dependency.ecosystem}:${messageText(name)}@${messageText(dependency.version)}`;
@@ -336,7 +392,7 @@ function packReleaseQuery(pack: PackStatusInput): ReleaseQuery | undefined {
 
 /** The versions the lockfiles resolve for a dependency, each with the lockfiles that say so. */
 function resolvedVersions(
-  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread'>,
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread' | 'otherRegistry'>,
   dependency: DependencyRef
 ): { version: string; lockfiles: string[] }[] {
   const lookup = findDependencyVersion(scan, dependency);
@@ -345,6 +401,7 @@ function resolvedVersions(
     case 'found':
       return [{ version: lookup.version, lockfiles: lookup.lockfiles }];
     case 'missing':
+    case 'other-registry':
     case 'unread':
       return [];
     case 'conflict': {
@@ -366,7 +423,12 @@ function resolvedVersions(
  */
 export function computeStatus(input: ComputeStatusInput): StatusReport {
   const lockfiles = [...new Set(input.dependencies.map((dependency) => dependency.lockfile))];
-  const scan = { dependencies: input.dependencies, lockfiles, unread: input.unread ?? [] };
+  const scan = {
+    dependencies: input.dependencies,
+    lockfiles,
+    unread: input.unread ?? [],
+    otherRegistry: input.otherRegistry ?? [],
+  };
   const recentDays = input.recentDays ?? DEFAULT_RECENT_DAYS;
   const end = input.cutoff === undefined ? undefined : cutoffEnd(input.cutoff.cutoff);
 
@@ -552,10 +614,18 @@ function packStateReason(pack: PackStatus): string | undefined {
     }
     case 'not-in-lockfile':
       return `no lockfile resolves ${name}, so nothing checks that docs for ${version} match what the project uses`;
+    case 'other-registry':
+      return `${name} is installed from another registry, so the lockfile cannot pin which version its docs describe`;
     case 'missing':
       return 'not built or invalid';
     case 'recipe-changed':
       return 'its recipe in llm-docs.json changed since the last build';
+    case 'sources-changed':
+      return 'its local source files changed since the last build';
+    case 'pack-changed':
+      return 'its files differ from its manifest, so its pages cannot be trusted';
+    case 'unusable':
+      return 'llm-docs cannot use or rebuild it as it is';
     default:
       return undefined;
   }
@@ -668,6 +738,8 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
         )
         .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt))[0];
       return pack.state !== 'orphan' &&
+        pack.state !== 'pack-changed' &&
+        pack.state !== 'unusable' &&
         newest !== undefined &&
         pack.indexPath !== null &&
         pack.version !== null
@@ -790,6 +862,8 @@ function lockfileSummary(pack: PackStatus): string {
         .join(', ');
     case 'missing':
       return 'not in any lockfile';
+    case 'other-registry':
+      return 'other registry';
     case 'unread':
       return 'lockfile not read';
     default:
@@ -951,6 +1025,19 @@ export interface GatherStatusOptions {
    * Without it, a malformed value is a ConfigError, for a person to fix.
    */
   ignoreInvalidCutoff?: (problem: string) => void;
+  /**
+   * The hook's channel for what it went on past: a Claude Code settings file
+   * that is not a regular file, or a pack check cut short by
+   * `packCheckBudgetMs`. Without it, each is one of the warnings.
+   */
+  ignoredProblem?: (problem: string) => void;
+  /**
+   * How long to wait for the per-pack offline checks (packOfflineStaleness),
+   * the hook's bound on hashing pack files and local sources; unbounded when
+   * absent. A pack whose check did not finish is judged by its manifest and
+   * the lockfiles alone.
+   */
+  packCheckBudgetMs?: number;
   env: NodeJS.ProcessEnv;
   homeDir: string;
   cacheDir: string;
@@ -987,18 +1074,29 @@ export interface ProjectStatus {
 async function packStatusInput(
   loaded: LoadedProjectConfig,
   pack: ProjectPack,
-  resolveDependencyVersion: DependencyVersionResolver
+  resolveDependencyVersion: DependencyVersionResolver,
+  check: { signal?: AbortSignal; ignore: (problem: string) => void }
 ): Promise<PackStatusInput> {
   const config = pack.inConfig ? loaded.config.packs[pack.id] : undefined;
   const manifest = pack.manifest.kind === 'ok' ? pack.manifest.manifest : undefined;
   let recipeChanged = false;
 
-  if (config !== undefined && manifest !== undefined) {
+  let offline: OfflineStaleness | undefined;
+
+  if (config !== undefined) {
     try {
       const resolved = await resolvePackRecipe(loaded.config, pack.id, {
         resolveDependencyVersion,
       });
-      recipeChanged = resolved.recipeHash !== manifest.recipeHash;
+      recipeChanged = manifest !== undefined && resolved.recipeHash !== manifest.recipeHash;
+      const checked = await offlineStalenessWithin(loaded, resolved, check.signal);
+      if (checked?.kind === 'unfinished') {
+        check.ignore(
+          `Pack ${pack.id}: the check of its files and local sources did not finish in time, so it is judged by its manifest alone; run 'llm-docs status' for the full check`
+        );
+      } else {
+        offline = checked;
+      }
     } catch (error) {
       // A lockfile that no longer resolves the dependency shows in the LOCKFILE column instead.
       if (!(error instanceof ConfigError)) {
@@ -1020,7 +1118,41 @@ async function packStatusInput(
     ),
     covers: manifest?.recipe.covers ?? config?.covers ?? [],
     inConfig: pack.inConfig,
+    ...(offline === undefined ? {} : { offline }),
   };
+}
+
+/** packOfflineStaleness as status reports it, or `unfinished` once `signal` aborts. */
+async function offlineStalenessWithin(
+  loaded: LoadedProjectConfig,
+  resolved: Awaited<ReturnType<typeof resolvePackRecipe>>,
+  signal: AbortSignal | undefined
+): Promise<OfflineStaleness | { kind: 'unfinished' } | undefined> {
+  const check = packOfflineStaleness(loaded, resolved).then(
+    (stale): OfflineStaleness | undefined =>
+      stale === undefined ? undefined : { kind: 'stale', ...stale },
+    // Project-relative paths, so the reason fits the note's line.
+    (error: unknown): OfflineStaleness => ({
+      kind: 'refused',
+      message: errorMessage(error).split(`${loaded.projectRoot}${sep}`).join(''),
+    })
+  );
+  if (signal === undefined) {
+    return check;
+  }
+  if (signal.aborted) {
+    return { kind: 'unfinished' };
+  }
+  let stop: () => void = () => undefined;
+  const aborted = new Promise<{ kind: 'unfinished' }>((settle) => {
+    stop = () => settle({ kind: 'unfinished' });
+    signal.addEventListener('abort', stop, { once: true });
+  });
+  try {
+    return await Promise.race([check, aborted]);
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
 }
 
 /**
@@ -1044,13 +1176,18 @@ export async function gatherProjectStatus(
       ? {}
       : { maxLockfileBytes: options.maxLockfileBytes }),
   });
+  const ignored: string[] = [];
+  const ignore = options.ignoredProblem ?? ((problem: string) => ignored.push(problem));
   const model =
-    resolveModelIdFromEnvironment({
-      ...(options.model === undefined ? {} : { stated: options.model }),
-      env: options.env,
-      projectRoot,
-      homeDir: options.homeDir,
-    }) ?? null;
+    (await resolveModelIdFromEnvironment(
+      {
+        ...(options.model === undefined ? {} : { stated: options.model }),
+        env: options.env,
+        projectRoot,
+        homeDir: options.homeDir,
+      },
+      ignore
+    )) ?? null;
   const configCutoff = loaded?.config.model?.cutoff;
   const cutoff =
     resolveModelCutoff({
@@ -1067,11 +1204,20 @@ export async function gatherProjectStatus(
     dependencies.scan(),
     loaded === null ? [] : readProjectPacks(loaded),
   ]);
+  const packCheckSignal =
+    options.packCheckBudgetMs === undefined
+      ? undefined
+      : AbortSignal.timeout(options.packCheckBudgetMs);
   const packInputs =
     loaded === null
       ? []
       : await Promise.all(
-          packs.map((pack) => packStatusInput(loaded, pack, dependencies.resolveVersion))
+          packs.map((pack) =>
+            packStatusInput(loaded, pack, dependencies.resolveVersion, {
+              ...(packCheckSignal === undefined ? {} : { signal: packCheckSignal }),
+              ignore,
+            })
+          )
         );
 
   const queries = new Map<string, ReleaseQuery>();
@@ -1081,7 +1227,12 @@ export async function gatherProjectStatus(
     }
   }
   for (const input of packInputs) {
-    if (input.indexPath === null) {
+    // A private package's release date says nothing about a public one of the same name.
+    if (
+      input.indexPath === null ||
+      (input.dependency !== null &&
+        findDependencyVersion(scan, input.dependency).kind === 'other-registry')
+    ) {
       continue;
     }
     const own = packReleaseQuery(input);
@@ -1127,6 +1278,7 @@ export async function gatherProjectStatus(
     packs: packInputs,
     now: options.now,
     unread: scan.unread,
+    otherRegistry: scan.otherRegistry,
   });
 
   return {
@@ -1137,6 +1289,8 @@ export async function gatherProjectStatus(
     model,
     cutoff,
     pendingReleaseDates,
-    warnings: [...new Set([...scan.warnings, ...lookup.warnings])].sort(compareStringsByCodeUnit),
+    warnings: [...new Set([...scan.warnings, ...lookup.warnings, ...ignored])].sort(
+      compareStringsByCodeUnit
+    ),
   };
 }

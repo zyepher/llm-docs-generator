@@ -6,7 +6,7 @@
  * infers source authority.
  */
 
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { basename } from 'node:path';
 
 import {
@@ -19,6 +19,7 @@ import {
 } from '../../core/models.js';
 import { slugifyText } from '../../utils/slug.js';
 import { ParserError } from '../parser-error.js';
+import { readRegularFile } from '../../utils/safe-write.js';
 
 const STRIPPED_ELEMENTS = ['script', 'style', 'template'] as const;
 const VOID_ELEMENTS = new Set([
@@ -151,7 +152,7 @@ class HtmlParser {
   constructor(private readonly filePath: string) {}
 
   async parse(): Promise<HtmlDocument> {
-    const raw = await readFile(this.filePath, 'utf-8');
+    const raw = (await readRegularFile(this.filePath, { followLinks: false })).toString('utf-8');
     let parsed: ParsedHtml;
     try {
       parsed = this.parseContent(raw.replace(/^\uFEFF/, ''));
