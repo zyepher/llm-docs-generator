@@ -340,6 +340,30 @@ describe('syncPacks', () => {
     expect(report.packs.find((pack) => pack.id === 'word')?.warnings).toEqual([]);
   });
 
+  it('ignores a version inside a longer one and suggests a clean name', async () => {
+    const root = await makeProject(
+      {
+        vue: { ...PACK, title: 'Vue 1.5', version: '1' },
+        lib: { ...PACK, title: 'Lib 3.2.1', version: '2.1' },
+        paren: { ...PACK, title: 'Vite (v8.2.0)', version: '8.2.0' },
+        dash: { ...PACK, title: 'Vite - 8.2.0', version: '8.2.0' },
+      },
+      DOCS
+    );
+    const report = await syncPacks(root, undefined);
+    const warnings = (id: string): readonly string[] | undefined =>
+      report.packs.find((pack) => pack.id === id)?.warnings;
+
+    expect(warnings('vue')).toEqual([]);
+    expect(warnings('lib')).toEqual([]);
+    expect(warnings('paren')).toEqual([
+      'The title "Vite (v8.2.0)" already holds the version 8.2.0, and the index and the managed block add the version after the title, so they show it twice; set packs.paren.title to the library\'s name alone, such as "Vite".',
+    ]);
+    expect(warnings('dash')).toEqual([
+      'The title "Vite - 8.2.0" already holds the version 8.2.0, and the index and the managed block add the version after the title, so they show it twice; set packs.dash.title to the library\'s name alone, such as "Vite".',
+    ]);
+  });
+
   it('updates the managed block last, listing only the packs that built', async () => {
     const root = await makeProject(
       { demo: PACK, broken: { ...PACK, sources: [{ type: 'local', path: 'missing' }] } },

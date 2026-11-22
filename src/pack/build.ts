@@ -1626,12 +1626,19 @@ export async function previewPack(
  */
 function titleVersionWarnings({ id, recipe }: ResolvedPack): string[] {
   const escaped = recipe.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`(?:^|[^\\p{L}\\p{N}])v?${escaped}(?![\\p{L}\\p{N}])`, 'iu');
+  const pattern = new RegExp(
+    `(?<![\\p{L}\\p{N}]|\\p{N}\\.)v?${escaped}(?![\\p{L}\\p{N}]|\\.\\p{N})`,
+    'iu'
+  );
 
   if (!pattern.test(recipe.title)) {
     return [];
   }
-  const name = recipe.title.replace(pattern, '').replace(/\s+/g, ' ').trim();
+  const name = recipe.title
+    .replace(pattern, '')
+    .replace(/\(\s*\)|\[\s*\]|\{\s*\}/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[ :,([-]+|[ :,([-]+$/g, '');
   return [
     `The title "${recipe.title}" already holds the version ${recipe.version}, and the index and the managed block add the version after the title, so they show it twice; set packs.${id}.title to the library's name alone${name === '' ? '' : `, such as "${name}"`}.`,
   ];
