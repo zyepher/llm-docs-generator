@@ -2,8 +2,10 @@
   "id": "stripe-23",
   "title": "Checkout restricted to card and PayPay, and pausing a subscription, with stripe-node 23",
   "kind": "post-cutoff",
+  "stratum": "type-visible",
+  "packageDocumentsAnswer": "types",
   "library": { "name": "stripe", "version": "23.1.0", "released": "2026-10-29" },
-  "notes": "stripe-node 23.0.0 (2026-09-30) removed payment_method_types from Checkout.SessionCreateParams in favour of allowed_payment_method_types, and added subscriptions.pause (POST /v1/subscriptions/:id/pause with invoicing_behavior). A model coding from memory reaches for payment_method_types (a type error now) and pauses with subscriptions.update plus pause_collection (compiles, but hits the wrong endpoint).",
+  "notes": "stripe-node 23.0.0 (2026-09-30) removed payment_method_types from Checkout.SessionCreateParams in favour of allowed_payment_method_types, and added subscriptions.pause (POST /v1/subscriptions/:id/pause with invoicing_behavior). A model coding from memory reaches for payment_method_types (a type error now) and pauses with subscriptions.update plus pause_collection (compiles, but hits the wrong endpoint). The installed types state both answers: node_modules/stripe/cjs/resources/Checkout/Sessions.d.ts:2153 contrasts allowed_payment_method_types with payment_method_types, node_modules/stripe/cjs/resources/Subscriptions.d.ts:86 documents subscriptions.pause, and node_modules/stripe/cjs/resources/Subscriptions.d.ts:3014 says invoicing_behavior defaults to pending_invoice_item (so the check accepts the default as well as the explicit value). node_modules/stripe/CHANGELOG.md:147 and :168 list both additions.",
   "maxTurns": 40,
   "timeoutSeconds": 1200
 }

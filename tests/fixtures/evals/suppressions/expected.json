@@ -1,0 +1,12 @@
+[
+  "src/View.tsx:9 uses `as any`",
+  "src/Widget.svelte:3 uses `: any`",
+  "src/Widget.svelte:9 uses `as any`",
+  "src/casts.ts:2 uses `: any`",
+  "src/casts.ts:6 uses `as any`",
+  "src/casts.ts:8 uses `as unknown as`",
+  "src/casts.ts:10 uses `as any`",
+  "src/casts.ts:12 uses a @ts- directive",
+  "src/casts.ts:15 uses a @ts- directive",
+  "src/casts.ts:18 uses `as any`"
+]

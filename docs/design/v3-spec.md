@@ -826,7 +826,10 @@ writes files.
 `evals/` holds cases and a runner (`npm run eval`). Each case is a small project pinned to a
 library version released after the evaluated model's training cutoff (plus negative controls
 the model already knows), a task prompt, a pack recipe, and mechanical checks (`tsc --noEmit`,
-`node --test`) the runner executes after the agent finishes. Arms: `baseline` (no pack, no
+`node --test`) the runner executes after the agent finishes. Each post-cutoff case records its
+stratum, `type-visible` when code written from memory fails the type check and `type-invisible`
+when it compiles and fails only at runtime, which the selftest enforces and the results report
+pass rates by. Arms: `baseline` (no pack, no
 plugin), `pack` (pack and managed block, no plugin), `plugin` (pack, block, and plugin hook and
 skills). The runner prepares workspaces with dependencies installed before the agent starts,
 runs `claude -p` with a pinned model, turn and budget caps, and `--setting-sources project` so user

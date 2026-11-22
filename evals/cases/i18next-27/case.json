@@ -1,0 +1,11 @@
+{
+  "id": "i18next-27",
+  "title": "A translation left blank on purpose with i18next 27",
+  "kind": "post-cutoff",
+  "stratum": "type-invisible",
+  "packageDocumentsAnswer": "types",
+  "library": { "name": "i18next", "version": "27.2.3", "released": "2026-11-21" },
+  "notes": "i18next 27.0.0 (2026-11-07) changed the default of returnEmptyString to false: an empty translation now falls back like a missing one, to the fallback language (CHANGELOG.md at v27.2.3, the 27.0.0 entry: 'returnEmptyString defaults to false: an empty translation falls back like a missing value (to the fallback language, the default value or the key) ... Set returnEmptyString: true ... if an empty translation is meant to render nothing'). The repository keeps its migration guide on i18next.com, so the CHANGELOG is the in-repo page the pack takes. Code written for i18next 26 (26.3.4, 2026-06-30, the last release before the cutoff) compiles unchanged against 27.2.3 and rendered the German header as just the title; on 27.2.3 the English note leaks into it. The French locale, which has no note at all, proves the fallback language is still configured. The fixture's resources are not declared through CustomTypeOptions, so the change stays out of the types, as it is in most projects. The installed types state the new default: node_modules/i18next/typescript/options.d.ts:650 ('Since v27 an empty string falls back like a missing value by default').",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

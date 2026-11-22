@@ -1,0 +1,15 @@
+{
+  "id": "mcp-sdk-v2-tools",
+  "title": "Showing tool failures in a chat UI with MCP SDK v2",
+  "kind": "post-cutoff",
+  "stratum": "type-invisible",
+  "packageDocumentsAnswer": "none",
+  "library": {
+    "name": "@modelcontextprotocol/client",
+    "version": "2.4.0",
+    "released": "2026-10-23"
+  },
+  "notes": "MCP SDK 2.0.0 (2026-07-27) changed what callTool does for a tool the server does not have: it now rejects with a ProtocolError (-32602) instead of resolving with a CallToolResult whose isError is true (packages/server/CHANGELOG.md:709 at v2.4.0; skills/mcp-typescript-sdk-upgrade-to-v2/references/behavioral-changes.md:29, 'Unknown / disabled tool calls now reject ... v1 callers that checked result.isError for an unknown tool will get an unhandled rejection'; docs/clients/calling.md:28). A tool that reports an error and arguments that fail validation still resolve with isError. The 1.x idiom of branching on result.isError compiles unchanged against 2.4.0 and handled all three cases on @modelcontextprotocol/sdk 1.29.0 (2026-03-30, the last release before the cutoff); on 2.4.0 the unknown tool rejects. A from-memory solution that wraps the call in try/catch out of caution passes too, which is a correct answer. The installed types only say that protocol-level failures throw (node_modules/@modelcontextprotocol/client/dist/client-BTIWJvaF.d.mts:1045) without saying that an unknown tool is one, so this case records none.",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}

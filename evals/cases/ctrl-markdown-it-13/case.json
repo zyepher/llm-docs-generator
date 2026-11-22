@@ -1,0 +1,11 @@
+{
+  "id": "ctrl-markdown-it-13",
+  "title": "Linking bare web addresses in comments with markdown-it 13 (control)",
+  "kind": "control",
+  "stratum": "control",
+  "packageDocumentsAnswer": "docs",
+  "library": { "name": "markdown-it", "version": "13.0.2", "released": "2023-09-26" },
+  "notes": "Negative control for markdown-it-15, in the type-invisible task shape: the same task and checks on markdown-it 13.0.2, where new MarkdownIt({ linkify: true }) already links www.example.com and example.com/docs (linkify-it 4 has fuzzy links on by default), so the from-memory answer is simply correct and nothing in the compiler or the runtime pushes the agent anywhere. The pack arm must not do worse than baseline here, and must not tempt the agent into settings that only 15.x needs (md.linkify.set({ fuzzyLink: true }) is harmless on 13.x as well). The installed packages document it in their READMEs: node_modules/markdown-it/README.md:113 (the linkify option) and node_modules/linkify-it/README.md:121 (fuzzyLink, default true).",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

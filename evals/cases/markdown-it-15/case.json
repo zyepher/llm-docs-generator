@@ -1,0 +1,11 @@
+{
+  "id": "markdown-it-15",
+  "title": "Linking bare web addresses in comments with markdown-it 15",
+  "kind": "post-cutoff",
+  "stratum": "type-invisible",
+  "packageDocumentsAnswer": "types",
+  "library": { "name": "markdown-it", "version": "15.0.3", "released": "2026-10-16" },
+  "notes": "markdown-it 15.0.0 (2026-07-30) moved to linkify-it 6 (2026-07-11), which no longer recognizes 'fuzzy' links such as www.example.com or example.com/docs by default (CHANGELOG.md at tag 15.0.3: '[breaking] linkify-it => v6 / No fuzzy links by default'; docs/migration/migration_v15.md, section Linkification: 'linkify-it no longer recognizes fuzzy links such as example.com by default. If you rely on this behavior, enable it explicitly: md.linkify.set({ fuzzyLink: true })'). new MarkdownIt({ linkify: true }), the from-memory answer, compiles unchanged against 15.0.3 and linked bare domains on 14.2.0 (2026-05-23, the last release before the cutoff); on 15.0.3 it leaves them as text, while https and email addresses are still linked. ctrl-markdown-it-13 is the same task on 13.0.2, where the from-memory answer is correct. The installed types state the default, without saying it changed: node_modules/linkify-it/build/index.d.ts:63 ('Recognize URLs without http(s):// prefix. Default false.'); markdown-it's own README and types do not mention it.",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

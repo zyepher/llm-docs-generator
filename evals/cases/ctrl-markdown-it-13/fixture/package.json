@@ -1,0 +1,20 @@
+{
+  "name": "discussions",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "markdown-it": "13.0.2"
+  },
+  "devDependencies": {
+    "@types/linkify-it": "3.0.4",
+    "@types/markdown-it": "13.0.2",
+    "@types/mdurl": "1.0.4",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12"
+  }
+}

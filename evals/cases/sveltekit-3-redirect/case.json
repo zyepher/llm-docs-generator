@@ -1,0 +1,11 @@
+{
+  "id": "sveltekit-3-redirect",
+  "title": "Sending visitors to an external sign-in page from a SvelteKit 3 load",
+  "kind": "post-cutoff",
+  "stratum": "type-invisible",
+  "packageDocumentsAnswer": "types",
+  "library": { "name": "@sveltejs/kit", "version": "3.1.1", "released": "2026-10-29" },
+  "notes": "SvelteKit 3.0.0 (2026-10-01) forbids external redirects by default: redirect() to another origin now throws a plain Error (redirect_external_not_allowed) unless it is given { external: true } or { external: [allowed origins] } (packages/kit/CHANGELOG.md:193 at @sveltejs/kit@3.1.1, 'breaking: forbid external redirects by default'; documentation/docs/60-appendix/35-migrating-to-sveltekit-3.md:667, 'External redirects must be opted into'). The SvelteKit 2 idiom, redirect(302, url) from a server load, compiles unchanged against 3.1.1 and redirected on 2.68.0 (2026-06-24, the last release before the cutoff); on 3.1.1 the load throws a non-redirect error, which is a 500 in the app. The behaviour check calls load with a fake event for two origins and requires a redirect (302, 303, or 307) to github.com/login/oauth/authorize with the client id and the origin's /auth/callback. A route-types check runs svelte-kit sync before the type check so an idiomatic `./$types` import resolves, as it does in the agent's session once Vite has started. The installed types state the answer: node_modules/@sveltejs/kit/types/index.d.ts:1040 documents the external option on redirect().",
+  "maxTurns": 40,
+  "timeoutSeconds": 1200
+}

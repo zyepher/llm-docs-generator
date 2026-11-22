@@ -1,19 +1,31 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import type { MiddlewareHandler } from 'hono';
+import { describe, expect, it, vi } from 'vitest';
 
 import { app } from '../src/app.js';
 
-function sourceFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      return sourceFiles(path);
-    }
-    return /\.ts$/.test(entry.name) ? [path] : [];
-  });
-}
+// The task asks for Hono's own 405 handling. Rather than look for its import in the source, which
+// an unused or type-only import satisfies, wrap the real middleware and record each request it
+// turned from the router's 404 into a 405.
+const producedByMiddleware = vi.hoisted(() => new Set<Request>());
+
+vi.mock('hono/method-not-allowed', async (importOriginal) => {
+  const original = await importOriginal<typeof import('hono/method-not-allowed')>();
+  const methodNotAllowed: typeof original.methodNotAllowed = (options) => {
+    const middleware: MiddlewareHandler = original.methodNotAllowed(options);
+    return async (c, next) => {
+      let statusFromRoutes: number | undefined;
+      await middleware(c, async () => {
+        await next();
+        statusFromRoutes = c.res.status;
+      });
+      if (statusFromRoutes === 404 && c.res.status === 405) {
+        producedByMiddleware.add(c.req.raw);
+      }
+    };
+  };
+  return { ...original, methodNotAllowed };
+});
 
 function methodSet(list: string): string[] {
   return list
@@ -24,8 +36,13 @@ function methodSet(list: string): string[] {
 }
 
 async function expect405(path: string, method: string, allowed: string[]): Promise<void> {
-  const res = await app.request(path, { method });
+  const request = new Request(`http://localhost${path}`, { method });
+  const res = await app.request(request);
   expect(res.status, `${method} ${path}`).toBe(405);
+  expect(
+    producedByMiddleware.has(request),
+    `${method} ${path}: the 405 comes from Hono's method-not-allowed middleware`
+  ).toBe(true);
   expect(res.headers.get('content-type') ?? '').toMatch(/application\/json/);
   expect(methodSet(res.headers.get('allow') ?? ''), `Allow for ${method} ${path}`).toEqual(
     [...allowed].sort()
@@ -88,12 +105,5 @@ describe('catalog API', () => {
   it('keeps the normal 404 for unknown paths', async () => {
     const res = await app.request('/nope', { method: 'DELETE' });
     expect(res.status).toBe(404);
-  });
-
-  it("uses Hono's built-in 405 handling", () => {
-    const src = sourceFiles('src')
-      .map((file) => readFileSync(file, 'utf8'))
-      .join('\n');
-    expect(src).toMatch(/from\s+['"]hono\/method-not-allowed['"]/);
   });
 });

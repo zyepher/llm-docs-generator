@@ -1,5 +1,5 @@
 import { isRecord } from '../../src/utils/guards.js';
-import type { Arm, CaseKind } from './cases.js';
+import type { Arm, CaseKind, PackageDocumentsAnswer, Stratum } from './cases.js';
 import {
   describeOutcome,
   type SessionOutcome,
@@ -12,6 +12,7 @@ export interface RunRow {
   runId: string;
   caseId: string;
   kind: CaseKind;
+  stratum: Stratum;
   arm: Arm;
   repeat: number;
   model: string;
@@ -102,10 +103,14 @@ export function aggregate(rows: RunRow[]): Aggregate {
 export interface Aggregates {
   overall: Record<string, Aggregate>;
   byKind: Record<string, Record<string, Aggregate>>;
+  byStratum: Record<string, Record<string, Aggregate>>;
   byCase: Record<string, Record<string, Aggregate>>;
 }
 
-/** Pass rates and means per arm, per arm within each case kind, and per arm within each case. */
+/**
+ * Pass rates and means per arm: overall, within each case kind, within each stratum, and within
+ * each case.
+ */
 export function buildAggregates(rows: RunRow[], arms: readonly Arm[]): Aggregates {
   const byArm = (subset: RunRow[]): Record<string, Aggregate> =>
     Object.fromEntries(
@@ -113,10 +118,14 @@ export function buildAggregates(rows: RunRow[], arms: readonly Arm[]): Aggregate
     );
   const caseIds = [...new Set(rows.map((row) => row.caseId))].sort();
   const kinds = [...new Set(rows.map((row) => row.kind))].sort();
+  const strata = [...new Set(rows.map((row) => row.stratum))].sort();
   return {
     overall: byArm(rows),
     byKind: Object.fromEntries(
       kinds.map((kind) => [kind, byArm(rows.filter((row) => row.kind === kind))])
+    ),
+    byStratum: Object.fromEntries(
+      strata.map((stratum) => [stratum, byArm(rows.filter((row) => row.stratum === stratum))])
     ),
     byCase: Object.fromEntries(
       caseIds.map((id) => [id, byArm(rows.filter((row) => row.caseId === id))])
@@ -154,6 +163,13 @@ export function isSegment(value: unknown): value is Segment {
   );
 }
 
+/** What the summary shows beside each case's pass rates. */
+export interface CaseFacts {
+  id: string;
+  stratum: Stratum;
+  packageDocumentsAnswer: PackageDocumentsAnswer;
+}
+
 export interface SummaryMeta {
   timestamp: string;
   model: string;
@@ -162,6 +178,7 @@ export interface SummaryMeta {
   arms: readonly Arm[];
   gitCommit: string;
   segments: Segment[];
+  cases: CaseFacts[];
 }
 
 /** Human-readable summary. Plain Markdown tables, no em-dashes. */
@@ -202,12 +219,31 @@ export function renderSummary(meta: SummaryMeta, rows: RunRow[], aggregates: Agg
     lines.push(`| ${kind} | ${arms.map((arm) => cell(perArm[arm])).join(' | ')} |`);
   }
   lines.push('');
+  lines.push('## Pass rate by stratum');
+  lines.push('');
+  lines.push(
+    '`type-visible`: code written from memory fails the type check, so the compiler points at the change. `type-invisible`: it type-checks and fails only at runtime, so nothing in the edit-compile loop says anything changed. `control`: a library version the model has known for years.'
+  );
+  lines.push('');
+  lines.push(`| Stratum | ${arms.join(' | ')} |`);
+  lines.push(`|---|${arms.map(() => '---').join('|')}|`);
+  for (const [stratum, perArm] of Object.entries(aggregates.byStratum)) {
+    lines.push(`| ${stratum} | ${arms.map((arm) => cell(perArm[arm])).join(' | ')} |`);
+  }
+  lines.push('');
   lines.push('## Pass rate by case');
   lines.push('');
-  lines.push(`| Case | ${arms.join(' | ')} |`);
-  lines.push(`|---|${arms.map(() => '---').join('|')}|`);
+  lines.push(
+    '"Package documents it" says where the installed package itself states the answer (`types`: its `.d.ts` or JSDoc, `docs`: prose or agent files it ships, `none`); every arm can read `node_modules`.'
+  );
+  lines.push('');
+  lines.push(`| Case | Stratum | Package documents it | ${arms.join(' | ')} |`);
+  lines.push(`|---|---|---|${arms.map(() => '---').join('|')}|`);
   for (const [caseId, perArm] of Object.entries(aggregates.byCase)) {
-    lines.push(`| ${caseId} | ${arms.map((arm) => cell(perArm[arm])).join(' | ')} |`);
+    const facts = meta.cases.find((candidate) => candidate.id === caseId);
+    lines.push(
+      `| ${caseId} | ${facts?.stratum ?? 'n/a'} | ${facts?.packageDocumentsAnswer ?? 'n/a'} | ${arms.map((arm) => cell(perArm[arm])).join(' | ')} |`
+    );
   }
   lines.push('');
   lines.push('## Behaviour by arm');

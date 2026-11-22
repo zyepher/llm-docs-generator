@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import type { RequestEvent } from '@sveltejs/kit';
 import type { Handle, HandleServerError } from '@sveltejs/kit/hooks';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
@@ -113,9 +114,11 @@ describe('handleError', () => {
     expect(JSON.stringify(result)).not.toContain('hunter2');
 
     expect(consoleError).toHaveBeenCalled();
+    // Any logging shape that carries the id counts: a message string, format arguments, or a
+    // structured object such as console.error({ errorId, error }).
     const logged = consoleError.mock.calls
       .flat()
-      .map((arg) => (arg instanceof Error ? `${arg.message}` : String(arg)))
+      .map((arg) => (typeof arg === 'string' ? arg : inspect(arg, { depth: 10 })))
       .join(' ');
     expect(logged).toContain(String(result.errorId));
   });
