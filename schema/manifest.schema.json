@@ -647,6 +647,13 @@
             "maxFileBytes"
           ],
           "additionalProperties": false
+        },
+        "readFirst": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
