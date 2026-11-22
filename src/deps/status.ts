@@ -951,6 +951,11 @@ export interface GatherStatusOptions {
    * Without it, a malformed value is a ConfigError, for a person to fix.
    */
   ignoreInvalidCutoff?: (problem: string) => void;
+  /**
+   * The hook's channel for a Claude Code settings file that is not a regular
+   * file and was skipped. Without it, the skip is one of the warnings.
+   */
+  skippedSettingsFile?: (problem: string) => void;
   env: NodeJS.ProcessEnv;
   homeDir: string;
   cacheDir: string;
@@ -1044,13 +1049,17 @@ export async function gatherProjectStatus(
       ? {}
       : { maxLockfileBytes: options.maxLockfileBytes }),
   });
+  const skippedSettings: string[] = [];
   const model =
-    resolveModelIdFromEnvironment({
-      ...(options.model === undefined ? {} : { stated: options.model }),
-      env: options.env,
-      projectRoot,
-      homeDir: options.homeDir,
-    }) ?? null;
+    (await resolveModelIdFromEnvironment(
+      {
+        ...(options.model === undefined ? {} : { stated: options.model }),
+        env: options.env,
+        projectRoot,
+        homeDir: options.homeDir,
+      },
+      options.skippedSettingsFile ?? ((problem) => skippedSettings.push(problem))
+    )) ?? null;
   const configCutoff = loaded?.config.model?.cutoff;
   const cutoff =
     resolveModelCutoff({
@@ -1137,6 +1146,8 @@ export async function gatherProjectStatus(
     model,
     cutoff,
     pendingReleaseDates,
-    warnings: [...new Set([...scan.warnings, ...lookup.warnings])].sort(compareStringsByCodeUnit),
+    warnings: [...new Set([...scan.warnings, ...lookup.warnings, ...skippedSettings])].sort(
+      compareStringsByCodeUnit
+    ),
   };
 }

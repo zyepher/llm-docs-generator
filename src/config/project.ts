@@ -9,7 +9,7 @@
  * an unknown key is an error, so a typo can never silently disable behavior.
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 
 import { applyEdits, modify } from 'jsonc-parser';
@@ -30,7 +30,7 @@ import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { canonicalJsonStringify } from '../utils/json.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 
 export const CONFIG_FILE_NAME = 'llm-docs.json';
 const DEFAULT_PACKS_DIR = 'agent-docs';
@@ -511,12 +511,22 @@ export interface LoadedProjectConfig {
   packsDir: string;
 }
 
-/** The nearest ancestor of `cwd` (inclusive) holding llm-docs.json, or undefined. */
+/**
+ * The nearest ancestor of `cwd` (inclusive) holding an entry named
+ * llm-docs.json, or undefined. Any entry stops the walk, so a named pipe or
+ * directory there is reported by the load instead of letting a config
+ * further up take over.
+ */
 export async function findProjectRoot(cwd: string): Promise<string | undefined> {
   let current = resolve(cwd);
 
   while (true) {
-    if (await isFile(join(current, CONFIG_FILE_NAME))) {
+    if (
+      await lstat(join(current, CONFIG_FILE_NAME)).then(
+        () => true,
+        () => false
+      )
+    ) {
       return current;
     }
 
@@ -538,11 +548,48 @@ export async function projectRootForCreate(cwd: string): Promise<string> {
   return (await findProjectRoot(cwd)) ?? (await gitTopLevel(cwd)) ?? resolve(cwd);
 }
 
-async function isFile(path: string): Promise<boolean> {
+/**
+ * The text of llm-docs.json at `configPath`, or null when it does not exist.
+ * Only a regular file is read (a link to one is followed): a named pipe there
+ * would block every command, so anything else is a ConfigError naming it.
+ */
+export async function readProjectConfigText(configPath: string): Promise<string | null> {
   try {
-    return (await stat(path)).isFile();
-  } catch {
-    return false;
+    return (await readRegularFile(configPath, { followLinks: true })).toString('utf-8');
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return null;
+    }
+    throw refusedConfigFile(error);
+  }
+}
+
+/** Replace llm-docs.json atomically; a refused target is a ConfigError that says what to do. */
+export async function writeProjectConfigText(configPath: string, text: string): Promise<void> {
+  try {
+    await writeTextFileSafely(configPath, text);
+  } catch (error) {
+    throw refusedConfigFile(error);
+  }
+}
+
+function refusedConfigFile(error: unknown): unknown {
+  if (!(error instanceof RefusedFileError)) {
+    return error;
+  }
+  switch (error.refusal.kind) {
+    case 'not-regular':
+      return new ConfigError(
+        `${error.message}; llm-docs reads and writes ${CONFIG_FILE_NAME} only as a regular file, so replace it with one (move the current one away first), then run the command again.`
+      );
+    case 'read-only':
+      return new ConfigError(
+        `${error.message}, so llm-docs did not change it; make it writable (chmod u+w ${CONFIG_FILE_NAME}), then run the command again.`
+      );
+    case 'hard-linked':
+      return new ConfigError(
+        `${error.message}, so replacing it would leave the other links holding the old text; make it a single file (copy it, delete the original, and rename the copy), then run the command again.`
+      );
   }
 }
 
@@ -554,18 +601,9 @@ export async function loadProjectConfigIfPresent(
   projectRoot: string
 ): Promise<LoadedProjectConfig | null> {
   const root = resolve(projectRoot);
-  let text: string;
+  const text = await readProjectConfigText(join(root, CONFIG_FILE_NAME));
 
-  try {
-    text = await readFile(join(root, CONFIG_FILE_NAME), 'utf-8');
-  } catch (error) {
-    if (isFileNotFoundError(error)) {
-      return null;
-    }
-    throw error;
-  }
-
-  return assertPacksDirInsideProject(parseProjectConfig(root, text));
+  return text === null ? null : assertPacksDirInsideProject(parseProjectConfig(root, text));
 }
 
 export async function loadProjectConfig(projectRoot: string): Promise<LoadedProjectConfig> {
@@ -690,7 +728,7 @@ export async function initProjectConfig(
 ): Promise<{ created: boolean; configPath: string }> {
   const configPath = join(projectRoot, CONFIG_FILE_NAME);
 
-  if (await isFile(configPath)) {
+  if ((await readProjectConfigText(configPath)) !== null) {
     return { created: false, configPath };
   }
 
@@ -706,7 +744,7 @@ export async function initProjectConfig(
   const text = newConfigText(options.packsDir);
   // Validate the text we are about to write with the same rules a load applies.
   await assertPacksDirInsideProject(parseProjectConfig(projectRoot, text));
-  await writeTextFileSafely(configPath, text);
+  await writeProjectConfigText(configPath, text);
   return { created: true, configPath };
 }
 
@@ -722,23 +760,14 @@ export async function saveProjectConfig(
   pack: PackConfig
 ): Promise<LoadedProjectConfig> {
   const configPath = join(projectRoot, CONFIG_FILE_NAME);
-  let text: string;
-
-  try {
-    text = await readFile(configPath, 'utf-8');
-  } catch (error) {
-    if (!isFileNotFoundError(error)) {
-      throw error;
-    }
-    text = newConfigText(undefined);
-  }
+  const text = (await readProjectConfigText(configPath)) ?? newConfigText(undefined);
 
   const edits = modify(text, ['packs', id], pack, {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
   });
   const updated = `${applyEdits(text, edits).replace(/\s*$/, '')}\n`;
   const loaded = await assertPacksDirInsideProject(parseProjectConfig(projectRoot, updated));
-  await writeTextFileSafely(configPath, updated);
+  await writeProjectConfigText(configPath, updated);
   return loaded;
 }
 

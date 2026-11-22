@@ -1,5 +1,6 @@
 import { createHash, type BinaryLike } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+
+import { openRegularFile } from './safe-write.js';
 
 /**
  * Shared SHA-256 helpers. Centralized so the hashes that feed manifests and
@@ -20,9 +21,13 @@ export function sha256Prefixed(data: BinaryLike): string {
   return `${HASH_PREFIX}${sha256Hex(data)}`;
 }
 
+/**
+ * The prefixed hash of a regular file's bytes, links followed. Anything else
+ * (a named pipe would block the read forever) rejects with RefusedFileError.
+ */
 export async function sha256File(path: string): Promise<string> {
   const hash = createHash('sha256');
-  const stream = createReadStream(path);
+  const stream = (await openRegularFile(path, { followLinks: true })).createReadStream();
 
   await new Promise<void>((resolve, reject) => {
     stream.on('data', (chunk) => hash.update(chunk));

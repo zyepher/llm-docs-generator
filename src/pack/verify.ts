@@ -7,7 +7,7 @@
  * citations (from src/pack/guides.ts), conversion, license.
  */
 
-import { lstat, readFile, stat } from 'node:fs/promises';
+import { lstat, stat } from 'node:fs/promises';
 import { join, posix, resolve, sep } from 'node:path';
 
 import { checkAgentBlocks } from '../agent/block.js';
@@ -28,6 +28,7 @@ import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { checkCitations } from './guides.js';
 import { MANIFEST_FILE_NAME, readProjectPacks, type PackManifest } from './manifest.js';
 import { findLinkTargets, headingAnchors } from './markdown.js';
+import { readRegularFile } from '../utils/safe-write.js';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'info' | 'skipped';
 
@@ -239,7 +240,9 @@ async function readPackText(
     return fail(file.kind === 'missing' ? 'file is missing' : `file is ${file.why}`);
   }
   try {
-    return { text: await readFile(file.absolutePath, 'utf-8') };
+    return {
+      text: (await readRegularFile(file.absolutePath, { followLinks: false })).toString('utf-8'),
+    };
   } catch (error) {
     return fail(`file is unreadable (${errorMessage(error)})`);
   }

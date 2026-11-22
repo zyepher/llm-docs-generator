@@ -6,7 +6,6 @@
  * crawl websites, or infer source truth from implementation code.
  */
 
-import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 
 import {
@@ -21,6 +20,7 @@ import { ParserError } from '../parser-error.js';
 import { errorMessage, isRecord } from '../../utils/guards.js';
 import { slugifyText } from '../../utils/slug.js';
 import { loadYaml } from '../../utils/yaml.js';
+import { readRegularFile } from '../../utils/safe-write.js';
 
 const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
 const PARAMETER_LOCATION_ORDER = ['path', 'query', 'header', 'cookie', 'formData', 'body'] as const;
@@ -106,7 +106,7 @@ export async function parseOpenApiFile(sourcePath: string): Promise<DocNode> {
 
 async function loadDocument(sourcePath: string): Promise<ApiDocument> {
   const fileFormat = getOpenApiFileFormat(sourcePath, 'OpenAPI / Swagger Parser');
-  const content = await readFile(sourcePath, 'utf-8');
+  const content = (await readRegularFile(sourcePath, { followLinks: false })).toString('utf-8');
 
   let parsed: unknown;
 

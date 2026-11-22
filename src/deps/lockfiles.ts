@@ -1,11 +1,12 @@
 import type { Dirent } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { dirname, join, posix, resolve, sep } from 'node:path';
 
 import { FAILSAFE_SCHEMA } from 'js-yaml';
 import { parse as parseToml } from 'smol-toml';
 
 import { errorMessage, isFileNotFoundError, isNonEmptyString, isRecord } from '../utils/guards.js';
+import { readRegularFile, RefusedFileError } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { loadYaml } from '../utils/yaml.js';
@@ -341,7 +342,7 @@ export async function scanDependencies(
         projectRoot: root,
         lockfile: entry.lockfile,
         directory: dirname(absolutePath),
-        text: await readFile(absolutePath, 'utf-8'),
+        text: (await readRegularFile(absolutePath, { followLinks: false })).toString('utf-8'),
       });
 
       for (const dependency of result.dependencies) {
@@ -362,7 +363,13 @@ export async function scanDependencies(
         skipped.push({ lockfile: entry.lockfile, ...skip });
       }
     } catch (error) {
-      warnings.push(`${entry.lockfile}: could not be parsed: ${errorMessage(error)}`);
+      if (error instanceof RefusedFileError) {
+        const reason = `could not be read: ${errorMessage(error)}`;
+        unread.push({ lockfile: entry.lockfile, ecosystems: ecosystem ? [ecosystem] : [], reason });
+        warnings.push(`${entry.lockfile}: ${reason}.`);
+      } else {
+        warnings.push(`${entry.lockfile}: could not be parsed: ${errorMessage(error)}`);
+      }
     }
   }
 
@@ -561,9 +568,14 @@ export function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+/**
+ * A file beside a lockfile (a manifest, `.npmrc`, `go.work`), or undefined when
+ * absent. Only a regular file is read: a named pipe there would block the scan
+ * (and the session-start hook) forever, so it rejects with RefusedFileError.
+ */
 export async function readTextIfExists(path: string): Promise<string | undefined> {
   try {
-    return await readFile(path, 'utf-8');
+    return (await readRegularFile(path, { followLinks: true })).toString('utf-8');
   } catch (error) {
     if (isFileNotFoundError(error)) {
       return undefined;

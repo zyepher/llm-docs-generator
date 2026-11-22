@@ -369,10 +369,12 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
     }
 
     const ignoredCutoffs: string[] = [];
+    const skippedSettings: string[] = [];
     const status = await gatherProjectStatus(
       { projectRoot, loaded },
       {
         ignoreInvalidCutoff: (problem) => ignoredCutoffs.push(problem),
+        skippedSettingsFile: (problem) => skippedSettings.push(problem),
         offline: false,
         budgetMs: HOOK_LIMITS.networkMs,
         maxLockfileBytes: HOOK_LIMITS.maxLockfileBytes,
@@ -385,8 +387,11 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
         now: io.now(),
       }
     );
-    for (const problem of ignoredCutoffs) {
-      await log(`${problem}; ignored it`);
+    for (const problem of [
+      ...ignoredCutoffs.map((problem) => `${problem}; ignored it`),
+      ...skippedSettings,
+    ]) {
+      await log(problem);
     }
     const ignored: string[] = [];
     const text = await sessionBrief(status, harness, (problem) => ignored.push(problem));

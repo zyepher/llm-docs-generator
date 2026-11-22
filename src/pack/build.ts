@@ -779,7 +779,7 @@ const utf8 = new TextDecoder('utf-8', { fatal: true });
 
 async function readUtf8(selected: SelectedFile): Promise<string> {
   try {
-    return utf8.decode(await readFile(selected.file.absolutePath));
+    return utf8.decode(await readRegularFile(selected.file.absolutePath, { followLinks: false }));
   } catch (error) {
     throw new ConfigError(
       `${selected.file.sourceLabel} is not valid UTF-8 text (${errorMessage(error)}); exclude it or carry it with "passthrough".`

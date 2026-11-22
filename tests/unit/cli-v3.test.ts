@@ -5,7 +5,17 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -27,6 +37,10 @@ interface CliResult {
   stderr: string;
 }
 
+/** A run still going after this long is killed and reported as RUN_KILLED: a blocked read never ends. */
+const RUN_LIMIT_MS = 20_000;
+const RUN_KILLED = -1;
+
 function runCli(cwd: string, args: string[], env: Record<string, string> = {}): Promise<CliResult> {
   return new Promise((resolveResult) => {
     execFile(
@@ -35,13 +49,51 @@ function runCli(cwd: string, args: string[], env: Record<string, string> = {}): 
       {
         cwd,
         env: { ...process.env, NO_COLOR: '1', LLM_DOCS_ALLOW_TEMP_SOURCES: '1', ...env },
+        timeout: RUN_LIMIT_MS,
+        killSignal: 'SIGKILL',
       },
       (error, stdout, stderr) => {
-        const code = error === null ? 0 : typeof error.code === 'number' ? error.code : 1;
+        const code =
+          error === null
+            ? 0
+            : error.killed === true
+              ? RUN_KILLED
+              : typeof error.code === 'number'
+                ? error.code
+                : 1;
         resolveResult({ code, stdout, stderr });
       }
     );
   });
+}
+
+/** `hook session-start` with `payload` on stdin, killed like runCli; returns what it printed and logged. */
+async function runHook(
+  cwd: string,
+  payload: string,
+  env: Record<string, string>,
+  cacheDir: string
+): Promise<CliResult & { log: string }> {
+  const logPath = join(cacheDir, 'hook.log');
+  await rm(logPath, { force: true });
+  const result = await new Promise<CliResult>((resolveResult) => {
+    const child = execFile(
+      process.execPath,
+      [cliPath, 'hook', 'session-start'],
+      {
+        cwd,
+        env: { ...process.env, ...env, LLM_DOCS_CACHE_DIR: cacheDir },
+        timeout: RUN_LIMIT_MS,
+        killSignal: 'SIGKILL',
+      },
+      (error, stdout, stderr) => {
+        const code = error === null ? 0 : error.killed === true ? RUN_KILLED : 1;
+        resolveResult({ code, stdout, stderr });
+      }
+    );
+    child.stdin?.end(payload);
+  });
+  return { ...result, log: await readFile(logPath, 'utf-8').catch(() => '') };
 }
 
 async function makeProject(files: Record<string, string>): Promise<string> {
@@ -1568,6 +1620,108 @@ describe('--json: one document on stdout when the command runs, nothing when it 
       'commands'
     );
     expectJsonFailure(await runCli(root, ['capabilities', '--yaml', '--json']), 2);
+  });
+});
+
+describe('fixed-name files llm-docs reads and rewrites', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a named pipe at every fixed-name file instead of blocking on it',
+    async () => {
+      const root = await makeProject(DOCS);
+      const home = await makeProject({});
+      const cache = await makeProject({});
+      const env = {
+        HOME: home,
+        LLM_DOCS_CACHE_DIR: cache,
+        CLAUDE_PROJECT_DIR: '',
+        ANTHROPIC_MODEL: '',
+        LLM_DOCS_MODEL_CUTOFF: '',
+      };
+      const payload = JSON.stringify({ cwd: root });
+      const add = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0'], env);
+      expect(add.code, add.stderr).toBe(0);
+      const pipe = async (path: string): Promise<string> => {
+        const target = join(root, ...path.split('/'));
+        await rm(target, { force: true });
+        await mkdir(dirname(target), { recursive: true });
+        await execFileAsync('mkfifo', [target]);
+        return target;
+      };
+      const notRegular = (path: string) => `${path} is a named pipe, not a regular file`;
+
+      const manifestText = await readFile(join(root, 'agent-docs', 'demo', 'manifest.json'));
+      const manifest = await pipe('agent-docs/demo/manifest.json');
+      const check = await runCli(root, ['sync', '--check'], env);
+      expect(check.code).toBe(1);
+      expect(check.stderr).toContain(
+        'demo: would rebuild (the manifest is unreadable: manifest.json is a named pipe, not a regular file, so llm-docs never reads it)'
+      );
+      const verify = await runCli(root, ['verify'], env);
+      expect(verify.code).toBe(1);
+      expect(verify.stderr).toContain(
+        'manifest.json: is a named pipe, not a regular file, so llm-docs never reads it'
+      );
+      expect((await runCli(root, ['status', '--offline', '--json'], env)).code).toBe(0);
+      expect((await runHook(root, payload, env, cache)).code).toBe(0);
+      await rm(manifest);
+      await writeFile(manifest, manifestText);
+
+      const configPath = join(root, 'llm-docs.json');
+      const configText = await readFile(configPath, 'utf-8');
+      await pipe('llm-docs.json');
+      const status = await runCli(root, ['status', '--offline'], env);
+      expect(status.code).toBe(2);
+      expect(status.stderr).toContain(notRegular(configPath));
+      const hook = await runHook(root, payload, env, cache);
+      expect(hook.code).toBe(0);
+      expect(hook.log).toContain(
+        `${notRegular(configPath)}; llm-docs reads and writes llm-docs.json only as a regular file`
+      );
+      expect(hook.log).toContain('(continuing with the dependency analysis only)');
+      await rm(configPath);
+      await writeFile(configPath, configText);
+
+      await writeFile(join(root, 'package.json'), '{"name":"app","dependencies":{"x":"1"}}');
+      await writeFile(join(root, 'package-lock.json'), npmLockfile('x', '1.0.0'));
+      const npmrc = await pipe('.npmrc');
+      const settings = await pipe('.claude/settings.json');
+      const scan = await runCli(root, ['status', '--offline'], env);
+      expect(scan.code).toBe(0);
+      expect(scan.stderr).toContain(
+        `warning: package-lock.json: could not be read: ${notRegular(npmrc)}.`
+      );
+      expect(scan.stderr).toContain(
+        `warning: ${notRegular(settings)}; skipped it when looking for the model in Claude Code settings`
+      );
+      const settingsHook = await runHook(root, payload, env, cache);
+      expect(settingsHook.code).toBe(0);
+      expect(settingsHook.log).toContain(
+        `${notRegular(settings)}; skipped it when looking for the model in Claude Code settings`
+      );
+    },
+    60_000
+  );
+
+  it('refuses to rewrite a read-only or hard-linked llm-docs.json as a config error', async () => {
+    const root = await makeProject(DOCS);
+    const configPath = join(root, 'llm-docs.json');
+    expect((await runCli(root, ['init'])).code).toBe(0);
+    await chmod(configPath, 0o444);
+
+    const readOnly = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0']);
+    expect(readOnly).toEqual({
+      code: 2,
+      stdout: '',
+      stderr: `llm-docs: ${configPath} is read-only, so llm-docs did not change it; make it writable (chmod u+w llm-docs.json), then run the command again.\n`,
+    });
+
+    await chmod(configPath, 0o644);
+    await link(configPath, join(root, 'second-name.json'));
+    const linked = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0']);
+    expect(linked.code).toBe(2);
+    expect(linked.stderr).toBe(
+      `llm-docs: ${configPath} has 2 hard links, so replacing it would leave the other links holding the old text; make it a single file (copy it, delete the original, and rename the copy), then run the command again.\n`
+    );
   });
 });
 

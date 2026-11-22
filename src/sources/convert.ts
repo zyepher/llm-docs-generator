@@ -37,6 +37,7 @@ import { sha256Hex, sha256Prefixed } from '../utils/hash.js';
 import { canonicalJsonStringify } from '../utils/json.js';
 import { writeTextFileSafely } from '../utils/safe-write.js';
 import type { SelectedConversion } from './acquire.js';
+import { readRegularFile } from '../utils/safe-write.js';
 
 export type ConvertSpec = NonNullable<ResolvedSource['convert']>;
 export type ConverterTool = ConvertSpec['tool'];
@@ -341,7 +342,7 @@ async function convertWithAgent(
 
   try {
     markdown = new TextDecoder('utf-8', { fatal: true }).decode(
-      await readFile(output.absolutePath)
+      await readRegularFile(output.absolutePath, { followLinks: false })
     );
   } catch (error) {
     throw new ConfigError(
@@ -390,7 +391,7 @@ export function isStaleAgentConversion(entry: ManifestSourceEntry): boolean {
 
 async function readCachedConversion(path: string): Promise<string | undefined> {
   try {
-    const text = await readFile(path, 'utf-8');
+    const text = (await readRegularFile(path, { followLinks: false })).toString('utf-8');
     return text.trim() === '' ? undefined : text;
   } catch {
     // A missing or unreadable entry is a cache miss.

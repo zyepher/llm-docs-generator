@@ -11,7 +11,7 @@
  * src/sources/convert.ts runs the `convert` selections.
  */
 
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { posix, relative, resolve, sep } from 'node:path';
 
@@ -32,6 +32,7 @@ import type { ManifestFetch, ManifestOrigin } from '../pack/manifest.js';
 import { isSameOrDescendant } from '../utils/fs-path.js';
 import { errorMessage } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
+import { readRegularFile } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { acquireGit } from './git.js';
@@ -215,7 +216,9 @@ function extensionOf(path: string): string {
 
 /** An OpenAPI or Swagger document, detected by its top-level `openapi:` / `swagger:` key. */
 async function isOpenApiDocument(file: AcquiredFile): Promise<boolean> {
-  const head = (await readFile(file.absolutePath, 'utf-8')).slice(0, 64 * 1024);
+  const head = (await readRegularFile(file.absolutePath, { followLinks: false }))
+    .toString('utf-8')
+    .slice(0, 64 * 1024);
   return /^\s*\{?\s*["']?(?:openapi|swagger)["']?\s*:/m.test(head);
 }
 

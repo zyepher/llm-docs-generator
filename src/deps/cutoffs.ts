@@ -1,9 +1,9 @@
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import cutoffTable from '../../data/model-cutoffs.json';
 import { ConfigError } from '../config/project.js';
 import { isNonEmptyString, isRecord } from '../utils/guards.js';
+import { readRegularFile, RefusedFileError } from '../utils/safe-write.js';
 
 export interface ModelCutoff {
   /** `YYYY-MM`: the model's training data runs through the end of this month. */
@@ -225,11 +225,13 @@ export interface ResolveModelIdInput {
  * file among project `.claude/settings.local.json`, project
  * `.claude/settings.json`, and user `~/.claude/settings.json`. Unreadable or
  * invalid files are skipped silently: the hook must never fail on someone
- * else's config.
+ * else's config. A settings file that is not a regular file (a named pipe
+ * would block the read forever) is skipped and reported to `refused`.
  */
-export function resolveModelIdFromEnvironment(
-  input: ResolveModelIdInput
-): ModelIdentity | undefined {
+export async function resolveModelIdFromEnvironment(
+  input: ResolveModelIdInput,
+  refused: (problem: string) => void
+): Promise<ModelIdentity | undefined> {
   const stated = input.stated?.id.trim();
 
   if (input.stated !== undefined && isNonEmptyString(stated)) {
@@ -249,7 +251,7 @@ export function resolveModelIdFromEnvironment(
   ];
 
   for (const file of settingsFiles) {
-    const id = readSettingsModel(file);
+    const id = await readSettingsModel(file, refused);
 
     if (id !== undefined) {
       return { id, source: 'settings', file };
@@ -259,12 +261,20 @@ export function resolveModelIdFromEnvironment(
   return undefined;
 }
 
-function readSettingsModel(path: string): string | undefined {
+async function readSettingsModel(
+  path: string,
+  refused: (problem: string) => void
+): Promise<string | undefined> {
   try {
-    const settings: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    const settings: unknown = JSON.parse(
+      (await readRegularFile(path, { followLinks: true })).toString('utf-8')
+    );
     const model = isRecord(settings) ? settings.model : undefined;
     return typeof model === 'string' && model.trim() !== '' ? model.trim() : undefined;
-  } catch {
+  } catch (error) {
+    if (error instanceof RefusedFileError) {
+      refused(`${error.message}; skipped it when looking for the model in Claude Code settings`);
+    }
     return undefined;
   }
 }

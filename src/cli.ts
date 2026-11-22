@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -25,9 +25,11 @@ import {
   loadProjectConfigIfPresent,
   packConfigSchema,
   projectRootForCreate,
+  readProjectConfigText,
   resolvePackRecipe,
   saveProjectConfig,
   sourceConfigSchema,
+  writeProjectConfigText,
   PACK_ID_PATTERN,
   READ_FIRST_MAX,
   COVERS_MAX,
@@ -63,8 +65,7 @@ import {
 } from './pack/verify.js';
 import { supportedSourceTypes } from './sources/acquire.js';
 import { CONVERTER_INSTALL_HINTS } from './sources/convert.js';
-import { errorMessage, isFileNotFoundError, isRecord } from './utils/guards.js';
-import { writeTextFileSafely } from './utils/safe-write.js';
+import { errorMessage, isRecord } from './utils/guards.js';
 
 const CLI_NAME = 'llm-docs';
 // Not package.json's description: the bundle inlines each package.json value
@@ -1231,12 +1232,7 @@ function buildProgram(): Command {
     }
 
     const configPath = join(projectRoot, CONFIG_FILE_NAME);
-    const previousConfig = await readFile(configPath, 'utf-8').catch((error: unknown) => {
-      if (isFileNotFoundError(error)) {
-        return null;
-      }
-      throw error;
-    });
+    const previousConfig = await readProjectConfigText(configPath);
     await saveProjectConfig(projectRoot, id, pack);
     say(`Wrote packs.${id} to ${CONFIG_FILE_NAME}.`);
     const report = await syncPacks(projectRoot, [id], { command: `llm-docs add ${id}` });
@@ -1249,7 +1245,7 @@ function buildProgram(): Command {
       if (previousConfig === null) {
         await rm(configPath, { force: true });
       } else {
-        await writeTextFileSafely(configPath, previousConfig);
+        await writeProjectConfigText(configPath, previousConfig);
       }
     }
 

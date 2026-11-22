@@ -26,7 +26,7 @@ import {
 import { ECOSYSTEMS } from '../deps/lockfiles.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { canonicalJsonStringify, readJsonFile } from '../utils/json.js';
-import { writeTextFileSafely } from '../utils/safe-write.js';
+import { RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 
 export const MANIFEST_FILE_NAME = 'manifest.json';
@@ -362,10 +362,16 @@ export async function readPackManifest(packDir: string): Promise<PackManifest> {
   }
 
   try {
-    raw = await readJsonFile(path);
+    raw = await readJsonFile(path, { followLinks: false });
   } catch (error) {
     if (isFileNotFoundError(error)) {
       throw new ManifestError(`${MANIFEST_FILE_NAME} is missing`, 'missing');
+    }
+    if (error instanceof RefusedFileError && error.refusal.kind === 'not-regular') {
+      throw new ManifestError(
+        `${MANIFEST_FILE_NAME} is ${error.refusal.found}, not a regular file, so llm-docs never reads it`,
+        error.refusal.found === 'a symbolic link' ? 'link' : 'invalid'
+      );
     }
     throw new ManifestError(
       `${MANIFEST_FILE_NAME} ${error instanceof SyntaxError ? 'is not valid JSON' : 'cannot be read'}: ${errorMessage(error)}`,

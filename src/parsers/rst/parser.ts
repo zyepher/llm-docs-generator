@@ -15,7 +15,7 @@
  * never invented; unresolved references degrade to their plain text.
  */
 
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { basename } from 'node:path';
 
 import {
@@ -28,6 +28,7 @@ import {
 } from '../../core/models.js';
 import { slugifyText } from '../../utils/slug.js';
 import { ParserError } from '../parser-error.js';
+import { readRegularFile } from '../../utils/safe-write.js';
 
 const SECTION_ADORNMENT_PATTERN = /^([=\-~^"`'#*+_:.<>])\1*\s*$/;
 const BULLET_PATTERN = /^\s*[-+*]\s+\S/;
@@ -91,7 +92,7 @@ class RstParser {
   constructor(private readonly filePath: string) {}
 
   async parse(): Promise<RstDocument> {
-    const raw = await readFile(this.filePath, 'utf-8');
+    const raw = (await readRegularFile(this.filePath, { followLinks: false })).toString('utf-8');
     const parsed = this.parseContent(raw.replace(/^\uFEFF/, ''));
     const metadata = new Map<string, unknown>([
       ['format', 'rst'],
