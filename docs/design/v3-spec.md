@@ -487,7 +487,10 @@ inline links, images, reference definitions, autolinks, and the URL attributes i
    routes) to another acquired page of the same pack: rewritten to the relative path from this
    page to that page, fragment kept.
 3. Site-absolute (`/x/y`) or absolute URL on `site.baseUrl`'s origin: aliases applied first,
-   then matched against the acquired pages' site paths. Site path for an http-acquired page is
+   then matched against the acquired pages' site paths. Aliases match on segment boundaries,
+   with a trailing slash and a `.md`, `.mdx`, `.markdown`, `.html`, `.htm`, or `.rst` extension
+   dropped from both the alias and the path before a page is looked up, so the alias
+   `/guide/latest` also catches `/guide/latest.md`. Site path for an http-acquired page is
    its URL pathname; for a git or local page it is its source path with the extension and a
    trailing `index` removed, relative to the source root. A match rewrites to the relative page
    path; no match rewrites to the absolute URL `baseUrl + path` (the path as written). A

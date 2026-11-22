@@ -231,6 +231,23 @@ describe('createPackLinkRewriter: site paths (spec 4.5 step 3)', () => {
     expect(rewritten('[a](/api/router.md)', 'guide/intro.md')).toBe('[a](../api/router.md)');
   });
 
+  it('matches aliases on the path with its page extension dropped, on segment boundaries', () => {
+    const latest = {
+      baseUrl: 'https://docs.example.com',
+      aliases: { '/guide/latest': '/guide/advanced', '/old.html': '/api/router' },
+    };
+    const from = (target: string): string =>
+      rewritten(`[a](${target})`, 'guide/intro.md', { site: latest });
+
+    expect(from('/guide/latest.md#x')).toBe('[a](advanced/index.md#x)');
+    expect(from('https://docs.example.com/guide/latest.mdx')).toBe('[a](advanced/index.md)');
+    expect(from('/guide/latest/')).toBe('[a](advanced/index.md)');
+    expect(from('/old.html')).toBe('[a](../api/router.md)');
+    expect(from('/guide/latest-notes.md')).toBe(
+      '[a](https://docs.example.com/guide/latest-notes.md)'
+    );
+  });
+
   it('turns an unmatched site-absolute link into baseUrl + path', () => {
     const result = rewriteLocal('[a](/blog/post#top)', 'guide/intro.md', { site });
     expect(result.text).toBe('[a](https://docs.example.com/blog/post#top)');

@@ -53,7 +53,7 @@ A pack id matches `^[a-z0-9][a-z0-9._-]{0,63}$`. It is the pack's directory name
 | `version` | string | the lockfile version | Required unless `dependency` is set. No whitespace, no `<` or `>`, no control characters. Need not be semver: `2026-07-28` is valid. |
 | `sources` | array | required | At least one source. See [Sources](#sources). |
 | `site.baseUrl` | string | required with `site` | An `https://` URL without credentials: the docs website, so absolute links to it resolve to pack pages. |
-| `site.aliases` | object | `{}` | Site path to site path, applied before matching, such as `{ "/guide/latest": "/guide" }`. A target may hold placeholders; a key may not. |
+| `site.aliases` | object | `{}` | Site path to site path, applied before matching, such as `{ "/guide/latest": "/guide" }`. A target may hold placeholders; a key may not. An alias matches whole path segments, and a page extension (`.md`, `.mdx`, `.markdown`, `.html`, `.htm`, `.rst`) or trailing slash on either side is ignored when matching pages, so `/guide/latest` also catches a link to `/guide/latest.md`. |
 | `layout.combined` | boolean | `false` | Also writes `<id>.full.md`: the index and every page in one file. |
 | `license` | string or null | `null` | A declared SPDX id or expression, or `"proprietary"`. Recorded next to the detected license and wins for the license status. |
 | `limits.maxFileBytes` | integer | `20971520` (20 MiB) | 1 to `209715200` (200 MiB). The per-file download and checkout cap for this pack. |
