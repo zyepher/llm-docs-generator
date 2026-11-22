@@ -599,6 +599,29 @@ describe('when the hook stays silent', () => {
     expect(quiet.spawned).toEqual([]);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'ignores a config another user owns, logging whose it is, and keeps the dependency analysis',
+    async () => {
+      const root = await project({ packs: { later: { version: '1.0.0', sources: LOCAL_DOCS } } });
+      const you = process.getuid?.() ?? 0;
+      const someoneElse = you === 0 ? 501 : 0;
+      const spy = vi.spyOn(process, 'getuid').mockReturnValue(someoneElse);
+      let run: HookRun;
+      try {
+        run = await runHook({ payload: { cwd: root, ...OPUS } });
+      } finally {
+        spy.mockRestore();
+      }
+      const user = (uid: number) => `user id ${uid}${uid === 0 ? ' (root)' : ''}`;
+
+      expect(injected(run)).toBe(ALL_DEPENDENCIES);
+      const log = await hookLog(run.cache);
+      expect(log.slice(log.indexOf(' ') + 1)).toBe(
+        `${join(root, 'llm-docs.json')} is owned by ${user(you)}, not by you (${user(someoneElse)}), so the session note ignores llm-docs.json (continuing with the dependency analysis only)\n`
+      );
+    }
+  );
+
   it('falls back to the environment for a malformed, empty, or oversized payload, logging what was wrong', async () => {
     const root = await project();
     const env = { CLAUDE_PROJECT_DIR: root, ANTHROPIC_MODEL: OPUS.model };

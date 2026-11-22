@@ -512,6 +512,12 @@ export interface LoadedProjectConfig {
   /** Absolute project root (the directory holding llm-docs.json). */
   projectRoot: string;
   configPath: string;
+  /**
+   * Set when llm-docs.json or the directory holding it belongs to another
+   * user (projectConfigOwner): such a config may say what to fetch and read,
+   * but its converters never run. Null when the config was not read from disk.
+   */
+  foreignOwner: ForeignOwner | null;
   config: ProjectConfig;
   /** Project-relative POSIX packs directory, normalized. */
   packsDirRelative: string;
@@ -609,9 +615,53 @@ export async function loadProjectConfigIfPresent(
   projectRoot: string
 ): Promise<LoadedProjectConfig | null> {
   const root = resolve(projectRoot);
-  const text = await readProjectConfigText(join(root, CONFIG_FILE_NAME));
+  const configPath = join(root, CONFIG_FILE_NAME);
+  const text = await readProjectConfigText(configPath);
 
-  return text === null ? null : assertPacksDirInsideProject(parseProjectConfig(root, text));
+  if (text === null) {
+    return null;
+  }
+  const loaded = await assertPacksDirInsideProject(parseProjectConfig(root, text));
+  return { ...loaded, foreignOwner: await projectConfigOwner(root, configPath) };
+}
+
+/** A config file, or the directory holding it, that another user owns. */
+export interface ForeignOwner {
+  path: string;
+  owner: number;
+  you: number;
+}
+
+/**
+ * Who else owns llm-docs.json or its directory, or null when the user running
+ * llm-docs owns both. Project discovery takes the nearest config walking up,
+ * so below a directory another user can write to (a shared /tmp) it could be
+ * theirs, and a `command` converter in it would run with this user's
+ * privileges; git refuses such a repository for the same reason
+ * (`safe.directory`). Root is another user too, unless running as root.
+ * Windows has no uids, so the check does not apply there.
+ */
+async function projectConfigOwner(
+  projectRoot: string,
+  configPath: string
+): Promise<ForeignOwner | null> {
+  const you = process.getuid?.();
+  if (you === undefined) {
+    return null;
+  }
+  for (const path of [configPath, projectRoot]) {
+    const owner = (await lstat(path)).uid;
+    if (owner !== you) {
+      return { path, owner, you };
+    }
+  }
+  return null;
+}
+
+/** `<path> is owned by user id 0 (root), not by you (user id 501)`. */
+export function describeForeignOwner(foreign: ForeignOwner): string {
+  const user = (uid: number) => `user id ${uid}${uid === 0 ? ' (root)' : ''}`;
+  return `${foreign.path} is owned by ${user(foreign.owner)}, not by you (${user(foreign.you)})`;
 }
 
 export async function loadProjectConfig(projectRoot: string): Promise<LoadedProjectConfig> {
@@ -703,6 +753,7 @@ export function parseProjectConfig(projectRoot: string, text: string): LoadedPro
   return {
     projectRoot,
     configPath: join(projectRoot, CONFIG_FILE_NAME),
+    foreignOwner: null,
     config,
     packsDirRelative,
     packsDir,

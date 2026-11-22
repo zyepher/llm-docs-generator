@@ -1029,6 +1029,7 @@ async function buildPack(
     if (converter === undefined) {
       converter = await createDocumentConverter(spec, {
         projectRoot: context.projectRoot,
+        foreignOwner: context.loaded.foreignOwner,
         workDir: join(workRoot, `convert-${conversion.sourceIndex}`),
       });
       converters.set(conversion.sourceIndex, converter);
@@ -1307,6 +1308,7 @@ async function refreshOnePack(
     if (spec !== undefined && spec !== null && spec.tool !== 'agent') {
       const converter = await createDocumentConverter(spec, {
         projectRoot: context.projectRoot,
+        foreignOwner: context.loaded.foreignOwner,
         workDir: join(workRoot, `convert-${index}`),
       });
       converters.set(index, { tool: converter.tool, version: converter.version });

@@ -29,7 +29,14 @@ import { constants } from 'node:fs';
 import { access, copyFile, mkdir, readFile, stat } from 'node:fs/promises';
 import { delimiter, isAbsolute, join, posix, resolve } from 'node:path';
 
-import { ConfigError, PACK_LIMITS, type ResolvedSource } from '../config/project.js';
+import {
+  CONFIG_FILE_NAME,
+  ConfigError,
+  describeForeignOwner,
+  PACK_LIMITS,
+  type ForeignOwner,
+  type ResolvedSource,
+} from '../config/project.js';
 import { defaultCacheDir } from '../deps/registries.js';
 import type { ManifestSourceEntry } from '../pack/manifest.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
@@ -94,6 +101,11 @@ export interface DocumentConverter {
 export interface ConverterOptions {
   /** Realpath'd project root: a relative `command[0]` resolves against it. */
   projectRoot: string;
+  /**
+   * The config this spec came from belongs to another user
+   * (LoadedProjectConfig.foreignOwner): an executable it names never runs.
+   */
+  foreignOwner?: ForeignOwner | null;
   /** Empty temp directory for this source's conversions; the caller removes it. */
   workDir: string;
   /** Where the `conversions/` cache lives; null disables it. Default: the user cache dir. */
@@ -117,6 +129,12 @@ export async function createDocumentConverter(
       warnings: [],
       convert: async (selected, previous) => convertWithAgent(selected, previous),
     };
+  }
+
+  if (spec.command != null && options.foreignOwner != null) {
+    throw new ConfigError(
+      `${describeForeignOwner(options.foreignOwner)}, so llm-docs did not run the converter its convert.command names (${spec.command[0] ?? ''}): a config another user can write could run anything as you. Run llm-docs in a project you own, or make yourself the owner of ${CONFIG_FILE_NAME} and its directory once you have read the command.`
+    );
   }
 
   const tool = spec.tool;

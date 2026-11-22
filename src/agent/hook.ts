@@ -18,7 +18,12 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-import { findProjectRoot, loadProjectConfigIfPresent } from '../config/project.js';
+import {
+  CONFIG_FILE_NAME,
+  describeForeignOwner,
+  findProjectRoot,
+  loadProjectConfigIfPresent,
+} from '../config/project.js';
 import { defaultCacheDir, type RegistryEndpoints } from '../deps/registries.js';
 import { formatStatusBrief, gatherProjectStatus, type ProjectStatus } from '../deps/status.js';
 import { errorMessage, isNonEmptyString, isRecord } from '../utils/guards.js';
@@ -365,10 +370,16 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
         io.cwd
     );
     const projectRoot = (await findProjectRoot(start)) ?? start;
-    const loaded = await loadProjectConfigIfPresent(projectRoot).catch(async (error: unknown) => {
+    let loaded = await loadProjectConfigIfPresent(projectRoot).catch(async (error: unknown) => {
       await log(`${errorMessage(error)} (continuing with the dependency analysis only)`);
       return null;
     });
+    if (loaded?.foreignOwner != null) {
+      await log(
+        `${describeForeignOwner(loaded.foreignOwner)}, so the session note ignores ${CONFIG_FILE_NAME} (continuing with the dependency analysis only)`
+      );
+      loaded = null;
+    }
 
     if (loaded?.config.hook?.enabled === false) {
       return;
