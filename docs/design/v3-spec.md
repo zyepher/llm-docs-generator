@@ -1056,8 +1056,11 @@ writes files.
 - CI: Linux, macOS, Windows on Node 22, 24, and 26; `npm ci` with a committed
   `package-lock.json`; lint, format check, type-check, build, plugin bundle check, tests (the
   schema check is a test).
-- Release: a tag `v*` publishes to npm with provenance from GitHub Actions (owner adds the
-  `NPM_TOKEN` secret).
+- Release: a tag `v*` that equals `v` plus the package version runs the CI gate and attaches the
+  committed bundle as `llm-docs.mjs`, with `llm-docs.mjs.sha256`, to the GitHub Release for the
+  tag (`.github/workflows/release.yml`). 3.0.0 is released on GitHub only. Publishing to npm with
+  provenance is a separate, manually dispatched workflow (`publish-npm.yml`) that refuses to run
+  until the owner adds the `NPM_TOKEN` secret.
 - Docs: README (user-facing, crafted, no em-dashes), `docs/` reference pages for config,
   manifest, commands, security, and the plugin; `CHANGELOG.md` with the v3 breaking changes and
   the migration path; skills in `plugin/skills/` replace `AGENT_CONTEXT.md` and `skills/`.
