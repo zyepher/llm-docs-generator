@@ -79,11 +79,13 @@ the git top-level directory when inside a git repository, else the working direc
 Validated with zod v4. The JSON Schema is generated from the zod schema with
 `z.toJSONSchema()` into `schema/llm-docs.schema.json` and published in the package; a test fails
 when the committed schema is out of date. Unknown keys are errors (strict objects) so typos
-never silently disable behavior.
+never silently disable behavior. `init` writes `$schema` as the schema's raw GitHub URL at the
+release tag of the running version, so editors resolve it without the npm package, which is not
+published yet.
 
 ```jsonc
 {
-  "$schema": "./node_modules/llm-docs/schema/llm-docs.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Zyepher/llm-docs-generator/v3.0.0/schema/llm-docs.schema.json",
   "schemaVersion": 3,
   "packsDir": "agent-docs",               // project-relative, default "agent-docs"
   "agentFiles": "auto",                    // "auto" | string[] of project-relative paths | []
@@ -920,7 +922,12 @@ committed bundle or versions are out of date, when a skill folder or agent file 
 from its frontmatter `name`, when a description is over 1024 characters, when the skills, the
 agent, or the plugin README name (in code) a command or flag that `capabilities --json` does
 not list, or when the `llm-docs` skill does not name every command or its `Check` table does
-not list exactly the verify checks. When the `claude` CLI is on PATH it also runs
+not list exactly the verify checks. It also fails when a file under `plugin/` or `docs/` tells
+anyone to get the CLI from a package registry (an `npx` run of the package, an `npm install` of
+it, or a path into `node_modules`): the package is not on npm yet and the name is unclaimed, so
+such an instruction would run whatever a stranger publishes under it. Without a plugin, the CLI
+is `bin/llm-docs.mjs` run with `node`, and CI downloads the same file from the GitHub Release.
+When the `claude` CLI is on PATH it also runs
 `claude plugin validate --strict` on the plugin and on the repository. Skills are written
 harness-neutral (no tool names that exist in only one harness; frontmatter limited to `name`,
 `description`, `license`, `metadata`; agent frontmatter to `name` and `description`). If Node

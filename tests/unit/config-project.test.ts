@@ -13,6 +13,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import packageJson from '../../package.json';
 import { canCreateSymlinks } from '../helpers/symlinks.js';
 
 import {
@@ -114,6 +115,13 @@ describe('llm-docs.json validation', () => {
     });
 
     expect(Object.keys(config.packs)).toEqual(['vite']);
+  });
+
+  it.each([
+    'https://raw.githubusercontent.com/Zyepher/llm-docs-generator/v3.0.0/schema/llm-docs.schema.json',
+    './node_modules/llm-docs/schema/llm-docs.schema.json',
+  ])('accepts $schema %s', ($schema) => {
+    expect(parse({ $schema, schemaVersion: 3, packs: {} }).$schema).toBe($schema);
   });
 
   it.each([
@@ -559,7 +567,7 @@ describe('project files', () => {
     expect((await initProjectConfig(root, { packsDir: 'docs/packs' })).created).toBe(true);
     const text = await readFile(join(root, 'llm-docs.json'), 'utf-8');
     expect(JSON.parse(text)).toEqual({
-      $schema: './node_modules/llm-docs/schema/llm-docs.schema.json',
+      $schema: `https://raw.githubusercontent.com/Zyepher/llm-docs-generator/v${packageJson.version}/schema/llm-docs.schema.json`,
       schemaVersion: 3,
       packsDir: 'docs/packs',
       packs: {},

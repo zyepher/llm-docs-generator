@@ -9,7 +9,21 @@ Your coding agent's knowledge of a library stops at its training data cutoff. Yo
 - The `write-docs-guide` skill teaches it to write a project-specific digest of a pack that cites its pages, fact-check the digest, and stamp the citations.
 - The `llm-docs` skill is the command reference. It covers every command, the verify checks with their fixes, and how to read the session-start note.
 - The `docs-fact-checker` agent checks each claim in a guide against the pages it cites and reports it as supported, unsupported, or contradicted. It never edits the guide.
-- `bin/llm-docs.mjs` is the whole CLI in one file, with a POSIX wrapper (`bin/llm-docs`) and a Windows wrapper (`bin/llm-docs.cmd`). Claude Code puts a plugin's `bin/` folder on the agent's shell PATH, so the agent can run `llm-docs` there without installing anything. In other hosts, install the CLI from npm with `npm install --save-dev llm-docs`, or run it with `npx llm-docs`.
+- `bin/llm-docs.mjs` is the whole CLI in one file, with a POSIX wrapper (`bin/llm-docs`) and a Windows wrapper (`bin/llm-docs.cmd`). Claude Code puts a plugin's `bin/` folder on the agent's shell PATH, so the agent can run `llm-docs` there without installing anything. In a host that does not, the skills tell the agent to run `node <plugin>/bin/llm-docs.mjs` instead, where `<plugin>` is the installed plugin's folder.
+
+The npm package is not published yet. Until it is, the plugin and the GitHub Release assets below are the only ways to get the CLI. Do not install `llm-docs` from a package registry: whatever is published under that name there is not this project.
+
+## Run it in CI
+
+A CI job has no plugin. Each GitHub Release carries the same single-file CLI as an asset, `llm-docs.mjs`, with its SHA-256 in `llm-docs.mjs.sha256`. Download it for a pinned version and run it with Node 22.19 or newer:
+
+```sh
+curl -fsSLO https://github.com/Zyepher/llm-docs-generator/releases/download/v3.0.0/llm-docs.mjs
+node llm-docs.mjs sync --check
+node llm-docs.mjs verify
+```
+
+Pin the version in the URL rather than fetching the latest release, so a new release never changes your gate without a commit, and check the download against the SHA-256 the release publishes. [Running in CI](../docs/commands.md#running-in-ci) shows the hash check.
 
 ## Requirements
 

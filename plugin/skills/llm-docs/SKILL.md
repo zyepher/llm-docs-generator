@@ -7,7 +7,7 @@ description: Reference for the llm-docs CLI, which keeps version-pinned, verifie
 
 `llm-docs` keeps version-pinned reference docs inside a repository. The recipes live in `llm-docs.json`, and each pack lives in `agent-docs/<id>/` (the packs directory is configurable). To create a pack, follow the `add-docs` skill. To write a guide for one, follow the `write-docs-guide` skill.
 
-Run the CLI as `llm-docs`, or as `npx llm-docs` if that command is not found. Every command prints its own options with `--help`. `llm-docs capabilities --json` describes the installed build: commands, options, source types, converters, ecosystems, transforms, checks, and limits. Trust it over this page when the two differ.
+Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/../../bin/llm-docs.mjs` in its place, where `<skill-dir>` is the absolute path of the directory that holds this `SKILL.md` (the plugin ships the whole CLI as that one file). Never fetch the CLI from a package registry: it is not published there. Every command prints its own options with `--help`. `llm-docs capabilities --json` describes the installed build: commands, options, source types, converters, ecosystems, transforms, checks, and limits. Trust it over this page when the two differ.
 
 ## Conventions
 
@@ -73,6 +73,8 @@ Run the CLI as `llm-docs`, or as `npx llm-docs` if that command is not found. Ev
 The cutoff comes from the first of these that is set: `--cutoff`, `model.cutoff` in `llm-docs.json`, the `LLM_DOCS_MODEL_CUTOFF` environment variable, then the built-in table for the model id. With no cutoff, status and the hook list dependencies released in the last 180 days instead.
 
 ## Use it in CI
+
+A CI runner has no plugin, so the workflow downloads the CLI from the GitHub Release that matches `llm-docs --version` (`https://github.com/Zyepher/llm-docs-generator/releases/download/v<version>/llm-docs.mjs`, with its SHA-256 in `llm-docs.mjs.sha256` beside it) and runs each command below as `node llm-docs.mjs <command>`.
 
 | Step | Command | Fails when |
 |---|---|---|

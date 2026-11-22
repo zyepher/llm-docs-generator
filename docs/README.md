@@ -2,6 +2,8 @@
 
 Reference pages for `llm-docs` 3. For what the tool is and how to start, read the [project README](../README.md).
 
+`llm-docs` 3 is released on GitHub only, and the npm package is not published yet. Agents get the CLI with the [plugin](../plugin/README.md), and CI jobs download it from a GitHub Release (see [Running in CI](commands.md#running-in-ci)).
+
 | Page | What it covers |
 |---|---|
 | [Commands](commands.md) | Every command, its exit codes and `--json` output, every `verify` check with its fix, and the managed block. |

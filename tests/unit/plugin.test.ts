@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import packageJson from '../../package.json';
 import {
+  findRegistryInstructions,
   lintPlugin,
   parseCapabilities,
   staleCutoffTableWarning,
@@ -152,6 +153,39 @@ describe('plugin skills and agent', () => {
       ),
       'skills/llm-docs/SKILL.md: the Check table does not list `license`.',
     ]);
+  });
+});
+
+describe('the package registry rule', () => {
+  it('passes the committed plugin and docs', async () => {
+    expect(await findRegistryInstructions(repoRoot, ['plugin', 'docs'])).toEqual([]);
+  });
+
+  it('names each line that tells the reader to get the CLI from a registry', async () => {
+    const root = await tempDir({
+      'plugin/skills/x/SKILL.md': [
+        'Run it as `npx llm-docs` if that command is not found.',
+        'Or `npx --yes llm-docs@3 verify`, `pnpm dlx llm-docs sync`, `bunx llm-docs`.',
+        'Never `npx tsx scripts/build.ts` or `npm install llm-docs-generator`.',
+      ].join('\n'),
+      'docs/install.md': [
+        '# Install',
+        'npm install --save-dev llm-docs',
+        'yarn global add llm-docs',
+        '"$schema": "./node_modules/llm-docs/schema/llm-docs.schema.json"',
+        'curl -fsSLO https://github.com/o/r/releases/download/v3.0.0/llm-docs.mjs',
+      ].join('\n'),
+    });
+
+    const problems = await findRegistryInstructions(root, ['plugin', 'docs']);
+    expect(problems.map((problem) => problem.split(': ')[0])).toEqual([
+      'plugin/skills/x/SKILL.md:1',
+      'plugin/skills/x/SKILL.md:2',
+      'docs/install.md:2',
+      'docs/install.md:3',
+      'docs/install.md:4',
+    ]);
+    expect(problems[0]).toMatch(/GitHub Release asset llm-docs\.mjs instead\.$/);
   });
 });
 

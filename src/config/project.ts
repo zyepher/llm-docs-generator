@@ -15,6 +15,7 @@ import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { applyEdits, modify } from 'jsonc-parser';
 import { z } from 'zod';
 
+import packageJson from '../../package.json';
 import { gitTopLevel } from '../core/git-state.js';
 import { ECOSYSTEMS, type DependencyRef, type DependencyVersionLookup } from '../deps/lockfiles.js';
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
@@ -25,7 +26,11 @@ import { writeTextFileSafely } from '../utils/safe-write.js';
 
 export const CONFIG_FILE_NAME = 'llm-docs.json';
 const DEFAULT_PACKS_DIR = 'agent-docs';
-const CONFIG_SCHEMA_REF = './node_modules/llm-docs/schema/llm-docs.schema.json';
+/**
+ * The schema at this version's release tag: the npm package is not published,
+ * so a `node_modules` path would resolve to nothing in most projects.
+ */
+const CONFIG_SCHEMA_REF = `https://raw.githubusercontent.com/Zyepher/llm-docs-generator/v${packageJson.version}/schema/llm-docs.schema.json`;
 
 export const PACK_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 

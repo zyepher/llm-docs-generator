@@ -12,7 +12,7 @@ The project root is the nearest directory at or above the working directory that
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `$schema` | string | none | Any string. `init` writes `./node_modules/llm-docs/schema/llm-docs.schema.json`. |
+| `$schema` | string | none | Any string. `init` writes the schema's URL at the release tag of the CLI that ran it, `https://raw.githubusercontent.com/Zyepher/llm-docs-generator/v<version>/schema/llm-docs.schema.json`. |
 | `schemaVersion` | number | required | Must be `3`. Any other value is an error that names the version this build reads. |
 | `packsDir` | string | `"agent-docs"` | A project-relative subdirectory. Not absolute, not `..`, not the project root itself, and still inside the project after symbolic links are resolved. |
 | `agentFiles` | `"auto"` or string array | `"auto"` | Each entry is a project-relative path that stays inside the project. `[]` writes no managed block. |
@@ -225,7 +225,7 @@ Text that reaches an agent file (pack titles, versions, descriptions, and top-le
 
 ```json
 {
-  "$schema": "./node_modules/llm-docs/schema/llm-docs.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Zyepher/llm-docs-generator/v3.0.0/schema/llm-docs.schema.json",
   "schemaVersion": 3,
   "packsDir": "agent-docs",
   "agentFiles": "auto",
