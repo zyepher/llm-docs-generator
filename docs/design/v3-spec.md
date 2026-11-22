@@ -784,7 +784,13 @@ runs `claude -p` with a pinned model, turn and budget caps, and `--setting-sourc
 settings and plugins stay out of every arm (measured 2026-11-05 on Claude Code 2.1.318: an
 isolated `CLAUDE_CONFIG_DIR` loses the OAuth login, and `--safe-mode` also disables hooks from
 `--plugin-dir`, so neither can be used for the plugin arm), grades with the checks, and writes `evals/results/<timestamp>/results.json` and `summary.md` (pass rate per
-arm and case, runs, cost). The README publishes the numbers with the date, model, and run count.
+arm and case, runs, cost). A session the service or account ended (usage limit, rate limit,
+overload, authentication, billing, network), or one that fails an arm assertion (the requested
+model, no MCP servers, the pack and managed block, and for the plugin arm the loaded plugin and
+its SessionStart hook), is an infra error that is never graded and that `--resume` retries; a
+usage limit stops the run with exit 4. `npm run eval -- smoke` runs one
+case once per arm to prove the pipeline before a full run. The README publishes the numbers with
+the date, model, and run count.
 
 ## 14. Acceptance
 
