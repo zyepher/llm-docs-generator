@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, posix, win32 } from 'node:path';
 
-import packageJson from '../../package.json';
+import { createHttpClient, HttpRequestError, type HttpClient } from '../sources/http.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { readJsonFile, writeJsonFileSafely } from '../utils/json.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
@@ -41,8 +41,6 @@ export interface LookupReleaseDatesOptions {
   budgetMs?: number;
   cacheDir?: string;
   endpoints?: Partial<RegistryEndpoints>;
-  /** Sent as a bearer token to api.github.com only. */
-  githubToken?: string;
   now?: () => Date;
 }
 
@@ -68,10 +66,10 @@ const CACHE_SCHEMA_VERSION = 1;
 const NEGATIVE_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const CONCURRENCY = 4;
-const NPM_PACKUMENT_MAX_BYTES = 25 * 1024 * 1024;
+/** A whole-package document listing every version: the npm packument, a PyPI project, a crate. */
+const PACKAGE_DOCUMENT_MAX_BYTES = 25 * 1024 * 1024;
 const JSON_RESPONSE_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_TAG_DEREFERENCES = 3;
-const USER_AGENT = `llm-docs/${packageJson.version} (+https://github.com/Zyepher/llm-docs-generator)`;
 
 export function releaseKey(query: Pick<ReleaseQuery, 'ecosystem' | 'name' | 'version'>): string {
   return `${query.ecosystem}:${query.name}@${query.version}`;
@@ -203,74 +201,38 @@ async function writeCache(
 // HTTP
 // ============================================================================
 
-class HttpStatusError extends Error {
-  constructor(
-    readonly status: number,
-    url: string
-  ) {
-    super(`HTTP ${status} from ${url}`);
-  }
-}
-
 interface RequestContext {
+  /** The shared client (spec 4.1); it sends GITHUB_TOKEN to api.github.com only. */
+  client: HttpClient;
+  /** The caller's budget: aborting it cancels requests in flight. */
   signal: AbortSignal;
-  githubToken: string | undefined;
+  timeoutMs: number;
 }
 
 /**
- * GET a JSON document with a per-request timeout, the shared abort signal
- * (budget), a streamed size cap, and the project User-Agent. Returns
- * undefined for 404 and 410 (the version or package does not exist).
+ * GET a JSON document through the shared client with the per-request
+ * timeout, the budget signal, and a streamed size cap. Returns undefined
+ * for 404 and 410 (the version or package does not exist).
  */
 async function getJson(url: string, context: RequestContext, maxBytes: number): Promise<unknown> {
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    'user-agent': USER_AGENT,
-  };
+  let body: Buffer;
 
-  if (context.githubToken !== undefined && new URL(url).hostname === 'api.github.com') {
-    headers.authorization = `Bearer ${context.githubToken}`;
-  }
-
-  const response = await fetch(url, {
-    headers,
-    signal: AbortSignal.any([context.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-  });
-
-  if (response.status === 404 || response.status === 410) {
-    await response.body?.cancel();
-    return undefined;
-  }
-
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new HttpStatusError(response.status, url);
-  }
-
-  const declaredLength = Number(response.headers.get('content-length'));
-
-  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-    await response.body?.cancel();
-    throw new Error(`response from ${url} exceeds ${maxBytes} bytes`);
-  }
-
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-
-  if (response.body) {
-    for await (const chunk of response.body) {
-      received += chunk.byteLength;
-
-      if (received > maxBytes) {
-        await response.body.cancel().catch(() => undefined);
-        throw new Error(`response from ${url} exceeds ${maxBytes} bytes`);
-      }
-
-      chunks.push(chunk);
+  try {
+    const response = await context.client.get(url, {
+      maxBytes,
+      accept: 'application/json',
+      timeoutMs: context.timeoutMs,
+      signal: context.signal,
+    });
+    body = response.body;
+  } catch (error) {
+    if (error instanceof HttpRequestError && (error.status === 404 || error.status === 410)) {
+      return undefined;
     }
+    throw error;
   }
 
-  return JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+  return JSON.parse(body.toString('utf-8'));
 }
 
 function toIsoTimestamp(value: unknown): string | null {
@@ -291,6 +253,23 @@ function trimBase(base: string): string {
   return base.replace(/\/+$/, '');
 }
 
+/** Registry document URLs, shared by the release-date lookups and the package metadata. */
+const registryUrls = {
+  depsDevVersion: (endpoints: RegistryEndpoints, system: string, name: string, version: string) =>
+    `${trimBase(endpoints.depsDev)}/v3/systems/${system}/packages/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`,
+  npmPackage: (endpoints: RegistryEndpoints, name: string) =>
+    `${trimBase(endpoints.npmRegistry)}/${name.replace('/', '%2F')}`,
+  pypiProject: (endpoints: RegistryEndpoints, name: string) =>
+    `${trimBase(endpoints.pypi)}/pypi/${encodeURIComponent(name)}`,
+  cratesCrate: (endpoints: RegistryEndpoints, name: string) =>
+    `${trimBase(endpoints.cratesIo)}/api/v1/crates/${encodeURIComponent(name)}`,
+  /** Append `latest` or `v/<escaped version>.info`. */
+  goModule: (endpoints: RegistryEndpoints, name: string) =>
+    `${trimBase(endpoints.goProxy)}/${escapeGoModulePath(name)}/@`,
+  pubPackage: (endpoints: RegistryEndpoints, name: string) =>
+    `${trimBase(endpoints.pubDev)}/api/packages/${encodeURIComponent(name)}`,
+};
+
 // ============================================================================
 // Per-registry lookups
 // ============================================================================
@@ -303,7 +282,7 @@ async function lookupNpm(
   endpoints: RegistryEndpoints,
   context: RequestContext
 ): Promise<RegistryAnswer> {
-  const depsDevUrl = `${trimBase(endpoints.depsDev)}/v3/systems/npm/packages/${encodeURIComponent(query.name)}/versions/${encodeURIComponent(query.version)}`;
+  const depsDevUrl = registryUrls.depsDevVersion(endpoints, 'npm', query.name, query.version);
   let depsDevFailure: unknown;
 
   try {
@@ -321,10 +300,10 @@ async function lookupNpm(
     depsDevFailure = error;
   }
 
-  const packumentUrl = `${trimBase(endpoints.npmRegistry)}/${query.name.replace('/', '%2F')}`;
+  const packumentUrl = registryUrls.npmPackage(endpoints, query.name);
 
   try {
-    const packument = await getJson(packumentUrl, context, NPM_PACKUMENT_MAX_BYTES);
+    const packument = await getJson(packumentUrl, context, PACKAGE_DOCUMENT_MAX_BYTES);
     const times = isRecord(packument) && isRecord(packument.time) ? packument.time : {};
     return {
       source: 'npm-registry',
@@ -342,7 +321,7 @@ async function lookupPypi(
   endpoints: RegistryEndpoints,
   context: RequestContext
 ): Promise<RegistryAnswer> {
-  const url = `${trimBase(endpoints.pypi)}/pypi/${encodeURIComponent(query.name)}/${encodeURIComponent(query.version)}/json`;
+  const url = `${registryUrls.pypiProject(endpoints, query.name)}/${encodeURIComponent(query.version)}/json`;
   const release = await getJson(url, context, JSON_RESPONSE_MAX_BYTES);
   const uploads = (isRecord(release) && Array.isArray(release.urls) ? release.urls : [])
     .map((file) => (isRecord(file) ? toIsoTimestamp(file.upload_time_iso_8601) : null))
@@ -357,7 +336,7 @@ async function lookupCargo(
   endpoints: RegistryEndpoints,
   context: RequestContext
 ): Promise<RegistryAnswer> {
-  const url = `${trimBase(endpoints.cratesIo)}/api/v1/crates/${encodeURIComponent(query.name)}/${encodeURIComponent(query.version)}`;
+  const url = `${registryUrls.cratesCrate(endpoints, query.name)}/${encodeURIComponent(query.version)}`;
   const body = await getJson(url, context, JSON_RESPONSE_MAX_BYTES);
   const version = isRecord(body) && isRecord(body.version) ? body.version : {};
   return {
@@ -371,7 +350,7 @@ async function lookupGo(
   endpoints: RegistryEndpoints,
   context: RequestContext
 ): Promise<RegistryAnswer> {
-  const url = `${trimBase(endpoints.goProxy)}/${escapeGoModulePath(query.name)}/@v/${escapeGoModulePath(query.version)}.info`;
+  const url = `${registryUrls.goModule(endpoints, query.name)}v/${escapeGoModulePath(query.version)}.info`;
   const info = await getJson(url, context, JSON_RESPONSE_MAX_BYTES);
   return {
     source: 'proxy.golang.org',
@@ -385,8 +364,11 @@ async function lookupPub(
   endpoints: RegistryEndpoints,
   context: RequestContext
 ): Promise<RegistryAnswer> {
-  const url = `${trimBase(endpoints.pubDev)}/api/packages/${encodeURIComponent(query.name)}`;
-  const body = await getJson(url, context, JSON_RESPONSE_MAX_BYTES);
+  const body = await getJson(
+    registryUrls.pubPackage(endpoints, query.name),
+    context,
+    JSON_RESPONSE_MAX_BYTES
+  );
   const versions = new Map<string, string | null>([[query.version, null]]);
 
   for (const entry of isRecord(body) && Array.isArray(body.versions) ? body.versions : []) {
@@ -546,7 +528,11 @@ export async function lookupReleaseDates(
   const budget = new AbortController();
   const budgetTimer =
     options.budgetMs === undefined ? undefined : setTimeout(() => budget.abort(), options.budgetMs);
-  const context: RequestContext = { signal: budget.signal, githubToken: options.githubToken };
+  const context: RequestContext = {
+    client: createHttpClient(),
+    signal: budget.signal,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+  };
   const updates = new Map<string, CacheEntry>();
   const failures: string[] = [];
   const units = [...pending.values()];
@@ -606,6 +592,7 @@ export async function lookupReleaseDates(
     if (budgetTimer !== undefined) {
       clearTimeout(budgetTimer);
     }
+    await context.client.close();
   }
 
   for (const query of queries) {
@@ -627,4 +614,509 @@ export async function lookupReleaseDates(
   }
 
   return { releases, warnings: warnings.sort(compareStringsByCodeUnit) };
+}
+
+// ============================================================================
+// Package metadata (discover --package)
+// ============================================================================
+
+/** Ecosystems with a registry; a SwiftPM package is identified by its repository URL. */
+export type RegistryEcosystem = Exclude<Ecosystem, 'swiftpm'>;
+
+export interface PackageMetadataQuery {
+  ecosystem: RegistryEcosystem;
+  name: string;
+  /** Undefined asks for the registry's latest version. */
+  version: string | undefined;
+}
+
+/** A repository URL exactly as the registry states it: untrusted input. */
+export interface DeclaredRepository {
+  /** The registry field it came from, for example `repository` or `project_urls.Source`. */
+  field: string;
+  url: string;
+  /** The package's directory inside the repository, when the registry states one. */
+  directory: string | null;
+}
+
+export interface PackageMetadata {
+  /** The version the metadata describes: the requested one, else the latest. */
+  version: string;
+  latestVersion: string | null;
+  repository: DeclaredRepository | null;
+  homepage: string | null;
+  documentationUrl: string | null;
+  license: string | null;
+  publishedAt: string | null;
+}
+
+export type PackageMetadataLookup =
+  | { status: 'found'; source: string; metadata: PackageMetadata }
+  | { status: 'package-not-found'; source: string }
+  | { status: 'version-not-found'; source: string; latestVersion: string | null };
+
+export interface FetchPackageMetadataOptions {
+  client: HttpClient;
+  endpoints?: Partial<RegistryEndpoints>;
+}
+
+/** An interactive one-shot command reads whole-package documents, so it gets a longer timeout. */
+const METADATA_REQUEST_TIMEOUT_MS = 30_000;
+const FORGE_HOSTS = new Set(['github.com', 'gitlab.com', 'bitbucket.org', 'codeberg.org']);
+
+type MetadataAnswer =
+  | { status: 'found'; metadata: Omit<PackageMetadata, 'publishedAt'>; warnings: string[] }
+  | { status: 'package-not-found' }
+  | { status: 'version-not-found'; latestVersion: string | null };
+
+type MetadataFetcher = (
+  query: PackageMetadataQuery,
+  endpoints: RegistryEndpoints,
+  context: RequestContext
+) => Promise<MetadataAnswer>;
+
+function text(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function isForgeUrl(value: string): boolean {
+  try {
+    return FORGE_HOSTS.has(new URL(value).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+const NPM_SHORTHAND_HOSTS: Readonly<Record<string, string>> = {
+  github: 'github.com',
+  gitlab: 'gitlab.com',
+  bitbucket: 'bitbucket.org',
+};
+
+/** npm's repository shorthand (`github:owner/repo`, `gitlab:...`, bare `owner/repo`) as a URL. */
+function expandNpmShorthand(value: string): string {
+  const match = /^(?:(github|gitlab|bitbucket):)?([\w.-]+\/[\w.-]+)$/.exec(value);
+  const path = match?.[2];
+
+  if (path === undefined) {
+    return value;
+  }
+
+  return `https://${NPM_SHORTHAND_HOSTS[match?.[1] ?? 'github'] ?? 'github.com'}/${path}`;
+}
+
+/** Version manifests (`/<name>/latest`, `/<name>/<version>`), not the multi-megabyte packument. */
+const npmMetadata: MetadataFetcher = async (query, endpoints, context) => {
+  const base = registryUrls.npmPackage(endpoints, query.name);
+  const latest = await getJson(`${base}/latest`, context, JSON_RESPONSE_MAX_BYTES);
+
+  if (!isRecord(latest)) {
+    return { status: 'package-not-found' };
+  }
+
+  const latestVersion = text(latest.version);
+  const manifest =
+    query.version === undefined || query.version === latestVersion
+      ? latest
+      : await getJson(
+          `${base}/${encodeURIComponent(query.version)}`,
+          context,
+          JSON_RESPONSE_MAX_BYTES
+        );
+  const version = isRecord(manifest) ? text(manifest.version) : null;
+
+  if (!isRecord(manifest) || version === null) {
+    return { status: 'version-not-found', latestVersion };
+  }
+
+  const declared = manifest.repository;
+  const repositoryUrl = isRecord(declared) ? text(declared.url) : text(declared);
+
+  return {
+    status: 'found',
+    metadata: {
+      version,
+      latestVersion,
+      repository:
+        repositoryUrl === null
+          ? null
+          : {
+              field: 'repository',
+              url: expandNpmShorthand(repositoryUrl),
+              directory: isRecord(declared) ? text(declared.directory) : null,
+            },
+      homepage: text(manifest.homepage),
+      documentationUrl: null,
+      license: isRecord(manifest.license) ? text(manifest.license.type) : text(manifest.license),
+    },
+    warnings: [],
+  };
+};
+
+/** PyPI writes "UNKNOWN" for unset fields in older metadata. */
+function pypiText(value: unknown): string | null {
+  const trimmed = text(value);
+  return trimmed === 'UNKNOWN' ? null : trimmed;
+}
+
+/** A `project_urls` entry by PyPI's label normalization (lowercase, letters and digits only). */
+function pypiProjectUrl(
+  projectUrls: Record<string, unknown>,
+  labels: readonly string[]
+): { field: string; url: string } | null {
+  for (const [label, value] of Object.entries(projectUrls)) {
+    const url = text(value);
+    if (url !== null && labels.includes(label.toLowerCase().replace(/[^a-z0-9]/g, ''))) {
+      return { field: `project_urls.${label}`, url };
+    }
+  }
+
+  return null;
+}
+
+const PYPI_REPOSITORY_LABELS = [
+  'source',
+  'sourcecode',
+  'repository',
+  'code',
+  'github',
+  'git',
+  'sourcerepository',
+];
+
+function pypiMetadataFromInfo(
+  info: Record<string, unknown>,
+  latestVersion: string | null
+): Omit<PackageMetadata, 'publishedAt'> | null {
+  const version = pypiText(info.version);
+
+  if (version === null) {
+    return null;
+  }
+
+  const projectUrls = isRecord(info.project_urls) ? info.project_urls : {};
+  const homePage = pypiText(info.home_page);
+  const repository =
+    pypiProjectUrl(projectUrls, PYPI_REPOSITORY_LABELS) ??
+    Object.entries(projectUrls)
+      .map(([label, value]) => ({ field: `project_urls.${label}`, url: text(value) ?? '' }))
+      .find((entry) => isForgeUrl(entry.url)) ??
+    (homePage !== null && isForgeUrl(homePage) ? { field: 'home_page', url: homePage } : null);
+  const license = pypiText(info.license);
+  const classifier = (Array.isArray(info.classifiers) ? info.classifiers : [])
+    .filter((entry): entry is string => typeof entry === 'string' && entry.startsWith('License ::'))
+    .at(-1);
+
+  return {
+    version,
+    latestVersion,
+    repository: repository === null ? null : { ...repository, directory: null },
+    homepage: homePage ?? pypiProjectUrl(projectUrls, ['homepage', 'home'])?.url ?? null,
+    documentationUrl:
+      pypiText(info.docs_url) ??
+      pypiProjectUrl(projectUrls, ['documentation', 'docs'])?.url ??
+      null,
+    // `license` is sometimes the whole license text; only a one-line name is reported.
+    license:
+      pypiText(info.license_expression) ??
+      (license !== null && !license.includes('\n') && license.length <= 100 ? license : null) ??
+      classifier?.split('::').at(-1)?.trim() ??
+      null,
+  };
+}
+
+const pypiMetadata: MetadataFetcher = async (query, endpoints, context) => {
+  const base = registryUrls.pypiProject(endpoints, query.name);
+  const latestOf = (project: unknown): string | null =>
+    isRecord(project) && isRecord(project.info) ? pypiText(project.info.version) : null;
+
+  if (query.version === undefined) {
+    const project = await getJson(`${base}/json`, context, PACKAGE_DOCUMENT_MAX_BYTES);
+    const metadata =
+      isRecord(project) && isRecord(project.info)
+        ? pypiMetadataFromInfo(project.info, latestOf(project))
+        : null;
+    return metadata === null
+      ? { status: 'package-not-found' }
+      : { status: 'found', metadata, warnings: [] };
+  }
+
+  const release = await getJson(
+    `${base}/${encodeURIComponent(query.version)}/json`,
+    context,
+    JSON_RESPONSE_MAX_BYTES
+  );
+
+  if (!isRecord(release) || !isRecord(release.info)) {
+    const project = await getJson(`${base}/json`, context, PACKAGE_DOCUMENT_MAX_BYTES);
+    return project === undefined
+      ? { status: 'package-not-found' }
+      : { status: 'version-not-found', latestVersion: latestOf(project) };
+  }
+
+  // The project document can be large; the latest version is worth a warning, not a failure.
+  const warnings: string[] = [];
+  let latestVersion: string | null = null;
+  try {
+    latestVersion = latestOf(await getJson(`${base}/json`, context, PACKAGE_DOCUMENT_MAX_BYTES));
+  } catch (error) {
+    warnings.push(
+      `The latest version of pypi:${query.name} could not be read: ${errorMessage(error)}`
+    );
+  }
+
+  const metadata = pypiMetadataFromInfo(release.info, latestVersion);
+  return metadata === null
+    ? { status: 'version-not-found', latestVersion }
+    : { status: 'found', metadata, warnings };
+};
+
+const cargoMetadata: MetadataFetcher = async (query, endpoints, context) => {
+  const base = registryUrls.cratesCrate(endpoints, query.name);
+  const body = await getJson(base, context, PACKAGE_DOCUMENT_MAX_BYTES);
+
+  if (!isRecord(body) || !isRecord(body.crate)) {
+    return { status: 'package-not-found' };
+  }
+
+  const crate = body.crate;
+  const latestVersion = text(crate.max_stable_version) ?? text(crate.max_version);
+  const target = query.version ?? latestVersion;
+  const release =
+    target === null
+      ? undefined
+      : await getJson(`${base}/${encodeURIComponent(target)}`, context, JSON_RESPONSE_MAX_BYTES);
+  const version = isRecord(release) && isRecord(release.version) ? release.version : undefined;
+
+  if (target === null || version === undefined) {
+    return { status: 'version-not-found', latestVersion };
+  }
+
+  const repository = text(crate.repository);
+  return {
+    status: 'found',
+    metadata: {
+      version: target,
+      latestVersion,
+      repository:
+        repository === null ? null : { field: 'repository', url: repository, directory: null },
+      homepage: text(crate.homepage),
+      documentationUrl: text(crate.documentation),
+      license: text(version.license),
+    },
+    warnings: [],
+  };
+};
+
+/** pub.dev publishes no license field; its score tags (`license:mit`) describe the latest version. */
+async function pubLicense(
+  query: PackageMetadataQuery,
+  endpoints: RegistryEndpoints,
+  context: RequestContext
+): Promise<string | null> {
+  const score = await getJson(
+    `${registryUrls.pubPackage(endpoints, query.name)}/score`,
+    context,
+    JSON_RESPONSE_MAX_BYTES
+  );
+  const licenses = (isRecord(score) && Array.isArray(score.tags) ? score.tags : [])
+    .filter((tag): tag is string => typeof tag === 'string' && tag.startsWith('license:'))
+    .map((tag) => tag.slice('license:'.length))
+    .filter((license) => license !== 'osi-approved' && license !== 'fsf-libre');
+
+  return licenses.length === 0 ? null : licenses.join(', ');
+}
+
+const pubMetadata: MetadataFetcher = async (query, endpoints, context) => {
+  const body = await getJson(
+    registryUrls.pubPackage(endpoints, query.name),
+    context,
+    PACKAGE_DOCUMENT_MAX_BYTES
+  );
+
+  if (!isRecord(body)) {
+    return { status: 'package-not-found' };
+  }
+
+  const latestVersion = isRecord(body.latest) ? text(body.latest.version) : null;
+  const entry =
+    query.version === undefined
+      ? body.latest
+      : (Array.isArray(body.versions) ? body.versions : []).find(
+          (candidate) => isRecord(candidate) && candidate.version === query.version
+        );
+  const version = isRecord(entry) ? text(entry.version) : null;
+
+  if (!isRecord(entry) || version === null) {
+    return { status: 'version-not-found', latestVersion };
+  }
+
+  const pubspec = isRecord(entry.pubspec) ? entry.pubspec : {};
+  const repository = text(pubspec.repository);
+  const homepage = text(pubspec.homepage);
+  const warnings: string[] = [];
+  let license: string | null = null;
+
+  if (version === latestVersion) {
+    try {
+      license = await pubLicense(query, endpoints, context);
+    } catch (error) {
+      warnings.push(`The license of pub:${query.name} could not be read: ${errorMessage(error)}`);
+    }
+  }
+
+  return {
+    status: 'found',
+    metadata: {
+      version,
+      latestVersion,
+      repository:
+        repository !== null
+          ? { field: 'pubspec.repository', url: repository, directory: null }
+          : homepage !== null && isForgeUrl(homepage)
+            ? { field: 'pubspec.homepage', url: homepage, directory: null }
+            : null,
+      homepage,
+      documentationUrl: text(pubspec.documentation),
+      license,
+    },
+    warnings,
+  };
+};
+
+/**
+ * The module proxy decides existence and the latest version, and its `Origin`
+ * names the repository; deps.dev adds the license (the proxy has none).
+ */
+const goMetadata: MetadataFetcher = async (query, endpoints, context) => {
+  const base = registryUrls.goModule(endpoints, query.name);
+  const latest = await getJson(`${base}latest`, context, JSON_RESPONSE_MAX_BYTES);
+
+  if (!isRecord(latest)) {
+    return { status: 'package-not-found' };
+  }
+
+  const latestVersion = text(latest.Version);
+  const info =
+    query.version === undefined
+      ? latest
+      : await getJson(
+          `${base}v/${escapeGoModulePath(query.version)}.info`,
+          context,
+          JSON_RESPONSE_MAX_BYTES
+        );
+  const version = isRecord(info) ? text(info.Version) : null;
+
+  if (!isRecord(info) || version === null) {
+    return { status: 'version-not-found', latestVersion };
+  }
+
+  const origin = isRecord(info.Origin) && info.Origin.VCS === 'git' ? info.Origin : {};
+  const originUrl = text(origin.URL);
+  const warnings: string[] = [];
+  const links = new Map<string, string>();
+  let license: string | null = null;
+
+  try {
+    const record = await getJson(
+      registryUrls.depsDevVersion(endpoints, 'go', query.name, version),
+      context,
+      JSON_RESPONSE_MAX_BYTES
+    );
+    for (const link of isRecord(record) && Array.isArray(record.links) ? record.links : []) {
+      const label = isRecord(link) ? text(link.label) : null;
+      const url = isRecord(link) ? text(link.url) : null;
+      if (label !== null && url !== null && !links.has(label)) {
+        links.set(label, url);
+      }
+    }
+    const licenses = (
+      isRecord(record) && Array.isArray(record.licenses) ? record.licenses : []
+    ).filter((entry): entry is string => typeof entry === 'string');
+    license = licenses.length === 0 ? null : licenses.join(', ');
+  } catch (error) {
+    warnings.push(
+      `deps.dev has no license or links for go:${query.name}@${version}: ${errorMessage(error)}`
+    );
+  }
+
+  const sourceRepo = links.get('SOURCE_REPO') ?? null;
+  return {
+    status: 'found',
+    metadata: {
+      version,
+      latestVersion,
+      repository:
+        originUrl !== null
+          ? { field: 'Origin.URL', url: originUrl, directory: text(origin.Subdir) }
+          : sourceRepo !== null
+            ? { field: 'deps.dev SOURCE_REPO', url: sourceRepo, directory: null }
+            : null,
+      homepage: links.get('HOMEPAGE') ?? null,
+      documentationUrl: links.get('DOCUMENTATION') ?? null,
+      license,
+    },
+    warnings,
+  };
+};
+
+const PACKAGE_METADATA: Readonly<
+  Record<RegistryEcosystem, { source: string; fetch: MetadataFetcher }>
+> = {
+  npm: { source: 'npm-registry', fetch: npmMetadata },
+  pypi: { source: 'pypi', fetch: pypiMetadata },
+  cargo: { source: 'crates.io', fetch: cargoMetadata },
+  go: { source: 'proxy.golang.org', fetch: goMetadata },
+  pub: { source: 'pub.dev', fetch: pubMetadata },
+};
+
+/**
+ * Registry metadata for one package version (or the latest), with its
+ * publish date from the same per-registry lookup `lookupReleaseDates` runs
+ * (uncached: discover writes nothing). A package or version the registry
+ * does not know is a result, not an error; a registry that cannot be reached
+ * throws HttpRequestError.
+ */
+export async function fetchPackageMetadata(
+  query: PackageMetadataQuery,
+  options: FetchPackageMetadataOptions
+): Promise<{ lookup: PackageMetadataLookup; warnings: string[] }> {
+  const endpoints: RegistryEndpoints = { ...DEFAULT_REGISTRY_ENDPOINTS, ...options.endpoints };
+  const context: RequestContext = {
+    client: options.client,
+    signal: new AbortController().signal,
+    timeoutMs: METADATA_REQUEST_TIMEOUT_MS,
+  };
+  const registry = PACKAGE_METADATA[query.ecosystem];
+  const answer = await registry.fetch(query, endpoints, context);
+
+  if (answer.status !== 'found') {
+    return { lookup: { ...answer, source: registry.source }, warnings: [] };
+  }
+
+  const release = {
+    ecosystem: query.ecosystem,
+    name: query.name,
+    version: answer.metadata.version,
+  };
+  const warnings = [...answer.warnings];
+  let publishedAt: string | null = null;
+
+  try {
+    const dates = await LOOKUPS[query.ecosystem](release, endpoints, context);
+    publishedAt = dates.versions.get(release.version) ?? null;
+  } catch (error) {
+    warnings.push(
+      `The publish date of ${releaseKey(release)} could not be read: ${errorMessage(error)}`
+    );
+  }
+
+  return {
+    lookup: {
+      status: 'found',
+      source: registry.source,
+      metadata: { ...answer.metadata, publishedAt },
+    },
+    warnings,
+  };
 }

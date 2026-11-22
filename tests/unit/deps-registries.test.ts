@@ -9,7 +9,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   defaultCacheDir,
@@ -19,8 +19,18 @@ import {
   type RegistryEndpoints,
   type ReleaseQuery,
 } from '../../src/deps/registries.js';
+import { ALLOW_PRIVATE_NETWORK_ENV } from '../../src/sources/http.js';
 
 type Route = (response: ServerResponse) => void | Promise<void>;
+
+// Lookups go through the shared client, which reaches these loopback registries only with this switch.
+beforeEach(() => {
+  vi.stubEnv(ALLOW_PRIVATE_NETWORK_ENV, '1');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 interface TestServer {
   base: string;
@@ -250,7 +260,7 @@ describe('lookupReleaseDates', () => {
       cached: false,
     });
     expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]).toContain('exceeds 26214400 bytes');
+    expect(result.warnings[0]).toContain('over the 26214400 byte limit');
   });
 
   it('dates SwiftPM GitHub tags through annotated tags and never sends the token elsewhere', async () => {
@@ -275,6 +285,7 @@ describe('lookupReleaseDates', () => {
         committer: { date: '2024-11-01T09:00:00Z' },
       }),
     });
+    vi.stubEnv('GITHUB_TOKEN', 'ghp_secret');
 
     const result = await lookupReleaseDates(
       [
@@ -301,7 +312,6 @@ describe('lookupReleaseDates', () => {
         offline: false,
         cacheDir: await makeCacheDir(),
         endpoints: endpointsFor(server.base),
-        githubToken: 'ghp_secret',
       }
     );
 
@@ -361,7 +371,7 @@ describe('lookupReleaseDates', () => {
       cached: false,
     });
     expect(first.warnings).toEqual([
-      `1 release-date lookup failed: cargo:flaky@1.0.0: HTTP 503 from ${server.base}/crates/api/v1/crates/flaky/1.0.0`,
+      `1 release-date lookup failed: cargo:flaky@1.0.0: GET ${server.base}/crates/api/v1/crates/flaky/1.0.0 answered HTTP 503.`,
     ]);
 
     failing = false;

@@ -7,13 +7,20 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { inspectWebsite } from '../../src/core/website-discovery.js';
+import { ALLOW_PRIVATE_NETWORK_ENV } from '../../src/sources/http.js';
 
 const servers: Server[] = [];
 
+/** The loopback test servers are reachable only with the spec 4.1 private-network switch. */
+function allowPrivateNetwork(): void {
+  vi.stubEnv(ALLOW_PRIVATE_NETWORK_ENV, '1');
+}
+
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -115,17 +122,22 @@ describe('inspectWebsite', () => {
             { 'last-modified': 'Thu, 22 Oct 2015 07:28:00 GMT' }
           );
           return;
+        case '/docs/llms-guide.md':
+          writeHttpResponse(response, 200, 'text/markdown', '# Guide\n');
+          return;
         default:
           writeHttpResponse(response, 500, 'text/plain', `Unexpected request: ${pathname}`);
       }
     });
 
     const explicitUrl = `${baseUrl}/docs/page`;
-    const inspection = await inspectWebsite({ url: explicitUrl, allowPrivateHosts: true });
+    allowPrivateNetwork();
+    const inspection = await inspectWebsite({ url: explicitUrl });
 
     expect(requests.map((path) => new URL(path, baseUrl).pathname)).toEqual([
       '/docs/page',
       '/llms.txt',
+      '/docs/llms-guide.md',
       '/sitemap.xml',
     ]);
     expect(inspection).toMatchObject({
@@ -133,7 +145,7 @@ describe('inspectWebsite', () => {
       crawlPolicy: {
         inspectedResourceUrls: [explicitUrl, `${baseUrl}/llms.txt`, `${baseUrl}/sitemap.xml`],
         sameOriginWellKnownResources: [`${baseUrl}/llms.txt`, `${baseUrl}/sitemap.xml`],
-        linkedCandidateFetches: false,
+        markdownProbeUrls: [`${baseUrl}/docs/llms-guide.md`],
         renderedJavaScript: false,
         timeoutMs: 10000,
         maxBytesPerResponse: 65536,
@@ -246,10 +258,8 @@ describe('inspectWebsite', () => {
       writeHttpResponse(response, 404, 'text/plain', 'not found');
     });
 
-    const inspection = await inspectWebsite({
-      url: `${baseUrl}/docs/page`,
-      allowPrivateHosts: true,
-    });
+    allowPrivateNetwork();
+    const inspection = await inspectWebsite({ url: `${baseUrl}/docs/page` });
     const warning = `Response truncated at 65536 bytes for explicit-url resource: ${baseUrl}/docs/page`;
 
     expect(inspection.inspectedResources[0]).toMatchObject({
@@ -314,7 +324,103 @@ describe('inspectWebsite', () => {
     await expect(inspectWebsite({ url: `${baseUrl}/` })).rejects.toThrow(
       /plain http is allowed only to loopback/
     );
-    const inspection = await inspectWebsite({ url: `${baseUrl}/`, allowPrivateHosts: true });
+    allowPrivateNetwork();
+    const inspection = await inspectWebsite({ url: `${baseUrl}/` });
     expect(inspection.inspectedResources[0]?.status).toBe(200);
+  });
+
+  it('probes the first three sorted same-origin llms.txt pages for Markdown at .md', async () => {
+    const { baseUrl, requests } = await startTestServer((request, response) => {
+      const origin = `http://${request.headers.host ?? ''}`;
+      switch (request.url) {
+        case '/llms.txt':
+          writeHttpResponse(
+            response,
+            200,
+            'text/plain',
+            [
+              '# Docs',
+              `- [Zeta](${origin}/docs/v8/zeta): the last page`,
+              `- [Beta](${origin}/docs/v8/beta/)`,
+              '- [Alpha](/docs/v8/alpha)',
+              `- [Old](${origin}/docs/v7/alpha)`,
+              `- [Spec](${origin}/spec/2026-07-28/schema.md)`,
+              `- [Again](${origin}/spec/2026-07-28/basic.md)`,
+              '- [Release](https://elsewhere.example/1.2/notes)',
+            ].join('\n')
+          );
+          return;
+        case '/docs/v7/alpha.md':
+          writeHttpResponse(response, 200, 'text/markdown; charset=utf-8', '# Alpha 7\n');
+          return;
+        case '/docs/v8/alpha.md':
+          writeHttpResponse(response, 200, 'text/plain', '# Alpha 8\n');
+          return;
+        case '/docs/v8/beta.md':
+          writeHttpResponse(response, 200, 'text/html', '<html>app shell</html>');
+          return;
+        default:
+          writeHttpResponse(response, 404, 'text/plain', 'not found');
+      }
+    });
+
+    allowPrivateNetwork();
+    const inspection = await inspectWebsite({ url: `${baseUrl}/` });
+
+    expect(inspection.llmsTxt).toEqual({
+      url: `${baseUrl}/llms.txt`,
+      listedUrls: 7,
+      versionSegments: [
+        { segment: 'v8', urls: 3 },
+        { segment: '2026-07-28', urls: 2 },
+        { segment: '1.2', urls: 1 },
+        { segment: 'v7', urls: 1 },
+      ],
+      markdownProbes: [
+        {
+          pageUrl: `${baseUrl}/docs/v7/alpha`,
+          probeUrl: `${baseUrl}/docs/v7/alpha.md`,
+          status: 200,
+          contentType: 'text/markdown',
+          markdown: true,
+          error: null,
+        },
+        {
+          pageUrl: `${baseUrl}/docs/v8/alpha`,
+          probeUrl: `${baseUrl}/docs/v8/alpha.md`,
+          status: 200,
+          contentType: 'text/plain',
+          markdown: true,
+          error: null,
+        },
+        {
+          pageUrl: `${baseUrl}/docs/v8/beta/`,
+          probeUrl: `${baseUrl}/docs/v8/beta.md`,
+          status: 200,
+          contentType: 'text/html',
+          markdown: false,
+          error: null,
+        },
+      ],
+    });
+    expect(inspection.crawlPolicy.markdownProbeUrls).toEqual([
+      `${baseUrl}/docs/v7/alpha.md`,
+      `${baseUrl}/docs/v8/alpha.md`,
+      `${baseUrl}/docs/v8/beta.md`,
+    ]);
+    // Never more than three probes, and never a listed page on another origin.
+    expect(requests.filter((path) => path.endsWith('.md'))).toHaveLength(3);
+    expect(requests).not.toContain('/docs/v8/zeta.md');
+  });
+
+  it('reports no llms.txt evidence when the site serves none', async () => {
+    const { baseUrl } = await startTestServer((_request, response) => {
+      writeHttpResponse(response, 404, 'text/plain', 'not found');
+    });
+
+    allowPrivateNetwork();
+    const inspection = await inspectWebsite({ url: `${baseUrl}/` });
+    expect(inspection.llmsTxt).toBeNull();
+    expect(inspection.crawlPolicy.markdownProbeUrls).toEqual([]);
   });
 });

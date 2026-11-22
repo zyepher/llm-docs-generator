@@ -147,6 +147,9 @@ describe('trimBareUrl', () => {
     );
     expect(trimBareUrl('https://example.com/docs).')).toBe('https://example.com/docs');
     expect(trimBareUrl('https://example.com/docs?!,;.')).toBe('https://example.com/docs');
+    expect(trimBareUrl('https://example.com/docs/intro.md):')).toBe(
+      'https://example.com/docs/intro.md'
+    );
   });
 });
 

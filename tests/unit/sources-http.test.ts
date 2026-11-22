@@ -322,6 +322,35 @@ describe('createHttpClient requests', () => {
     expect(calls).toBe(3);
   });
 
+  it("stops at the caller's signal, in flight or during a retry backoff", async () => {
+    let calls = 0;
+    const { origin } = await serve((request, response) => {
+      calls += 1;
+      if (request.url === '/hang') {
+        return;
+      }
+      response.writeHead(503, { 'retry-after': '30' });
+      response.end();
+    });
+    const http = client({ allowPrivateNetwork: true });
+
+    const inFlight = new AbortController();
+    setTimeout(() => inFlight.abort(), 50);
+    await expect(http.get(`${origin}/hang`, { ...LIMIT, signal: inFlight.signal })).rejects.toThrow(
+      /GET http:\/\/127\.0\.0\.1:\d+\/hang was cancelled/
+    );
+
+    calls = 0;
+    const backoff = new AbortController();
+    setTimeout(() => backoff.abort(), 50);
+    const started = Date.now();
+    await expect(
+      http.get(`${origin}/unavailable`, { ...LIMIT, signal: backoff.signal })
+    ).rejects.toThrow(/\/unavailable was cancelled/);
+    expect(calls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   it('runs at most 4 requests per host at once', async () => {
     let active = 0;
     let peak = 0;
