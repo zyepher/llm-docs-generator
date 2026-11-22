@@ -764,7 +764,7 @@ async function staleReason(
     ) {
       return {
         reason: 'lockfile-moved',
-        detail: `the lockfile now resolves ${dependency.ecosystem}:${dependency.name} ${resolved.recipe.version}, the pack is ${manifest.pack.version}`,
+        detail: `${dependency.ecosystem === 'toolchain' ? "the project's files now state" : 'the lockfile now resolves'} ${dependency.ecosystem}:${dependency.name} ${resolved.recipe.version}, the pack is ${manifest.pack.version}`,
       };
     }
     return { reason: 'recipe-edited', detail: `packs.${resolved.id} in llm-docs.json changed` };

@@ -902,6 +902,8 @@ function table(rows: string[][]): string[] {
 }
 
 function lockfileSummary(pack: PackStatus): string {
+  const toolchain = pack.dependency?.ecosystem === 'toolchain';
+
   switch (pack.lockfile?.kind) {
     case 'found':
       return messageText(pack.lockfile.version);
@@ -910,11 +912,11 @@ function lockfileSummary(pack: PackStatus): string {
         .map((entry) => `${messageText(entry.version)} (${messageText(entry.lockfile)})`)
         .join(', ');
     case 'missing':
-      return 'not in any lockfile';
+      return toolchain ? 'no file states it' : 'not in any lockfile';
     case 'other-registry':
       return 'other registry';
     case 'unread':
-      return 'lockfile not read';
+      return toolchain ? 'version file not read' : 'lockfile not read';
     default:
       return '-';
   }

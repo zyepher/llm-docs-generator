@@ -1176,6 +1176,33 @@ describe('verifyPacks', () => {
     );
   });
 
+  it("follows the project's version file for a toolchain pack and rebuilds when it moves", async () => {
+    const pack = {
+      ...PACK,
+      version: undefined,
+      dependency: { ecosystem: 'toolchain', name: 'python' },
+    };
+    const root = await makeProject({ python: pack }, { ...DOCS, '.python-version': '3.14.2\n' });
+
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+    expect((await readPackManifest(join(root, 'agent-docs', 'python'))).pack.version).toBe('3.14');
+
+    // A patch release is the same feature release, so the pack stays current.
+    await writeFile(join(root, '.python-version'), '3.14.9\n');
+    expect((await syncPacks(root, undefined, { check: true })).packs[0]).toMatchObject({
+      status: 'unchanged',
+    });
+
+    await writeFile(join(root, '.python-version'), '3.15.0\n');
+    expect((await syncPacks(root, undefined, { check: true })).packs[0]).toMatchObject({
+      status: 'would-build',
+      reason: 'lockfile-moved',
+      detail: "the project's files now state toolchain:python 3.15, the pack is 3.14",
+    });
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+    expect((await readPackManifest(join(root, 'agent-docs', 'python'))).pack.version).toBe('3.15');
+  });
+
   it('takes a dependency-bound version from the lockfile and rebuilds when it moves', async () => {
     const pack = { ...PACK, version: undefined, dependency: { ecosystem: 'npm', name: 'demo' } };
     const root = await makeProject(

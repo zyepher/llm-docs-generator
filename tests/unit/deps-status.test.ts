@@ -505,6 +505,13 @@ describe('toolchain packs and releases', () => {
     expect(unread.packs[0]?.nextStep).toBe(
       "check by hand that the project's files state 22 for toolchain:node: .nvmrc was not read before the time limit"
     );
+
+    // The status table's LOCKFILE column never says "lockfile" for a toolchain.
+    const table = `${formatStatusHuman(report)}\n${formatStatusHuman(unread)}`;
+    expect(table).toContain('no file states it');
+    expect(table).toContain('version file not read');
+    expect(table).not.toContain('not in any lockfile');
+    expect(table).not.toContain('lockfile not read');
   });
 });
 

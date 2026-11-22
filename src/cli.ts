@@ -1223,7 +1223,7 @@ function buildProgram(): Command {
     add
       .option(
         '--dependency <ecosystem:name>',
-        `Bind the pack to a dependency, such as npm:vite, or to a language with toolchain:<name> (${TOOLCHAINS.join(', ')}); ecosystems: ${ECOSYSTEMS.join(', ')}`
+        `Bind the pack to a dependency, such as npm:vite, or to a language with toolchain:<name> (${TOOLCHAINS.join(', ')}); ecosystems: ${ECOSYSTEMS.join(', ')} (default: none)`
       )
       .option(
         '--covers <ecosystem:name>',

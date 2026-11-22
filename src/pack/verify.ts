@@ -614,10 +614,12 @@ async function coveredFindings(context: PackCheckContext): Promise<CheckFinding[
 
   for (const covered of context.manifest.recipe.covers ?? []) {
     const lookup = await context.resolveDependencyVersion(covered);
+    // A toolchain's version comes from the project's version files, not from a lockfile.
+    const toolchain = covered.ecosystem === 'toolchain';
     if (lookup.kind === 'unread') {
       findings.push({
         status: 'warn',
-        message: `covers ${covered.ecosystem}:${covered.name}, which could not be checked against the lockfiles, because ${lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`).join('; ')}`,
+        message: `covers ${covered.ecosystem}:${covered.name}, which could not be checked against ${toolchain ? "the project's files" : 'the lockfiles'}, because ${lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`).join('; ')}`,
       });
       continue;
     }
@@ -631,7 +633,7 @@ async function coveredFindings(context: PackCheckContext): Promise<CheckFinding[
     for (const other of resolved.filter((entry) => majorVersionsDiffer(entry, version))) {
       findings.push({
         status: 'warn',
-        message: `covers ${covered.ecosystem}:${covered.name}, which the lockfiles resolve to ${other}, another major version than the pack's ${version}: the pack may not describe that package's version; add a pack for it, or remove it from packs.${context.packId}.covers in llm-docs.json`,
+        message: `covers ${covered.ecosystem}:${covered.name}, which ${toolchain ? "the project's files state as" : 'the lockfiles resolve to'} ${other}, another major version than the pack's ${version}: the pack may not describe that package's version; add a pack for it, or remove it from packs.${context.packId}.covers in llm-docs.json`,
       });
     }
   }
