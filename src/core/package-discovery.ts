@@ -605,10 +605,14 @@ export function describePackageDiscovery(result: PackageDiscovery): string[] {
   switch (docDirectories.status) {
     case 'listed':
       lines.push(
-        `  Markdown at ${docDirectories.tag}: ${docDirectories.markdownFiles} files; ${docDirectories.directories
-          .slice(0, 5)
-          .map((directory) => `${directory.path} (${directory.markdownFiles})`)
-          .join(', ')}`
+        `  Markdown at ${docDirectories.tag}: ${docDirectories.markdownFiles} files; ${
+          docDirectories.directories.length === 0
+            ? 'none inside a directory'
+            : docDirectories.directories
+                .slice(0, 5)
+                .map((directory) => `${directory.path} (${directory.markdownFiles})`)
+                .join(', ')
+        }`
       );
       break;
     case 'failed':

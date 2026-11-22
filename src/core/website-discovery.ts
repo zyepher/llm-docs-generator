@@ -1119,7 +1119,8 @@ export function trimBareUrl(value: string): string {
   while (end > 0) {
     const ch = value[end - 1];
 
-    if (ch === ',' || ch === '.' || ch === ';' || ch === '!' || ch === '?') {
+    // ':' ends `[title](url): description`, the usual llms.txt entry shape.
+    if (ch === ',' || ch === '.' || ch === ';' || ch === ':' || ch === '!' || ch === '?') {
       end -= 1;
       continue;
     }

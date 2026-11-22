@@ -340,7 +340,7 @@ describe('inspectWebsite', () => {
             'text/plain',
             [
               '# Docs',
-              `- [Zeta](${origin}/docs/v8/zeta)`,
+              `- [Zeta](${origin}/docs/v8/zeta): the last page`,
               `- [Beta](${origin}/docs/v8/beta/)`,
               '- [Alpha](/docs/v8/alpha)',
               `- [Old](${origin}/docs/v7/alpha)`,
