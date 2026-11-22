@@ -1987,7 +1987,15 @@ describe('a symbolic link planted in a pack', () => {
         expect(verify.code, where + verify.stderr).toBe(1);
         const status = await runCli(root, ['status', '--offline', '--json'], env);
         expect(status.code, where + status.stderr).toBe(0);
-        expect(JSON.parse(status.stdout).packs[0].state, where).not.toBe('ok');
+        const state = JSON.parse(status.stdout).packs[0];
+        expect(state.state, where).not.toBe('ok');
+        if (label === 'guides/') {
+          expect(state).toMatchObject({
+            state: 'unusable',
+            nextStep:
+              "agent-docs/demo/guides is a symbolic link; run 'llm-docs sync demo' for what to do",
+          });
+        }
         const stamp = await runCli(root, ['guides', 'stamp', 'demo'], env);
         expect(stamp.code, where + stamp.stderr).toBe(2);
         const hook = await runHook(root, JSON.stringify({ cwd: root }), env, cache);

@@ -5,6 +5,8 @@
  * (`formatStatusHuman`) or an agent (`formatStatusBrief`).
  */
 
+import { sep } from 'node:path';
+
 import {
   CONFIG_FILE_NAME,
   ConfigError,
@@ -347,8 +349,11 @@ function packNextStep(
           : [];
       return `check by hand that the lockfiles resolve ${dependency} to ${messageText(pack.version ?? 'the pack version')}: ${unread.join('; ')}`;
     }
-    case 'unusable':
-      return pack.offline?.kind === 'refused' ? messageText(pack.offline.message) : sync;
+    case 'unusable': {
+      const refusal = pack.offline?.kind === 'refused' ? pack.offline.message : '';
+      const first = refusal.split(/(?<=\.) /)[0]?.replace(/\.$/, '') ?? '';
+      return `${messageText(first)}; run '${sync}' for what to do`;
+    }
     case 'recipe-changed':
     case 'sources-changed':
     case 'pack-changed':
@@ -1126,7 +1131,11 @@ async function offlineStalenessWithin(
   const check = packOfflineStaleness(loaded, resolved).then(
     (stale): OfflineStaleness | undefined =>
       stale === undefined ? undefined : { kind: 'stale', ...stale },
-    (error: unknown): OfflineStaleness => ({ kind: 'refused', message: errorMessage(error) })
+    // Project-relative paths, so the reason fits the note's line.
+    (error: unknown): OfflineStaleness => ({
+      kind: 'refused',
+      message: errorMessage(error).split(`${loaded.projectRoot}${sep}`).join(''),
+    })
   );
   if (signal === undefined) {
     return check;
