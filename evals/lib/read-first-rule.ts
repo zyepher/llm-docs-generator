@@ -240,7 +240,7 @@ async function listSourceChangeDocuments(repo: string, ref: string): Promise<Cha
   try {
     const git = await createGitRunner(workDir, new URL(repo));
     const checkout = join(workDir, 'repository');
-    const commit = await fetchCommit(git, checkout, repo, ref);
+    const commit = await fetchCommit(git, checkout, repo, [ref]);
     const tree = parseTree(
       await git(['ls-tree', '-r', '-z', '--full-tree', commit], { cwd: checkout })
     );

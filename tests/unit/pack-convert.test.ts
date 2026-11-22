@@ -262,7 +262,7 @@ describe('markitdown and docling converters', { timeout: SPAWN_HEAVY_TIMEOUT_MS 
       });
       expect(check.packs[0]).toMatchObject({
         status: 'would-build',
-        reason: 'upstream changed',
+        reason: 'upstream-changed',
         refresh: {
           files: expect.arrayContaining([
             { source: '0:spec.pdf', output: 'pages/spec.md', status: 'changed' },
@@ -314,7 +314,7 @@ describe('command converters', { timeout: SPAWN_HEAVY_TIMEOUT_MS }, () => {
     });
     expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({
       status: 'built',
-      reason: 'the recipe changed',
+      reason: 'recipe-edited',
     });
     expect(await page(root, 'pages/spec.md')).toContain('Converted by command');
     expect(await conversionLog()).toEqual(['command spec.pdf', 'command spec.pdf']);
@@ -462,7 +462,7 @@ describe('agent conversions', { timeout: SPAWN_HEAVY_TIMEOUT_MS }, () => {
     ]);
 
     const stale = await syncPacks(root, undefined);
-    expect(stale.packs[0]).toMatchObject({ status: 'built', reason: 'source files changed' });
+    expect(stale.packs[0]).toMatchObject({ status: 'built', reason: 'sources-changed' });
     expect(stale.packs[0]?.warnings).toContain(
       'Agent conversion docs/spec.pdf.md is stale: docs/spec.pdf changed after it was written; convert the document again into docs/spec.pdf.md, then sync.'
     );

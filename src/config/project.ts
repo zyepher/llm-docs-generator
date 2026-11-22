@@ -236,7 +236,7 @@ const dependencySchema = z.strictObject({
   name: z.string().min(1),
 });
 
-const READ_FIRST_MAX = 5;
+export const READ_FIRST_MAX = 5;
 
 /**
  * A read-first target (spec 4.8): a normalized pack-relative POSIX path under
@@ -566,12 +566,14 @@ export function parseProjectConfig(projectRoot: string, text: string): LoadedPro
   try {
     raw = JSON.parse(text);
   } catch (error) {
-    throw new ConfigError(`${CONFIG_FILE_NAME} is not valid JSON: ${errorMessage(error)}`);
+    throw new ConfigError(
+      `${CONFIG_FILE_NAME} is not valid JSON (${errorMessage(error)}); fix the syntax, then run the command again.`
+    );
   }
 
   if (isRecord(raw) && raw.schemaVersion !== undefined && raw.schemaVersion !== 3) {
     throw new ConfigError(
-      `${CONFIG_FILE_NAME} has schemaVersion ${JSON.stringify(raw.schemaVersion)}; this llm-docs reads schemaVersion 3.`
+      `${CONFIG_FILE_NAME} has schemaVersion ${JSON.stringify(raw.schemaVersion)}, and this llm-docs reads only schemaVersion 3; set "schemaVersion": 3 if the file is otherwise v3, or recreate it with 'llm-docs init' and 'llm-docs migrate <v2-pack-dir>'.`
     );
   }
 
@@ -586,14 +588,16 @@ export function parseProjectConfig(projectRoot: string, text: string): LoadedPro
 
   if (packsDirRelative === '.') {
     throw new ConfigError(
-      `${CONFIG_FILE_NAME} packsDir must be a subdirectory of the project, not the project root.`
+      `${CONFIG_FILE_NAME} packsDir must be a subdirectory of the project, not the project root; set it to a directory such as "agent-docs".`
     );
   }
 
   const packsDir = join(projectRoot, ...packsDirRelative.split('/'));
 
   if (!isSameOrDescendant(projectRoot, packsDir)) {
-    throw new ConfigError(`${CONFIG_FILE_NAME} packsDir must stay inside the project.`);
+    throw new ConfigError(
+      `${CONFIG_FILE_NAME} packsDir "${packsDirRelative}" leaves the project; set it to a project-relative directory such as "agent-docs".`
+    );
   }
 
   return {
@@ -640,7 +644,7 @@ export async function initProjectConfig(
     const check = projectPathSchema.safeParse(options.packsDir);
     if (!check.success || normalizeProjectPath(options.packsDir) === '.') {
       throw new ConfigError(
-        `--packs-dir must be a project-relative subdirectory inside the project, got "${options.packsDir}".`
+        `--packs-dir must be a project-relative subdirectory inside the project, such as agent-docs; got "${options.packsDir}".`
       );
     }
   }
@@ -720,7 +724,9 @@ export async function resolvePackRecipe(
   const pack = Object.hasOwn(config.packs, id) ? config.packs[id] : undefined;
 
   if (pack === undefined) {
-    throw new ConfigError(`No pack "${id}" in ${CONFIG_FILE_NAME}.`);
+    throw new ConfigError(
+      `No pack "${id}" in ${CONFIG_FILE_NAME}; add it with 'llm-docs add ${id}', or check the id against the keys of "packs".`
+    );
   }
 
   const version = await resolvePackVersion(id, pack, options.resolveDependencyVersion);
@@ -775,6 +781,33 @@ export async function resolvePackRecipe(
   return { id, recipe, recipeHash: recipeHash(recipe) };
 }
 
+/**
+ * Whether the pack's recipe, resolved at the version a manifest records,
+ * hashes to the recorded recipeHash: llm-docs.json is unchanged and only the
+ * lockfile's version of the bound dependency moved.
+ */
+export async function onlyLockfileVersionMoved(
+  config: ProjectConfig,
+  id: string,
+  recorded: { version: string; recipeHash: string }
+): Promise<boolean> {
+  try {
+    const atRecorded = await resolvePackRecipe(config, id, {
+      resolveDependencyVersion: () => ({
+        kind: 'found',
+        version: recorded.version,
+        lockfiles: [],
+      }),
+    });
+    return atRecorded.recipeHash === recorded.recipeHash;
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function resolvePackVersion(
   id: string,
   pack: PackConfig,
@@ -787,7 +820,9 @@ async function resolvePackVersion(
   const dependency = pack.dependency;
 
   if (dependency === undefined) {
-    throw new ConfigError(`${CONFIG_FILE_NAME} packs.${id}: set "version" or "dependency".`);
+    throw new ConfigError(
+      `${CONFIG_FILE_NAME} packs.${id}: set "version" (the docs version) or "dependency" (to take the version from the lockfile).`
+    );
   }
 
   const label = `${dependency.ecosystem}:${dependency.name}`;
@@ -800,7 +835,7 @@ async function resolvePackVersion(
     case 'missing': {
       const searched = lookup.searched.length === 0 ? 'none found' : lookup.searched.join(', ');
       throw new ConfigError(
-        `Pack "${id}": no lockfile resolves ${label} (lockfiles searched: ${searched}); set "version" explicitly.`
+        `Pack "${id}": no lockfile resolves ${label} (lockfiles searched: ${searched}); set packs.${id}.version in ${CONFIG_FILE_NAME}, or install the dependency so a lockfile records it.`
       );
     }
     case 'conflict': {
@@ -808,7 +843,7 @@ async function resolvePackVersion(
         .map((entry) => `${entry.version} in ${entry.lockfile}`)
         .join(', ');
       throw new ConfigError(
-        `Pack "${id}": lockfiles resolve ${label} to different versions (${versions}); set "version" explicitly.`
+        `Pack "${id}": lockfiles resolve ${label} to different versions (${versions}); set packs.${id}.version in ${CONFIG_FILE_NAME} to the one these docs describe.`
       );
     }
   }
@@ -827,7 +862,7 @@ function substitutePlaceholders(value: string, placeholders: Placeholders, where
 
     if (replacement === undefined) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${where}: placeholder ${token} has no value for version "${placeholders.version}".`
+        `${CONFIG_FILE_NAME} ${where}: placeholder ${token} has no value for version "${placeholders.version}", which has no such numeric part; write that part out literally instead of ${token}.`
       );
     }
 
@@ -921,7 +956,9 @@ function resolveUrlEntries(
     const parsed = parsedUrl(url);
 
     if (parsed === undefined || !isDocsUrl(parsed)) {
-      throw new ConfigError(`${CONFIG_FILE_NAME} ${where}: "${url}" is not an https:// URL.`);
+      throw new ConfigError(
+        `${CONFIG_FILE_NAME} ${where}: "${url}" is not an https:// URL; only https:// pages are fetched, so fix the URL.`
+      );
     }
 
     const storedPath =
@@ -931,7 +968,7 @@ function resolveUrlEntries(
 
     if (storedPath === '' || escapesUpward(storedPath) || isAbsolute(storedPath)) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${where}: stored path "${storedPath}" must be a relative path inside the pack.`
+        `${CONFIG_FILE_NAME} ${where}: stored path "${storedPath}" must be a relative path inside the pack; give the URL an explicit "path" such as "guide/intro.md".`
       );
     }
 

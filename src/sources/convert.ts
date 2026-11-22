@@ -126,11 +126,13 @@ export async function createDocumentConverter(
   if (spec.tool === 'command') {
     if (!argv.some((value) => value.includes('{input}'))) {
       throw new ConfigError(
-        'convert.command must pass the document to the converter with an {input} placeholder.'
+        'convert.command must pass the document to the converter with an {input} placeholder; add "{input}" where the converter expects the file.'
       );
     }
     if (hasPlaceholder(argv[0] ?? '')) {
-      throw new ConfigError('convert.command[0] must name the executable, not a placeholder.');
+      throw new ConfigError(
+        'convert.command[0] must name the executable, not a placeholder; move {input} or {output} to a later argument.'
+      );
     }
   } else if (argv.some(hasPlaceholder)) {
     throw new ConfigError(
@@ -141,7 +143,9 @@ export async function createDocumentConverter(
   const [name, ...leading] = argv;
 
   if (name === undefined) {
-    throw new ConfigError('convert.command must not be empty.');
+    throw new ConfigError(
+      'convert.command must not be empty; name the executable first, then its arguments with an {input} placeholder.'
+    );
   }
 
   const executable = await resolveExecutable(name, options.projectRoot, env);
@@ -341,7 +345,7 @@ async function convertWithAgent(
     );
   } catch (error) {
     throw new ConfigError(
-      `${output.sourceLabel} is not valid UTF-8 text (${errorMessage(error)}).`
+      `${output.sourceLabel} is not valid UTF-8 text (${errorMessage(error)}); have the agent save its conversion as UTF-8, then sync again.`
     );
   }
 
@@ -598,7 +602,11 @@ function runProcess(
       if (!settled) {
         settled = true;
         clearTimeout(timer);
-        rejectRun(new ConverterError(`Could not run ${executable}: ${errorMessage(error)}`));
+        rejectRun(
+          new ConverterError(
+            `Could not run ${executable} (${errorMessage(error)}); check that it is installed and executable, or fix convert.command.`
+          )
+        );
       }
     });
     child.on('exit', (code, signal) => {

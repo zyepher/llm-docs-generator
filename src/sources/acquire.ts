@@ -96,7 +96,7 @@ const ACQUIRERS: AcquirerRegistry = {
 
 function notSupportedError(type: SourceType): ConfigError {
   return new ConfigError(
-    `"${type}" sources are not supported yet; only "local" sources can be synced in this build.`
+    `"${type}" sources are not supported by this build; 'llm-docs capabilities --json' lists the source types it supports.`
   );
 }
 
@@ -497,7 +497,7 @@ async function resolveLocalSourcePath(
 
   if (!isSameOrDescendant(projectRoot, real)) {
     throw new ConfigError(
-      `Local source "${source.path}" resolves outside the project (${real}); local sources must stay inside the project.`
+      `Local source "${source.path}" resolves outside the project (${real}); local sources must stay inside the project, so copy the docs in, or use a git source for them.`
     );
   }
 
@@ -625,7 +625,9 @@ async function acquireLocal(
       );
     }
   } else {
-    throw new ConfigError(`Local source "${source.path}" is neither a file nor a directory.`);
+    throw new ConfigError(
+      `Local source "${source.path}" is neither a file nor a directory; point "path" at the docs directory or file.`
+    );
   }
 
   const gitState = await captureGitState(root);

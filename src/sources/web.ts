@@ -210,7 +210,7 @@ export async function acquireLlmsTxt(
 
     if (planned.length === 0) {
       throw new ConfigError(
-        `${redactUrl(source.url)} lists no same-origin https links that pass "include" (${source.include.join(', ')}); check the filter against the index.`
+        `${redactUrl(source.url)} lists no same-origin https links that pass "include" (${source.include.join(', ')}); compare the filter with the paths 'llm-docs discover --url <site>' reports, then fix "include".`
       );
     }
     if (planned.length > PACK_LIMITS.maxFiles) {

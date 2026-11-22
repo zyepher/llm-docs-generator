@@ -484,7 +484,7 @@ describe('assessCitations', () => {
     await setRecipe(root, '1.0.1');
     expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({
       status: 'built',
-      reason: 'the recipe changed',
+      reason: 'recipe-edited',
     });
     expect(await readFile(join(packDir(root), 'pages', 'guide', 'start.md'), 'utf-8')).toContain(
       'demo@1.0.1'
@@ -594,25 +594,25 @@ describe('verify citations', () => {
         status: 'fail',
         path: 'guides/a.md',
         message:
-          "pages/guide/api.md#install: cited section changed since stamping; re-review the guide, then 'llm-docs guides stamp demo guides/a.md'",
+          "pages/guide/api.md#install: cited section changed since stamping; re-review the guide, then run 'llm-docs guides stamp demo guides/a.md'",
       },
       {
         status: 'fail',
         path: 'guides/a.md',
         message:
-          "pages/guide/start.md: citation no longer resolves (no such file in the pack); fix the link and re-review the guide, then 'llm-docs guides stamp demo guides/a.md'",
+          "pages/guide/start.md: citation no longer resolves (no such file in the pack); fix the link and re-review the guide, then run 'llm-docs guides stamp demo guides/a.md'",
       },
       {
         status: 'warn',
         path: 'guides/b.md',
         message:
-          "edited after stamping; re-review the guide, then 'llm-docs guides stamp demo guides/b.md'",
+          "edited after stamping; re-review the guide, then run 'llm-docs guides stamp demo guides/b.md'",
       },
       {
         status: 'fail',
         path: 'guides/b.md',
         message:
-          "files/data/schema.json: cited file changed since stamping; re-review the guide, then 'llm-docs guides stamp demo guides/b.md'",
+          "files/data/schema.json: cited file changed since stamping; re-review the guide, then run 'llm-docs guides stamp demo guides/b.md'",
       },
     ]);
   });
@@ -773,7 +773,7 @@ describe('the citations lock through sync (RATIONALE: citations-lock ownership)'
     const report = await syncPacks(root, undefined);
     expect(report.packs[0]).toMatchObject({
       status: 'built',
-      reason: 'the recipe changed',
+      reason: 'recipe-edited',
       guideReview: {
         basis: 'sections',
         guides: [
@@ -860,7 +860,11 @@ describe('the citations lock through sync (RATIONALE: citations-lock ownership)'
     );
 
     expect((await syncPacks(root, undefined, { prune: true })).orphans).toEqual([
-      { id: 'demo', status: 'kept', reason: 'it holds guides; move them, then delete the pack' },
+      {
+        id: 'demo',
+        status: 'kept',
+        reason: 'it holds guides; move its guides/ elsewhere, then run sync --prune again',
+      },
     ]);
     expect(await pathExists(lockFile(root))).toBe(true);
   });

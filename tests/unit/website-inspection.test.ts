@@ -260,7 +260,7 @@ describe('inspectWebsite', () => {
 
     allowPrivateNetwork();
     const inspection = await inspectWebsite({ url: `${baseUrl}/docs/page` });
-    const warning = `Response truncated at 65536 bytes for explicit-url resource: ${baseUrl}/docs/page`;
+    const warning = `Response truncated at 65536 bytes for explicit-url resource: ${baseUrl}/docs/page; URLs after that point were not read, so the candidates from it are incomplete.`;
 
     expect(inspection.inspectedResources[0]).toMatchObject({
       url: `${baseUrl}/docs/page`,
@@ -276,20 +276,25 @@ describe('inspectWebsite', () => {
   });
 
   it('rejects unusable URLs before fetching and never echoes credentials', async () => {
+    await expect(inspectWebsite({ url: ' ' })).rejects.toThrow(
+      "discover --url needs the website's address, for example 'llm-docs discover --url https://docs.example.com'."
+    );
     await expect(inspectWebsite({ url: 'ftp://example.com/docs' })).rejects.toThrow(
-      'Unsupported URL scheme for discover --url: ftp:'
+      "Unsupported URL scheme for discover --url: ftp://example.com/docs uses ftp:; pass the site's https:// URL."
     );
     await expect(inspectWebsite({ url: 'not-a-url' })).rejects.toThrow(
-      'Malformed URL for discover --url.'
+      'Malformed URL for discover --url. "not-a-url" is not an absolute URL; pass one such as https://docs.example.com.'
     );
 
     const malformedCredentials = inspectWebsite({ url: 'https://user:secret@' });
     await expect(malformedCredentials).rejects.toThrow('Malformed URL for discover --url.');
     await expect(malformedCredentials).rejects.not.toThrow(/secret/);
 
-    await expect(inspectWebsite({ url: 'https://user:secret@example.com/docs' })).rejects.toThrow(
-      'Embedded credentials are not supported in discover --url.'
+    const credentials = inspectWebsite({ url: 'https://user:secret@example.com/docs' });
+    await expect(credentials).rejects.toThrow(
+      'Embedded credentials are not supported in discover --url: remove the user and password from https://***@example.com/docs.'
     );
+    await expect(credentials).rejects.not.toThrow(/secret/);
     await expect(inspectWebsite({ url: 'http://169.254.169.254/latest' })).rejects.toThrow(
       /only https:\/\/ URLs are fetched/
     );

@@ -27,6 +27,8 @@ import {
   normalizeRepositoryUrl,
   parsePackageSpec,
   rankMarkdownDirectories,
+  tagDateWarnings,
+  type PackageDiscovery,
 } from '../../src/core/package-discovery.js';
 import {
   fetchPackageMetadata,
@@ -114,6 +116,11 @@ async function metadataFor(query: PackageMetadataQuery, endpoints: RegistryEndpo
 
 /** Plain git for building fixtures, isolated from the developer's config. */
 async function git(cwd: string, ...args: string[]): Promise<string> {
+  return gitAt(cwd, undefined, ...args);
+}
+
+/** `git` with the author and committer dates pinned, when `date` is given. */
+async function gitAt(cwd: string, date: string | undefined, ...args: string[]): Promise<string> {
   const config = join(cwd, '..', 'fixture-gitconfig');
   await writeFile(config, '');
   const { stdout } = await execFileAsync('git', ['-c', 'protocol.file.allow=always', ...args], {
@@ -126,14 +133,19 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
       GIT_AUTHOR_EMAIL: 'test@example.com',
       GIT_COMMITTER_NAME: 'Test',
       GIT_COMMITTER_EMAIL: 'test@example.com',
+      ...(date === undefined ? {} : { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }),
     },
   });
   return stdout.trim();
 }
 
+const V1_DATE = '2024-01-15T12:00:00+01:00';
+const V11_DATE = '2024-03-01T09:30:00+01:00';
+
 /**
  * A repository standing in for an upstream: v1.0.0 (annotated) and widget@1.0.0
- * on the first commit, v1.1.0 (lightweight) on the second.
+ * on the first commit (committed V1_DATE), v1.1.0 (lightweight) on the second
+ * (committed V11_DATE).
  */
 async function makeUpstream(): Promise<{ url: string; v1: string; v11: string }> {
   const dir = join(await temp('llm-docs-upstream-'), 'widget');
@@ -157,13 +169,13 @@ async function makeUpstream(): Promise<{ url: string; v1: string; v11: string }>
   }
   await git(dir, 'init', '--quiet', '--initial-branch=main');
   await git(dir, 'add', '.');
-  await git(dir, 'commit', '--quiet', '-m', 'v1');
+  await gitAt(dir, V1_DATE, 'commit', '--quiet', '-m', 'v1');
   const v1 = await git(dir, 'rev-parse', 'HEAD');
   await git(dir, 'tag', '-a', 'v1.0.0', '-m', 'release 1.0.0');
   await git(dir, 'tag', 'widget@1.0.0');
   await writeFile(join(dir, 'docs', 'changes.md'), '# Changes\n');
   await git(dir, 'add', '.');
-  await git(dir, 'commit', '--quiet', '-m', 'v1.1');
+  await gitAt(dir, V11_DATE, 'commit', '--quiet', '-m', 'v1.1');
   const v11 = await git(dir, 'rev-parse', 'HEAD');
   await git(dir, 'tag', 'v1.1.0');
   return { url: pathToFileURL(dir).href, v1, v11 };
@@ -202,7 +214,10 @@ describe('parsePackageSpec', () => {
     ['npm:', /--package must be/],
     ['npm:hono@', /version "" is not a version/],
     ['npm:hono@4 .1', /is not a version/],
-    ['npm:../../evil', /is not a npm package name/],
+    [
+      'npm:../../evil',
+      /"\.\.\/\.\.\/evil" is not a valid npm package name; write it as the npm registry spells it/,
+    ],
     ['swiftpm:git@github.com:apple/swift-nio.git', /needs an https:\/\/ or file:\/\/ URL/],
     ['swiftpm:https://user:secret@example.com/repo', /without credentials/],
   ])('refuses %s as a usage error', (value, message) => {
@@ -659,8 +674,8 @@ describe('discoverPackage', () => {
       status: 'matched',
       tagCount: 3,
       matches: [
-        { tag: 'v1.0.0', form: 'v-prefixed', commit: upstream.v1 },
-        { tag: 'widget@1.0.0', form: 'name-at', commit: upstream.v1 },
+        { tag: 'v1.0.0', form: 'v-prefixed', commit: upstream.v1, committerDate: V1_DATE },
+        { tag: 'widget@1.0.0', form: 'name-at', commit: upstream.v1, committerDate: V1_DATE },
       ],
     });
     expect(discovery.docDirectories).toEqual({
@@ -682,15 +697,20 @@ describe('discoverPackage', () => {
       documents: [{ path: 'CHANGELOG.md', pattern: 'changelog' }],
       more: 0,
     });
+    // No registry, so no publish date to compare the commit dates with.
     expect(discovery.warnings).toEqual([
       '2 tags match 1.0.0; the directory listing uses v1.0.0, the first exact form.',
     ]);
-    expect(describePackageDiscovery(discovery)).toContain(
-      '  change documents at v1.0.0: CHANGELOG.md (changelog)'
+    expect(describePackageDiscovery(discovery)).toEqual(
+      expect.arrayContaining([
+        `  tags: v1.0.0 (v-prefixed, committed ${V1_DATE}), widget@1.0.0 (name-at, committed ${V1_DATE})`,
+        '  change documents at v1.0.0: CHANGELOG.md (changelog)',
+      ])
     );
 
     const latest = await discoverPackage(parsePackageSpec(`swiftpm:${upstream.url}`));
     expect(latest.package).toMatchObject({ version: '1.1.0', versionSource: 'latest-tag' });
+    expect(latest.tags).toMatchObject({ matches: [{ tag: 'v1.1.0', committerDate: V11_DATE }] });
     expect(latest.docDirectories).toMatchObject({
       tag: 'v1.1.0',
       commit: upstream.v11,
@@ -705,6 +725,72 @@ describe('discoverPackage', () => {
     });
   });
 
+  it('warns when a tag was committed more than 14 days from the version publish date', async () => {
+    const upstream = await makeUpstream();
+    const discovery = await discoverPackage(parsePackageSpec(`swiftpm:${upstream.url}@1.0.0`));
+    // A registry-declared repository must be https://, so the publish date joins the file:// evidence here.
+    const publishedOn = (publishedAt: string | null): PackageDiscovery => ({
+      ...discovery,
+      package: { ...discovery.package, ecosystem: 'npm', name: 'widget' },
+      registry: {
+        status: 'found',
+        source: 'npm-registry',
+        metadata: {
+          version: '1.0.0',
+          latestVersion: '1.0.0',
+          repository: null,
+          homepage: null,
+          documentationUrl: null,
+          license: null,
+          publishedAt,
+        },
+      },
+    });
+
+    expect(tagDateWarnings(publishedOn('2026-10-03T10:11:01.000Z'))).toEqual([
+      `Tag v1.0.0 was committed on 2024-01-15 but npm-registry published widget 1.0.0 on 2026-10-03, 992 days apart, so the tag (and the docDirectories and changeDocuments listed at it) may belong to another package from this repository, such as one under a former name. Check the package manifest at v1.0.0 before pinning it with 'llm-docs add --git ${upstream.url} --ref v1.0.0'.`,
+      `Tag widget@1.0.0 was committed on 2024-01-15 but npm-registry published widget 1.0.0 on 2026-10-03, 992 days apart, so the tag may belong to another package from this repository, such as one under a former name. Check the package manifest at widget@1.0.0 before pinning it with 'llm-docs add --git ${upstream.url} --ref widget@1.0.0'.`,
+    ]);
+    expect(tagDateWarnings(publishedOn('2024-01-20T08:00:00.000Z'))).toEqual([]);
+    expect(tagDateWarnings(publishedOn(null))).toEqual([]);
+  });
+
+  it('dates the commits of the first 10 matched tags and says which stay undated', async () => {
+    const dir = join(await temp('llm-docs-upstream-'), 'monorepo');
+    await mkdir(dir);
+    await writeFile(join(dir, 'README.md'), '# Monorepo\n');
+    await git(dir, 'init', '--quiet', '--initial-branch=main');
+    await git(dir, 'add', '.');
+    await gitAt(dir, V1_DATE, 'commit', '--quiet', '-m', 'first');
+    const names = Array.from({ length: 12 }, (_, index) => `p${String(index).padStart(2, '0')}`);
+    for (const name of names.slice(0, 10)) {
+      await git(dir, 'tag', `${name}@2.0.0`);
+    }
+    await writeFile(join(dir, 'README.md'), '# Monorepo, later\n');
+    await gitAt(dir, V11_DATE, 'commit', '--quiet', '-am', 'second');
+    for (const name of names.slice(10)) {
+      await git(dir, 'tag', `${name}@2.0.0`);
+    }
+
+    const discovery = await discoverPackage(
+      parsePackageSpec(`swiftpm:${pathToFileURL(dir).href}@2.0.0`)
+    );
+    expect(discovery.tags.status === 'matched' && discovery.tags.matches).toEqual(
+      names.map((name, index) => ({
+        tag: `${name}@2.0.0`,
+        form: 'suffix',
+        commit: expect.stringMatching(/^[0-9a-f]{40}$/),
+        committerDate: index < 10 ? V1_DATE : null,
+      }))
+    );
+    expect(discovery.warnings).toEqual([
+      "2 of the 12 tags matching 2.0.0 have committerDate null because their commits were not fetched (only the first 10 tags' commits are), so they were not compared with the publish date.",
+    ]);
+    expect(describePackageDiscovery(discovery).join('\n')).toContain(
+      'p11@2.0.0 (suffix, committer date not read)'
+    );
+  });
+
   it('records an unknown package, an unknown version, and a missing repository as evidence', async () => {
     const { endpoints } = await startRegistry({
       '/crates/api/v1/crates/norepo': json({ crate: { max_stable_version: '0.1.0' } }),
@@ -715,7 +801,8 @@ describe('discoverPackage', () => {
     expect(unknown.registry).toEqual({ status: 'package-not-found', source: 'crates.io' });
     expect(unknown.repository).toEqual({
       status: 'missing',
-      reason: 'crates.io has no package cargo:nothing.',
+      reason:
+        "crates.io has no package cargo:nothing; check the name against the registry's spelling.",
     });
     expect(unknown.tags.status).toBe('skipped');
 
@@ -735,7 +822,8 @@ describe('discoverPackage', () => {
     expect(noRepo.registry.status).toBe('found');
     expect(noRepo.repository).toEqual({
       status: 'missing',
-      reason: 'The registry metadata names no repository.',
+      reason:
+        'crates.io names no repository for norepo 0.1.0, so no tags were read; this tool cannot tell where its source lives.',
     });
   });
 
@@ -770,10 +858,18 @@ describe('discoverPackage', () => {
       status: 'unreachable',
       error: expect.stringMatching(/^git ls-remote failed for https:\/\/127\.0\.0\.1:9\/gone/),
     });
+    expect(gone.docDirectories).toEqual({
+      status: 'skipped',
+      reason: 'https://127.0.0.1:9/gone could not be reached; see tags.error.',
+    });
 
     const untagged = await discoverPackage(parsePackageSpec(`swiftpm:${upstream.url}@3.0.0`));
     expect(untagged.tags).toEqual({ status: 'no-match', tagCount: 3 });
-    expect(untagged.docDirectories).toEqual({ status: 'skipped', reason: 'No tag names 3.0.0.' });
+    expect(untagged.docDirectories).toEqual({
+      status: 'skipped',
+      reason:
+        'None of the 3 tags names 3.0.0, so this tool cannot tell which commit was released as 3.0.0.',
+    });
     expect(untagged.changeDocuments).toEqual({
       status: 'skipped',
       reason: 'No tree was listed at a matched tag; see docDirectories.',

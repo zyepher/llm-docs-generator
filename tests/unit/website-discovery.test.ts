@@ -165,6 +165,27 @@ describe('llms.txt URL extraction end-to-end', () => {
     expect(warnings).toEqual([]);
   });
 
+  it('names the resource in each warning about a skipped or scrubbed candidate', () => {
+    const { urls, warnings } = collectCandidateUrls(
+      'llms-txt',
+      [
+        '- [Mail](mailto:docs@example.com)',
+        '- [Broken](http://[x)',
+        '- [Private](https://user:secret@example.com/docs/private)',
+      ].join('\n')
+    );
+
+    expect(urls).toEqual(['https://example.com/docs/private']);
+    // The markdown-link and bare-url passes each see the last two entries, so each warns twice.
+    expect(warnings).toEqual([
+      'Skipped unsupported candidate URL scheme mailto: in llms-txt resource https://example.com/llms.txt.',
+      'Skipped malformed candidate URL in llms-txt resource https://example.com/llms.txt.',
+      'Scrubbed embedded credentials from candidate URL https://example.com/docs/private in llms-txt resource https://example.com/llms.txt.',
+      'Skipped malformed candidate URL in llms-txt resource https://example.com/llms.txt.',
+      'Scrubbed embedded credentials from candidate URL https://example.com/docs/private in llms-txt resource https://example.com/llms.txt.',
+    ]);
+  });
+
   it('still trims an unbalanced closing paren after a bare URL', () => {
     const { urls } = collectCandidateUrls(
       'llms-txt',

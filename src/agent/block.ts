@@ -181,7 +181,7 @@ async function resolveAgentFile(projectRoot: string, path: string): Promise<Agen
       path,
       kind: 'invalid',
       error: new ConfigError(
-        `${path} is a symbolic link to a file that does not exist; create the target or replace the link with a file.`
+        `${path} is a symbolic link to a file that does not exist; create the target, replace the link with a file, or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}.`
       ),
     };
   }
@@ -500,7 +500,9 @@ export function spliceBlock(text: string | null, body: string): string {
     case 'present':
       return current.slice(0, location.start) + block + current.slice(location.end);
     case 'mismatched':
-      throw new ConfigError(`mismatched llm-docs markers (${location.detail})`);
+      throw new ConfigError(
+        `mismatched llm-docs markers (${location.detail}); fix or remove them by hand, then run 'llm-docs sync'.`
+      );
     case 'absent':
       if (current === '' || /\r?\n\r?\n$/.test(current)) {
         return current + block;

@@ -174,7 +174,9 @@ describe('network sources in sync and refresh', () => {
     const offline = await syncPacks(root, undefined, { offline: true });
     expect(offline.packs[0]).toMatchObject({
       status: 'failed',
-      error: expect.stringContaining('needs to acquire network sources'),
+      error: expect.stringContaining(
+        "needs a rebuild that fetches its network sources (the pack files differ from the manifest: pages/index.md), and --offline is set; run 'llm-docs sync spec' without --offline"
+      ),
     });
     expect(requests).toEqual([]);
   });
@@ -204,7 +206,7 @@ describe('network sources in sync and refresh', () => {
 
     const checked = await syncPacks(root, undefined, { refresh: true, check: true });
     expect(checked.changed).toBe(true);
-    expect(checked.packs[0]).toMatchObject({ status: 'would-build', reason: 'upstream changed' });
+    expect(checked.packs[0]).toMatchObject({ status: 'would-build', reason: 'upstream-changed' });
     expect(checked.packs[0]?.refresh?.files).toEqual([
       { source: '0:basic/lifecycle.md', output: 'pages/basic/lifecycle.md', status: 'added' },
       { source: '0:basic/transports.md', output: 'pages/basic/transports.md', status: 'removed' },

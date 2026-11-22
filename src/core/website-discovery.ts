@@ -2,6 +2,7 @@ import {
   ALLOW_PRIVATE_NETWORK_ENV,
   assertUrlAllowed,
   createHttpClient,
+  redactUrl,
   type HostResolver,
   type HttpClient,
 } from '../sources/http.js';
@@ -229,7 +230,7 @@ export async function inspectWebsite(
 
       if (fetched.resource.truncated) {
         warnings.push(
-          `Response truncated at ${maxBytesPerResponse} bytes for ${plannedResource.sourceRole} resource: ${plannedResource.url}`
+          `Response truncated at ${maxBytesPerResponse} bytes for ${plannedResource.sourceRole} resource: ${plannedResource.url}; URLs after that point were not read, so the candidates${plannedResource.sourceRole === 'llms-txt' ? ' and the llmsTxt counts' : ''} from it are incomplete.`
         );
       }
 
@@ -416,7 +417,9 @@ function normalizeWebsiteUrl(input: string, allowPrivateNetwork: boolean): strin
   const trimmed = input.trim();
 
   if (trimmed === '') {
-    throw new Error('URL input is required for discover --url.');
+    throw new Error(
+      "discover --url needs the website's address, for example 'llm-docs discover --url https://docs.example.com'."
+    );
   }
 
   let url: URL;
@@ -424,15 +427,21 @@ function normalizeWebsiteUrl(input: string, allowPrivateNetwork: boolean): strin
   try {
     url = new URL(trimmed);
   } catch {
-    throw new Error('Malformed URL for discover --url.');
+    throw new Error(
+      `Malformed URL for discover --url. "${redactUrl(trimmed)}" is not an absolute URL; pass one such as https://docs.example.com.`
+    );
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error(`Unsupported URL scheme for discover --url: ${url.protocol}`);
+    throw new Error(
+      `Unsupported URL scheme for discover --url: ${redactUrl(url)} uses ${url.protocol}; pass the site's https:// URL.`
+    );
   }
 
   if (url.username !== '' || url.password !== '') {
-    throw new Error('Embedded credentials are not supported in discover --url.');
+    throw new Error(
+      `Embedded credentials are not supported in discover --url: remove the user and password from ${redactUrl(url)}.`
+    );
   }
 
   // Scheme and IP-literal checks fail here, before any request; hostnames are
@@ -786,13 +795,15 @@ function normalizeCandidateUrl(
   try {
     url = new URL(trimmed, baseUrl);
   } catch {
-    warnings.push(`Skipped malformed candidate URL in ${plannedResource.sourceRole} resource.`);
+    warnings.push(
+      `Skipped malformed candidate URL in ${plannedResource.sourceRole} resource ${plannedResource.url}.`
+    );
     return null;
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     warnings.push(
-      `Skipped unsupported candidate URL scheme ${url.protocol} in ${plannedResource.sourceRole} resource.`
+      `Skipped unsupported candidate URL scheme ${url.protocol} in ${plannedResource.sourceRole} resource ${plannedResource.url}.`
     );
     return null;
   }
@@ -801,7 +812,7 @@ function normalizeCandidateUrl(
     url.username = '';
     url.password = '';
     warnings.push(
-      `Scrubbed embedded credentials from candidate URL in ${plannedResource.sourceRole} resource.`
+      `Scrubbed embedded credentials from candidate URL ${url.href} in ${plannedResource.sourceRole} resource ${plannedResource.url}.`
     );
   }
 
@@ -1202,7 +1213,7 @@ function resolvePositiveSafeInteger(
   }
 
   if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive safe integer`);
+    throw new Error(`inspectWebsite option ${name} must be a positive whole number; got ${value}.`);
   }
 
   return value;

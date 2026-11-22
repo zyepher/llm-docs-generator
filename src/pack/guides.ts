@@ -474,7 +474,7 @@ export async function stampGuides(
 
     if (onDisk.length === 0 && previous.kind === 'absent') {
       throw new ConfigError(
-        `Pack "${packId}" has no guides to stamp; write Markdown guides under ${packLabel}/guides/ first.`
+        `Pack "${packId}" has no guides to stamp; write Markdown guides under ${packLabel}/guides/ first, then run 'llm-docs guides stamp ${packId}'.`
       );
     }
 
@@ -718,7 +718,7 @@ export async function checkCitations(packId: string, packDir: string): Promise<C
       continue;
     }
 
-    const restamp = `re-review the guide, then ${stampCommand(guide.path)}`;
+    const restamp = `re-review the guide, then run ${stampCommand(guide.path)}`;
 
     if (guide.edited) {
       findings.push({

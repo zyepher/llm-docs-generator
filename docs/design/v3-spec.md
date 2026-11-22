@@ -548,10 +548,14 @@ error, 3 runtime failure (network, git, converter, I/O, a held lock); when one r
 wins. An invalid `llm-docs.json` under `verify` is a failing `config-schema` check, so exit 1.
 `init`, `add`, `sync`, `refresh`, `verify`, `status`, `guides stamp`, and `migrate` accept
 `--project <dir>`; `discover`, `capabilities`, and `hook session-start` read no project and do
-not. `--json` puts machine output on stdout and human output on stderr, never mixed, with three
-stdout outputs by design: `discover` always prints JSON (its `--json` is accepted and changes
-nothing), `status --brief` prints the note (and takes precedence over `--json`), and
-`capabilities` without `--json` prints its command list. The CLI prints no color.
+not. `--json` puts machine output on stdout and human output on stderr, never mixed. Under
+`--json`, a command that runs prints exactly one JSON document on stdout, even when it reports a
+failed pack or check; a command that cannot run prints nothing on stdout and its error on
+stderr, with the exit code naming the class. Three commands write to stdout without `--json`
+by design: `discover` always prints JSON (its `--json` is accepted and changes nothing),
+`status --brief` prints the note (`--brief` and `--json` together are a usage error), and
+`capabilities` without `--json` prints its command list. A hint in a message that names a
+command carries `--project <dir>` when the user passed it. The CLI prints no color.
 `LLM_DOCS_DEBUG=1` adds stack traces to errors.
 
 - `llm-docs init [--packs-dir <dir>]`: create `llm-docs.json` and `packsDir` with its
@@ -575,14 +579,16 @@ nothing), `status --brief` prints the note (and takes precedence over `--json`),
 - `llm-docs sync [ids...] [--check] [--offline] [--prune]`: bring packs in line with config
   and lockfiles. Skips a pack when its manifest's `recipeHash` matches and its files pass the
   `outputs` and `unlisted-files` checks; `local` sources are read again on every sync, and a
-  changed local file rebuilds the pack. After a rebuild it prints the guides whose cited
-  sections changed or no longer resolve (8), with the `guides stamp` command to run once they
-  are re-reviewed. `--check`: write nothing, exit 1 if any pack, orphan, or managed block would
-  change (CI gate; takes no lock). `--offline`: a pack that needs a rebuild from a network
-  source fails (exit 2) rather than acquire. `--prune`: delete pack directories not in config
-  (without it, they are reported); it keeps a directory without `manifest.json` and a pack that
-  holds guides, and handles orphans only when no ids are given. Always updates managed blocks
-  last.
+  changed local file rebuilds the pack. Each stale pack carries a `reason` code (`not-built`,
+  `manifest-unreadable`, `recipe-edited`, `lockfile-moved`, `files-differ`, `sources-changed`;
+  `refresh` adds `upstream-changed` and `converter-changed`) and a `detail` naming the versions
+  or files involved. After a rebuild it prints the guides whose cited sections changed or no
+  longer resolve (8), with the `guides stamp` command to run once they are re-reviewed.
+  `--check`: write nothing, exit 1 if any pack, orphan, or managed block would change (CI gate;
+  takes no lock). `--offline`: a pack that needs a rebuild from a network source fails (exit 2)
+  rather than acquire. `--prune`: delete pack directories not in config (without it, they are
+  reported); it keeps a directory without `manifest.json` and a pack that holds guides, and
+  handles orphans only when no ids are given. Always updates managed blocks last.
 - `llm-docs refresh [ids...] [--check]`: re-acquire each pack at its recorded recipe and
   report per page: unchanged, changed, added, removed; for git, whether the ref now resolves to
   a different commit; and converted pages whose converter version changed. Writes the new pack
@@ -597,9 +603,10 @@ nothing), `status --brief` prints the note (and takes precedence over `--json`),
 - `llm-docs hook session-start`: section 7.2. Undocumented in `--help` output except as
   "used by the plugin".
 - `llm-docs capabilities --json`: machine-readable name, version, commands (with summary,
-  status, and options), source types, converters with install commands, ecosystems,
-  transforms, checks, and limits, generated from the same tables the code uses (never a
-  hand-maintained list that can drift).
+  status, options, and help examples), checks, exit codes, the status and reason codes `--json`
+  reports carry, source types, converters with install commands, ecosystems, transforms, and
+  limits, generated from the same tables the code uses (never a hand-maintained list that can
+  drift).
 
 Removed in v3 with a one-line error (exit 2) pointing to the replacement when invoked:
 `generate` (use `add`), `validate` and `list-sdks` (add the SDK's docs with `add`),
@@ -974,12 +981,14 @@ writes files.
   planner can write a filter.
 - `--package <eco>:<name>[@<version>]`: registry metadata (repository URL and directory,
   homepage, documentation URL, license, the version's publish date), the git tags matching the
-  version (via `git ls-remote`), and, when a tag matches, the top 10 documentation-looking
-  directories at that tag (blobless shallow fetch and `git ls-tree`, ranked by `.md` and `.mdx`
-  file count). Without a version it uses the registry's latest (for swiftpm, the latest semver
-  tag) and records which in `package.versionSource`. Ecosystems: npm, pypi, cargo, pub, go
-  (swiftpm: the repository URL, `https://` or `file://`, is the identity). A package or version
-  that does not exist is reported in the JSON with exit 0; an unreachable registry is exit 3.
+  version (via `git ls-remote`) with each tag commit's committer date and a warning when it is
+  more than 14 days from the publish date (the tag may name another package's release; the tag
+  is still reported), and, when a tag matches, the top 10 documentation-looking directories at
+  that tag (blobless shallow fetch and `git ls-tree`, ranked by `.md` and `.mdx` file count).
+  Without a version it uses the registry's latest (for swiftpm, the latest semver tag) and
+  records which in `package.versionSource`. Ecosystems: npm, pypi, cargo, pub, go (swiftpm: the
+  repository URL, `https://` or `file://`, is the identity). A package or version that does not
+  exist is reported in the JSON with exit 0; an unreachable registry is exit 3.
   From the same tree, `changeDocuments`: files whose name or a directory on their path names a
   description of change (case-insensitive, by words: `CHANGELOG`, `CHANGES`, `HISTORY`,
   `RELEASES`, `RELEASE_NOTES`/`release-notes`, `MIGRATION`/`migrating`/`migrate`,

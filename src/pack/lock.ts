@@ -83,7 +83,9 @@ async function acquireLock(packsDir: string, command: string): Promise<() => Pro
     }
   }
 
-  throw new SyncLockedError(`Could not take the lock in ${packsDir}.`);
+  throw new SyncLockedError(
+    `Could not take the lock ${join(packsDir, LOCK_FILE)}: another llm-docs run kept taking it. Run the command again once it finishes, or delete the lock file if no llm-docs process is running.`
+  );
 }
 
 /**
