@@ -17,6 +17,7 @@ import {
   lookupReleaseDates,
   releaseKey,
   type RegistryEndpoints,
+  type ReleaseInfo,
   type ReleaseQuery,
 } from '../../src/deps/registries.js';
 import { ALLOW_PRIVATE_NETWORK_ENV } from '../../src/sources/http.js';
@@ -96,6 +97,12 @@ function endpointsFor(base: string): RegistryEndpoints {
     goProxy: `${base}/goproxy`,
     pubDev: `${base}/pub`,
     githubApi: `${base}/github`,
+    goDev: `${base}/godev`,
+    pythonOrg: `${base}/python-org`,
+    rustDist: `${base}/rust-dist`,
+    swiftOrg: `${base}/swift-org`,
+    googleStorage: `${base}/gcs`,
+    nodeDist: `${base}/node-dist`,
   };
 }
 
@@ -479,6 +486,222 @@ describe('lookupReleaseDates', () => {
     });
     expect(result.warnings).toEqual([]);
     await expect(readFile(join(cacheDir, 'release-dates.json'), 'utf-8')).rejects.toThrow();
+  });
+});
+
+function sendText(text: string, contentType: string): Route {
+  return (response) => {
+    response.writeHead(200, { 'content-type': contentType });
+    response.end(text);
+  };
+}
+
+/** Each vendor's release feed, in the shape the live service returned it on 2026-11-22. */
+const TOOLCHAIN_FEEDS: Record<string, Route> = {
+  '/godev/doc/devel/release': sendText(
+    [
+      '<h2 id="go1.27.0">go1.27.0 (released 2026-08-19)</h2>',
+      '<p id="go1.27.4">',
+      '\t\tgo1.27.4',
+      '\t\t(released 2026-11-10)',
+      '<h2 id="go1.20">go1.20 (released 2023-02-01)</h2>',
+    ].join('\n'),
+    'text/html; charset=utf-8'
+  ),
+  '/python-org/api/v2/downloads/release/?name=Python%203.15.0': sendJson([
+    {
+      name: 'Python 3.15.0',
+      slug: 'python-3150',
+      version: 3,
+      is_published: true,
+      release_date: '2026-10-09T13:54:59Z',
+      pre_release: false,
+    },
+  ]),
+  '/rust-dist/manifests.txt': sendText(
+    [
+      'static.rust-lang.org/dist/2021-02-11/channel-rust-1.50.0.toml',
+      'static.rust-lang.org/dist/2026-11-12/channel-rust-1.100.0.toml',
+      '',
+    ].join('\n'),
+    'text/plain'
+  ),
+  '/swift-org/api/v1/install/releases.json': sendJson([
+    { name: '6.0', tag: 'swift-6.0-RELEASE', date: '2024-09-16' },
+    { name: '6.4.0', tag: 'swift-6.4.0-RELEASE', date: '2026-09-14' },
+    { name: '6.4.3', tag: 'swift-6.4.3-RELEASE', date: '2026-11-19' },
+  ]),
+  '/gcs/storage/v1/b/dart-archive/o/channels%2Fstable%2Frelease%2F3.14.0%2FVERSION': sendJson({
+    name: 'channels/stable/release/3.14.0/VERSION',
+    timeCreated: '2026-11-11T08:26:27.107Z',
+  }),
+  '/gcs/flutter_infra_release/releases/releases_linux.json': sendJson({
+    releases: [
+      { version: '3.50.0', channel: 'beta', release_date: '2026-10-20T00:00:00.000000Z' },
+      { version: '3.50.0', channel: 'stable', release_date: '2026-11-11T17:00:00.000000Z' },
+      { version: 'v1.0.0', channel: 'stable', release_date: '2018-12-04T17:38:52.282873Z' },
+    ],
+  }),
+  '/node-dist/dist/index.json': sendJson([
+    { version: 'v26.13.1', date: '2026-11-10', lts: 'Lithium' },
+    { version: 'v26.0.0', date: '2026-05-05', lts: false },
+    { version: 'v18.0.0', date: '2022-04-18', lts: false },
+  ]),
+};
+
+describe('toolchain release dates', () => {
+  async function lookupToolchains(
+    versions: { name: string; version: string }[]
+  ): Promise<{ answers: Record<string, ReleaseInfo | undefined>; server: TestServer }> {
+    const server = await startServer(TOOLCHAIN_FEEDS);
+    const result = await lookupReleaseDates(
+      versions.map((entry) => ({ ecosystem: 'toolchain', ...entry })),
+      {
+        offline: false,
+        cacheDir: await makeCacheDir(),
+        endpoints: endpointsFor(server.base),
+        now: () => FIXED_NOW,
+      }
+    );
+    expect(result.warnings).toEqual([]);
+    return {
+      answers: Object.fromEntries(
+        versions.map((entry) => [
+          `${entry.name}@${entry.version}`,
+          result.releases.get(releaseKey({ ecosystem: 'toolchain', ...entry })),
+        ])
+      ),
+      server,
+    };
+  }
+
+  it('dates a Go feature release from go.dev, by its X.Y.0 id or its older X.Y id', async () => {
+    const { answers, server } = await lookupToolchains([
+      { name: 'go', version: '1.27' },
+      { name: 'go', version: '1.20' },
+    ]);
+
+    expect(answers).toEqual({
+      'go@1.27': { publishedAt: '2026-08-19T00:00:00.000Z', source: 'go.dev', cached: false },
+      'go@1.20': { publishedAt: '2023-02-01T00:00:00.000Z', source: 'go.dev', cached: false },
+    });
+    expect(server.requests.map((request) => request.headers.accept)).toEqual([
+      'text/html',
+      'text/html',
+    ]);
+  });
+
+  it('dates a Python feature release from python.org, and a patch version as its feature release', async () => {
+    const { answers } = await lookupToolchains([
+      { name: 'python', version: '3.15' },
+      { name: 'python', version: '3.15.2' },
+    ]);
+
+    expect(answers).toEqual({
+      'python@3.15': {
+        publishedAt: '2026-10-09T13:54:59.000Z',
+        source: 'python.org',
+        cached: false,
+      },
+      'python@3.15.2': {
+        publishedAt: '2026-10-09T13:54:59.000Z',
+        source: 'python.org',
+        cached: false,
+      },
+    });
+  });
+
+  it('dates a Rust feature release from the dist path in manifests.txt', async () => {
+    const { answers, server } = await lookupToolchains([
+      { name: 'rust', version: '1.100' },
+      { name: 'rust', version: '1.10' },
+    ]);
+
+    expect(answers).toEqual({
+      'rust@1.100': {
+        publishedAt: '2026-11-12T00:00:00.000Z',
+        source: 'static.rust-lang.org',
+        cached: false,
+      },
+      'rust@1.10': { publishedAt: null, source: 'static.rust-lang.org', cached: false },
+    });
+    expect(server.requests.map((request) => request.headers.accept)).toEqual([
+      'text/plain',
+      'text/plain',
+    ]);
+  });
+
+  it('dates a Swift feature release from swift.org, named X.Y or X.Y.0', async () => {
+    const { answers } = await lookupToolchains([
+      { name: 'swift', version: '6.0' },
+      { name: 'swift', version: '6.4' },
+    ]);
+
+    expect(answers).toEqual({
+      'swift@6.0': { publishedAt: '2024-09-16T00:00:00.000Z', source: 'swift.org', cached: false },
+      'swift@6.4': { publishedAt: '2026-09-14T00:00:00.000Z', source: 'swift.org', cached: false },
+    });
+  });
+
+  it('dates a Dart feature release from its archive object, and a missing one as null', async () => {
+    const { answers } = await lookupToolchains([
+      { name: 'dart', version: '3.14' },
+      { name: 'dart', version: '3.99' },
+    ]);
+
+    expect(answers).toEqual({
+      'dart@3.14': {
+        publishedAt: '2026-11-11T08:26:27.107Z',
+        source: 'storage.googleapis.com',
+        cached: false,
+      },
+      'dart@3.99': { publishedAt: null, source: 'storage.googleapis.com', cached: false },
+    });
+  });
+
+  it('dates a Flutter feature release by its stable entry, not its beta one', async () => {
+    const { answers } = await lookupToolchains([
+      { name: 'flutter', version: '3.50' },
+      { name: 'flutter', version: '1.0' },
+    ]);
+
+    expect(answers).toEqual({
+      'flutter@3.50': {
+        publishedAt: '2026-11-11T17:00:00.000Z',
+        source: 'storage.googleapis.com',
+        cached: false,
+      },
+      'flutter@1.0': {
+        publishedAt: '2018-12-04T17:38:52.282Z',
+        source: 'storage.googleapis.com',
+        cached: false,
+      },
+    });
+  });
+
+  it('dates a Node.js feature release from its index, and only its X.Y.0 release', async () => {
+    const { answers } = await lookupToolchains([
+      { name: 'node', version: '26' },
+      { name: 'node', version: '26.13' },
+    ]);
+
+    expect(answers).toEqual({
+      'node@26': { publishedAt: '2026-05-05T00:00:00.000Z', source: 'nodejs.org', cached: false },
+      'node@26.13': { publishedAt: null, source: 'nodejs.org', cached: false },
+    });
+  });
+
+  it('answers unsupported, without a request, for a name outside the seven or a version that is not one', async () => {
+    const { answers, server } = await lookupToolchains([
+      { name: 'ruby', version: '3.3' },
+      { name: 'python', version: '2026-07-28' },
+    ]);
+
+    expect(answers).toEqual({
+      'ruby@3.3': { publishedAt: null, source: 'unsupported', cached: false },
+      'python@2026-07-28': { publishedAt: null, source: 'unsupported', cached: false },
+    });
+    expect(server.requests).toEqual([]);
   });
 });
 

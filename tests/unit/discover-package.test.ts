@@ -109,6 +109,12 @@ async function startRegistry(
       goProxy: `${base}/goproxy`,
       pubDev: `${base}/pub`,
       githubApi: `${base}/github`,
+      goDev: `${base}/godev`,
+      pythonOrg: `${base}/python-org`,
+      rustDist: `${base}/rust-dist`,
+      swiftOrg: `${base}/swift-org`,
+      googleStorage: `${base}/gcs`,
+      nodeDist: `${base}/node-dist`,
     },
   };
 }

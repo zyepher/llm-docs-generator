@@ -7,6 +7,7 @@ import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js'
 import { readJsonFile, writeJsonFileSafely } from '../utils/json.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import type { Ecosystem } from './lockfiles.js';
+import { TOOLCHAINS, toolchainFeatureRelease, type Toolchain } from './toolchains.js';
 
 export interface ReleaseQuery {
   ecosystem: Ecosystem;
@@ -32,6 +33,12 @@ export interface RegistryEndpoints {
   goProxy: string;
   pubDev: string;
   githubApi: string;
+  goDev: string;
+  pythonOrg: string;
+  rustDist: string;
+  swiftOrg: string;
+  googleStorage: string;
+  nodeDist: string;
 }
 
 export interface LookupReleaseDatesOptions {
@@ -61,6 +68,12 @@ export const DEFAULT_REGISTRY_ENDPOINTS: Readonly<RegistryEndpoints> = {
   goProxy: 'https://proxy.golang.org',
   pubDev: 'https://pub.dev',
   githubApi: 'https://api.github.com',
+  goDev: 'https://go.dev',
+  pythonOrg: 'https://www.python.org',
+  rustDist: 'https://static.rust-lang.org',
+  swiftOrg: 'https://www.swift.org',
+  googleStorage: 'https://storage.googleapis.com',
+  nodeDist: 'https://nodejs.org',
 };
 
 const CACHE_FILE_NAME = 'release-dates.json';
@@ -212,29 +225,44 @@ interface RequestContext {
 }
 
 /**
- * GET a JSON document through the shared client with the per-request
- * timeout, the budget signal, and a streamed size cap. Returns undefined
- * for 404 and 410 (the version or package does not exist).
+ * GET a document through the shared client with the per-request timeout,
+ * the budget signal, and a streamed size cap. Returns undefined for 404 and
+ * 410 (the version or package does not exist).
  */
-async function getJson(url: string, context: RequestContext, maxBytes: number): Promise<unknown> {
-  let body: Buffer;
-
+async function getBody(
+  url: string,
+  context: RequestContext,
+  maxBytes: number,
+  accept: string
+): Promise<Buffer | undefined> {
   try {
     const response = await context.client.get(url, {
       maxBytes,
-      accept: 'application/json',
+      accept,
       timeoutMs: context.timeoutMs,
       signal: context.signal,
     });
-    body = response.body;
+    return response.body;
   } catch (error) {
     if (error instanceof HttpRequestError && (error.status === 404 || error.status === 410)) {
       return undefined;
     }
     throw error;
   }
+}
 
-  return JSON.parse(body.toString('utf-8'));
+async function getJson(url: string, context: RequestContext, maxBytes: number): Promise<unknown> {
+  const body = await getBody(url, context, maxBytes, 'application/json');
+  return body === undefined ? undefined : JSON.parse(body.toString('utf-8'));
+}
+
+async function getText(
+  url: string,
+  context: RequestContext,
+  maxBytes: number,
+  accept: string
+): Promise<string | undefined> {
+  return (await getBody(url, context, maxBytes, accept))?.toString('utf-8');
 }
 
 function toIsoTimestamp(value: unknown): string | null {
@@ -452,6 +480,136 @@ async function lookupSwiftpm(
   return { source: 'github', versions: new Map([[query.version, toIsoTimestamp(committer.date)]]) };
 }
 
+/**
+ * The date of a toolchain's feature release (`X.Y.0`) from its vendor's own
+ * release feed, under the version the project states: a patch release does
+ * not change the language, so `3.15.2` is dated as `3.15.0`.
+ */
+async function lookupToolchain(
+  query: ReleaseQuery,
+  endpoints: RegistryEndpoints,
+  context: RequestContext
+): Promise<RegistryAnswer> {
+  const toolchain = TOOLCHAINS.find((entry) => entry === query.name);
+  const release = toolchainFeatureRelease(query.version);
+
+  if (toolchain === undefined || release === undefined) {
+    return { source: 'unsupported', versions: new Map([[query.version, null]]) };
+  }
+
+  const { source, publishedAt } = await toolchainReleaseDate(
+    toolchain,
+    release,
+    endpoints,
+    context
+  );
+  return { source, versions: new Map([[query.version, publishedAt]]) };
+}
+
+async function toolchainReleaseDate(
+  toolchain: Toolchain,
+  { major, minor }: { major: number; minor: number },
+  endpoints: RegistryEndpoints,
+  context: RequestContext
+): Promise<{ source: string; publishedAt: string | null }> {
+  const feature = `${major}.${minor}`;
+  const entries = (body: unknown): Record<string, unknown>[] =>
+    (Array.isArray(body) ? body : []).filter(isRecord);
+
+  switch (toolchain) {
+    case 'go': {
+      const page = await getText(
+        `${trimBase(endpoints.goDev)}/doc/devel/release`,
+        context,
+        JSON_RESPONSE_MAX_BYTES,
+        'text/html'
+      );
+      const dates = new Map<string, string>();
+      for (const match of (page ?? '').matchAll(
+        /id="(go\d+(?:\.\d+)*)"[^>]*>\s*go[\d.]+\s*\(released (\d{4}-\d\d-\d\d)\)/g
+      )) {
+        if (match[1] !== undefined && match[2] !== undefined && !dates.has(match[1])) {
+          dates.set(match[1], match[2]);
+        }
+      }
+      return {
+        source: 'go.dev',
+        publishedAt: toIsoTimestamp(dates.get(`go${feature}.0`) ?? dates.get(`go${feature}`)),
+      };
+    }
+    case 'python': {
+      const name = `Python ${feature}.0`;
+      const body = await getJson(
+        `${trimBase(endpoints.pythonOrg)}/api/v2/downloads/release/?name=${encodeURIComponent(name)}`,
+        context,
+        JSON_RESPONSE_MAX_BYTES
+      );
+      const entry = entries(body).find((candidate) => candidate.name === name);
+      return { source: 'python.org', publishedAt: toIsoTimestamp(entry?.release_date) };
+    }
+    case 'rust': {
+      const manifests = await getText(
+        `${trimBase(endpoints.rustDist)}/manifests.txt`,
+        context,
+        JSON_RESPONSE_MAX_BYTES,
+        'text/plain'
+      );
+      const match = new RegExp(
+        `dist/(\\d{4}-\\d\\d-\\d\\d)/channel-rust-${major}\\.${minor}\\.0\\.toml(?=\\s|$)`
+      ).exec(manifests ?? '');
+      return { source: 'static.rust-lang.org', publishedAt: toIsoTimestamp(match?.[1]) };
+    }
+    case 'swift': {
+      const body = await getJson(
+        `${trimBase(endpoints.swiftOrg)}/api/v1/install/releases.json`,
+        context,
+        JSON_RESPONSE_MAX_BYTES
+      );
+      const entry = entries(body).find(
+        (candidate) => candidate.name === feature || candidate.name === `${feature}.0`
+      );
+      return { source: 'swift.org', publishedAt: toIsoTimestamp(entry?.date) };
+    }
+    case 'dart': {
+      const body = await getJson(
+        `${trimBase(endpoints.googleStorage)}/storage/v1/b/dart-archive/o/${encodeURIComponent(`channels/stable/release/${feature}.0/VERSION`)}`,
+        context,
+        JSON_RESPONSE_MAX_BYTES
+      );
+      return {
+        source: 'storage.googleapis.com',
+        publishedAt: isRecord(body) ? toIsoTimestamp(body.timeCreated) : null,
+      };
+    }
+    case 'flutter': {
+      const body = await getJson(
+        `${trimBase(endpoints.googleStorage)}/flutter_infra_release/releases/releases_linux.json`,
+        context,
+        JSON_RESPONSE_MAX_BYTES
+      );
+      const dates = entries(isRecord(body) ? body.releases : undefined)
+        .filter(
+          (entry) =>
+            entry.channel === 'stable' &&
+            (entry.version === `${feature}.0` || entry.version === `v${feature}.0`)
+        )
+        .map((entry) => toIsoTimestamp(entry.release_date))
+        .filter((date): date is string => date !== null)
+        .sort(compareStringsByCodeUnit);
+      return { source: 'storage.googleapis.com', publishedAt: dates[0] ?? null };
+    }
+    case 'node': {
+      const body = await getJson(
+        `${trimBase(endpoints.nodeDist)}/dist/index.json`,
+        context,
+        JSON_RESPONSE_MAX_BYTES
+      );
+      const entry = entries(body).find((candidate) => candidate.version === `v${feature}.0`);
+      return { source: 'nodejs.org', publishedAt: toIsoTimestamp(entry?.date) };
+    }
+  }
+}
+
 const LOOKUPS: Readonly<
   Record<
     Ecosystem,
@@ -468,10 +626,7 @@ const LOOKUPS: Readonly<
   go: lookupGo,
   pub: lookupPub,
   swiftpm: lookupSwiftpm,
-  toolchain: async (query) => ({
-    source: 'unsupported',
-    versions: new Map([[query.version, null]]),
-  }),
+  toolchain: lookupToolchain,
 };
 
 /** pub.dev returns all versions per request, so its unit of work is the package. */
