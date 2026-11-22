@@ -913,6 +913,34 @@ describe('verifyPacks', () => {
     });
   });
 
+  it('reports a lockfile that moved once, under lockfile, and an edited recipe under recipe', async () => {
+    // The {version} placeholder makes the resolved recipe differ at the new version.
+    const pack = {
+      ...PACK,
+      version: undefined,
+      dependency: { ecosystem: 'npm', name: 'demo' },
+      sources: [{ type: 'local', path: 'docs', exclude: ['v{version}/**'] }],
+    };
+    const root = await makeProject(
+      { demo: pack },
+      { ...DOCS, 'package-lock.json': npmLockfile('demo', '2.0.0') }
+    );
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+
+    await writeFile(join(root, 'package-lock.json'), npmLockfile('demo', '2.1.0'));
+    const moved = await verifyPacks(root, undefined);
+    expect(problems(moved)).toEqual([
+      "demo lockfile fail:  stale-pack: lockfiles resolve npm:demo 2.1.0 (package-lock.json), the pack is 2.0.0; run 'llm-docs sync demo'",
+    ]);
+    expect(moved.results.find((result) => result.check === 'recipe')?.status).toBe('pass');
+
+    await setPacks(root, { demo: { ...pack, title: 'Demo library' } });
+    expect(problems(await verifyPacks(root, undefined))).toEqual([
+      "demo recipe fail:  packs.demo in llm-docs.json changed since the last sync; run 'llm-docs sync demo'",
+      "demo lockfile fail:  stale-pack: lockfiles resolve npm:demo 2.1.0 (package-lock.json), the pack is 2.0.0; run 'llm-docs sync demo'",
+    ]);
+  });
+
   it('reports a missing manifest and an invalid config', async () => {
     const root = await makeProject({ demo: PACK }, DOCS);
     const report = await verifyPacks(root, undefined);

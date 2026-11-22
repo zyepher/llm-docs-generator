@@ -624,7 +624,7 @@ fails, the other pack checks are skipped):
 | `outputs` | a listed output is missing or its hash differs |
 | `unlisted-files` | a file in the pack is not listed, or the pack holds a symlink (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info) |
 | `links` | a relative link in a page, index, or combined file does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
-| `recipe` | the config recipe for this id resolves to a different `recipeHash` or cannot be resolved (warn when the config has no such pack: orphan) |
+| `recipe` | the config recipe for this id, resolved at the version the manifest records, has a different `recipeHash` (the config was edited) or cannot be resolved (warn when the config has no such pack: orphan); a lockfile that moved while the config stayed the same passes here, since `lockfile` reports it: one cause, one finding |
 | `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise |
 | `citations` | a guide citation does not resolve, its cited section hash changed since stamping, or the lock is invalid; an unstamped guide, a guide edited after stamping, or a lock entry for a deleted guide is a warning |
 | `conversion` | an `agent` conversion's original changed since the last sync (warn when a local original no longer exists) |

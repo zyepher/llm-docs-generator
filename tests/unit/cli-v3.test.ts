@@ -393,10 +393,13 @@ describe('llm-docs v3 CLI', () => {
       detail: 'the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0',
       line: 'demo: would rebuild (the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0)',
     });
+    // One cause, one finding: the lockfile check reports the move, and the recipe passes.
     const verify = await runCli(root, ['verify']);
     expect(verify.stderr).toContain(
-      "demo recipe fail: packs.demo in llm-docs.json is unchanged, but the lockfile now resolves npm:demo-lib 1.3.0 and the pack is 1.2.0; run 'llm-docs sync demo'"
+      "demo lockfile fail: stale-pack: lockfiles resolve npm:demo-lib 1.3.0 (package-lock.json), the pack is 1.2.0; run 'llm-docs sync demo'"
     );
+    expect(verify.stderr).not.toContain('demo recipe fail');
+    expect(verify.stderr).toContain('verify: 1 problem found.');
     expect((await runCli(root, ['sync'])).stderr).toContain(
       'demo: built (the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0)'
     );

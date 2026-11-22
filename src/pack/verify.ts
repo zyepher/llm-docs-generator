@@ -14,7 +14,6 @@ import { checkAgentBlocks } from '../agent/block.js';
 import {
   ConfigError,
   loadProjectConfig,
-  onlyLockfileVersionMoved,
   resolvePackRecipe,
   type DependencyVersionResolver,
   type LoadedProjectConfig,
@@ -339,31 +338,25 @@ async function checkRecipe(context: PackCheckContext): Promise<CheckOutcome> {
     ];
   }
 
+  // Resolved at the version the manifest records, so a lockfile that moved (the lockfile
+  // check's finding) never reads as an edited recipe: one cause, one finding.
   try {
     const resolved = await resolvePackRecipe(loaded.config, context.packId, {
-      resolveDependencyVersion: context.resolveDependencyVersion,
+      resolveDependencyVersion: () => ({
+        kind: 'found',
+        version: context.manifest.pack.version,
+        lockfiles: [],
+      }),
     });
 
-    if (resolved.recipeHash === context.manifest.recipeHash) {
-      return [];
-    }
-
-    const dependency = resolved.recipe.dependency;
-    const lockfileMoved =
-      dependency !== null &&
-      (await onlyLockfileVersionMoved(loaded.config, context.packId, {
-        version: context.manifest.pack.version,
-        recipeHash: context.manifest.recipeHash,
-      }));
-
-    return [
-      {
-        status: 'fail',
-        message: lockfileMoved
-          ? `packs.${context.packId} in llm-docs.json is unchanged, but the lockfile now resolves ${dependency.ecosystem}:${dependency.name} ${resolved.recipe.version} and the pack is ${context.manifest.pack.version}; run 'llm-docs sync ${context.packId}'`
-          : `packs.${context.packId} in llm-docs.json changed since the last sync; run 'llm-docs sync ${context.packId}'`,
-      },
-    ];
+    return resolved.recipeHash === context.manifest.recipeHash
+      ? []
+      : [
+          {
+            status: 'fail',
+            message: `packs.${context.packId} in llm-docs.json changed since the last sync; run 'llm-docs sync ${context.packId}'`,
+          },
+        ];
   } catch (error) {
     if (error instanceof ConfigError) {
       return [{ status: 'fail', message: error.message }];
