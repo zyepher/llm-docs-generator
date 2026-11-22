@@ -309,7 +309,10 @@ describe('manifest v3', () => {
 
     const other = await makeTempDir();
     await symlink(join(dir, 'manifest.json'), join(other, 'manifest.json'));
-    await expect(readPackManifest(other)).rejects.toMatchObject({ reason: 'link' });
+    await expect(readPackManifest(other)).rejects.toMatchObject({
+      reason: 'invalid',
+      message: 'manifest.json is a symbolic link, not a regular file, so llm-docs never reads it',
+    });
   });
 
   it('refuses to write a manifest that does not match the schema', async () => {

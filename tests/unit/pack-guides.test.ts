@@ -368,7 +368,7 @@ describe('stampGuides', () => {
     await writeFile(join(packDir(root), 'pages', 'guide', 'start.md'), '# Start\n\nEdited.\n');
 
     await expect(stamp(root)).rejects.toThrow(
-      "cited files differ from the manifest (pages/guide/start.md); run 'llm-docs sync demo' first"
+      `Pack "demo" cannot be stamped: its files differ from the manifest or are not regular files (pages/guide/start.md); run 'llm-docs sync demo' first.`
     );
     expect(await pathExists(lockFile(root))).toBe(false);
   });

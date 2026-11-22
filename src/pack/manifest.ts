@@ -329,6 +329,7 @@ export class ManifestError extends Error {
 
   constructor(
     message: string,
+    /** `link`: the pack directory itself is a symbolic link. */
     readonly reason: 'missing' | 'invalid' | 'other-version' | 'link'
   ) {
     super(message);
@@ -344,22 +345,17 @@ export async function readPackManifest(packDir: string): Promise<PackManifest> {
   const path = join(packDir, MANIFEST_FILE_NAME);
   let raw: unknown;
 
-  for (const [target, label] of [
-    [packDir, 'the pack directory'],
-    [path, MANIFEST_FILE_NAME],
-  ] as const) {
-    let isLink = false;
-    try {
-      isLink = (await lstat(target)).isSymbolicLink();
-    } catch {
-      // Reading the manifest below reports a missing or unreadable one.
-    }
-    if (isLink) {
-      throw new ManifestError(
-        `${label} is a symbolic link, which llm-docs never reads a pack through`,
-        'link'
-      );
-    }
+  let packDirIsLink = false;
+  try {
+    packDirIsLink = (await lstat(packDir)).isSymbolicLink();
+  } catch {
+    // Reading the manifest below reports a missing or unreadable one.
+  }
+  if (packDirIsLink) {
+    throw new ManifestError(
+      'the pack directory is a symbolic link, which llm-docs never reads a pack through',
+      'link'
+    );
   }
 
   try {
@@ -371,7 +367,7 @@ export async function readPackManifest(packDir: string): Promise<PackManifest> {
     if (error instanceof RefusedFileError && error.refusal.kind === 'not-regular') {
       throw new ManifestError(
         `${MANIFEST_FILE_NAME} is ${error.refusal.found}, not a regular file, so llm-docs never reads it`,
-        error.refusal.found === 'a symbolic link' ? 'link' : 'invalid'
+        'invalid'
       );
     }
     throw new ManifestError(

@@ -7,13 +7,16 @@
 import { execFile } from 'node:child_process';
 import {
   chmod,
+  cp,
   link,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,6 +27,7 @@ import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { installFakeConverters } from '../helpers/fake-converters.js';
+import { canCreateSymlinks } from '../helpers/symlinks.js';
 import { runHookProcess } from '../helpers/hook-process.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -1807,6 +1811,93 @@ describe('status and sync --check', () => {
       expect((await runCli(root, ['sync'], env)).code, label).toBe(0);
     }
   });
+});
+
+describe('a symbolic link planted in a pack', () => {
+  // Each link points at a copy of what it replaces, outside the project, so a
+  // command that followed it would find a pack that looks valid.
+  const PLANTS = {
+    'the pack directory': '',
+    'guides/': 'guides',
+    'manifest.json': 'manifest.json',
+    'index.md': 'index.md',
+    'a page': 'pages/guide/start.md',
+  } as const;
+
+  async function snapshot(dir: string): Promise<string[]> {
+    const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+    return Promise.all(
+      entries
+        .map((entry) => join(entry.parentPath, entry.name))
+        .sort()
+        .map(async (path) =>
+          (await lstat(path)).isFile() ? `${path} ${await readFile(path, 'utf-8')}` : path
+        )
+    );
+  }
+
+  it.skipIf(!canCreateSymlinks)(
+    'makes sync, sync --check, verify, status, guides stamp, and the hook agree the pack is unusable, and writes nothing through it',
+    async () => {
+      const template = await makeProject(DOCS);
+      const cache = await makeProject({});
+      const env = {
+        HOME: await makeProject({}),
+        LLM_DOCS_CACHE_DIR: cache,
+        CLAUDE_PROJECT_DIR: '',
+        ANTHROPIC_MODEL: '',
+      };
+      expect(
+        (await runCli(template, ['add', 'demo', '--local', 'docs', '--version', '1.0.0'], env)).code
+      ).toBe(0);
+      await mkdir(join(template, 'agent-docs', 'demo', 'guides'));
+      await writeFile(
+        join(template, 'agent-docs', 'demo', 'guides', 'g.md'),
+        '# G\n\nSee [start](../pages/guide/start.md).\n'
+      );
+      expect((await runCli(template, ['guides', 'stamp', 'demo'], env)).code).toBe(0);
+
+      for (const [label, path] of Object.entries(PLANTS)) {
+        const root = await makeProject({});
+        const outside = await makeProject({});
+        await cp(template, root, { recursive: true });
+        const planted = join(root, 'agent-docs', 'demo', ...path.split('/').filter(Boolean));
+        const copy = join(outside, 'copy');
+        await cp(planted, copy, { recursive: true });
+        await rm(planted, { recursive: true });
+        await symlink(copy, planted);
+        const before = await snapshot(outside);
+        const where = `${label}: `;
+
+        const check = await runCli(root, ['sync', '--check'], env);
+        expect(check.code, where + check.stderr).not.toBe(0);
+        const verify = await runCli(root, ['verify'], env);
+        expect(verify.code, where + verify.stderr).toBe(1);
+        const status = await runCli(root, ['status', '--offline', '--json'], env);
+        expect(status.code, where + status.stderr).toBe(0);
+        expect(JSON.parse(status.stdout).packs[0].state, where).not.toBe('ok');
+        const stamp = await runCli(root, ['guides', 'stamp', 'demo'], env);
+        expect(stamp.code, where + stamp.stderr).toBe(2);
+        const hook = await runHook(root, JSON.stringify({ cwd: root }), env, cache);
+        expect(
+          JSON.parse(hook.stdout || '{}').hookSpecificOutput?.additionalContext,
+          where + hook.log
+        ).toContain('Pinned docs packs to fix:\n- demo: ');
+
+        const sync = await runCli(root, ['sync'], env);
+        if (sync.code === 0) {
+          expect(sync.stderr, where).toContain('demo: built');
+          expect((await lstat(planted)).isSymbolicLink(), where).toBe(false);
+          expect((await runCli(root, ['verify'], env)).code, where).toBe(0);
+        } else {
+          expect(sync.code, where + sync.stderr).toBe(2);
+          expect((await lstat(planted)).isSymbolicLink(), where).toBe(true);
+        }
+        expect(await snapshot(outside), where).toEqual(before);
+      }
+    },
+    120_000
+  );
 });
 
 describe('help', () => {

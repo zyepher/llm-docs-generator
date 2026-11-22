@@ -489,10 +489,11 @@ async function readStampedManifest(packDir: string, packId: string): Promise<Pac
  * guide when none is named), its hash and the hash of every section it cites.
  *
  * Holds the packs lock, so a concurrent sync cannot move `guides/` mid-write.
- * Refuses with a ConfigError, writing nothing, when a named guide does not
- * exist, when any citation does not resolve (every one listed), or when a
- * cited file's bytes differ from its manifest output, so a lock only ever
- * attests to verified pages. Entries of guides not named are kept; entries
+ * Refuses with a ConfigError, writing nothing, when any output of the pack
+ * differs from its manifest or is not a regular file, when a named guide does
+ * not exist, when any citation does not resolve (every one listed), or when
+ * a cited file is not a manifest output, so a lock only ever attests to
+ * verified pages. Entries of guides not named are kept; entries
  * whose guide is gone are dropped and reported. Writing the same bytes again
  * is skipped.
  */
@@ -545,6 +546,19 @@ export async function stampGuides(
 
     const read = packFileReader(packDir);
     const outputHashes = new Map(manifest.outputs.map((output) => [output.path, output.sha256]));
+    const changed: string[] = [];
+
+    for (const output of manifest.outputs) {
+      const bytes = await read(output.path);
+      if (bytes === undefined || sha256Prefixed(bytes) !== output.sha256) {
+        changed.push(output.path);
+      }
+    }
+    if (changed.length > 0) {
+      throw new ConfigError(
+        `Pack "${packId}" cannot be stamped: its files differ from the manifest or are not regular files (${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ` and ${changed.length - 3} more` : ''}); run 'llm-docs sync ${packId}' first.`
+      );
+    }
     const entries = new Map<string, LockEntry>();
     const unresolved: string[] = [];
     const unverified = new Set<string>();

@@ -797,11 +797,15 @@ async function staleReason(
     checks: ['outputs', 'unlisted-files'],
   });
 
-  const differing = integrity.flatMap((entry) =>
-    entry.findings.flatMap((finding) =>
-      finding.status === 'fail' && finding.path !== undefined ? [finding.path] : []
-    )
-  );
+  const differing = [
+    ...new Set(
+      integrity.flatMap((entry) =>
+        entry.findings.flatMap((finding) =>
+          finding.status === 'fail' && finding.path !== undefined ? [finding.path] : []
+        )
+      )
+    ),
+  ];
   if (integrity.some((entry) => entry.status === 'fail')) {
     const shown = differing.slice(0, 3).join(', ');
     const more = differing.length > 3 ? ` and ${differing.length - 3} more` : '';
