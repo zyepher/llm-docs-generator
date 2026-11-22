@@ -35,6 +35,19 @@ pack and plugin arms.
   MCP config means no MCP servers in any arm; `--no-session-persistence` keeps runs out of the
   operator's session history. The runner also strips the parent session's `CLAUDE_CODE_*`
   variables from the child environment.
+- Every session, in all three arms alike, runs with `ANTHROPIC_MODEL` set to the evaluated model
+  id (the same string as `--model`) in its environment. The plugin's hook needs it: in a headless
+  session the SessionStart payload carries no `model` field, so without the variable the hook
+  falls back to the `model` key of the operator's own `~/.claude/settings.json`, which is the
+  operator's default and not the evaluated model, and would state the wrong training cutoff, or
+  none. Claude Code's model configuration page ranks `--model` above `ANTHROPIC_MODEL`, and its
+  hooks page says a hook process inherits Claude Code's environment and "can read
+  `$ANTHROPIC_MODEL` if you set it in your shell". Measured on 2026-11-22 with Claude Code
+  2.1.330, in one headless session started with the runner's flags and environment and a probe
+  plugin: the hook's stdin was `{session_id, transcript_path, cwd, hook_event_name, source}` (no
+  `model`), the hook's environment had `ANTHROPIC_MODEL=claude-opus-5-5`, and the `init` event
+  and the result's model usage both reported `claude-opus-5-5`, so setting the variable to the
+  requested id does not change the model the session runs.
 - The graders are hidden: `checks/` is copied into the workspace only after the agent exits.
 - The prompt never names the API to use and never hints that a version changed. Every prompt
   ends with the same ground rules: keep it fully typed (no `any` casts or ts-ignore comments), do
@@ -283,8 +296,10 @@ All commands run from the repository root. `npm run eval -- <command>` is the sa
 `npx tsx evals/run.ts <command>`.
 
 ```sh
-# 1. Build the packs with the llm-docs CLI (v3: init, sync, verify, status).
-npm run eval -- prepare-packs --llm-docs dist/cli.js
+# 1. Build the packs with the llm-docs CLI (v3: init, sync, verify, status), and store each
+#    case's expected hook note from the plugin (needed for the plugin arm; pass the same --model
+#    as the run, default claude-opus-5-5).
+npm run eval -- prepare-packs --llm-docs dist/cli.js --plugin-dir plugin
 
 # 2. Prove every case is gradable: fixture alone fails, every solution*/ passes, every wrong-*/
 #    fails, naive/ fails the way the case's stratum says (type-visible: typecheck fails;
@@ -313,7 +328,7 @@ npm run eval -- run --runs 5 --plugin-dir plugin \
 Options for `run`: `--cases <globs>` (comma-separated, `*` wildcards), `--arms
 baseline,pack,plugin`, `--runs N`, `--model <id>` (default `claude-opus-5-5`; pass a full model
 id, because every arm asserts that the session's `system/init` event reports exactly this
-string), `--concurrency N` (default 2),
+string, and the plugin arm needs expected hook notes prepared for it), `--concurrency N` (default 2),
 `--max-budget-usd-per-run X` (passed to `claude --max-budget-usd`, default 3), `--max-total-usd Y`
 (no new run starts once spent plus the in-flight caps would pass it), `--plugin-dir <path>`
 (required for the plugin arm), `--effort <level>`, `--resume <results dir>` (see below),
@@ -341,9 +356,9 @@ ends with a usage limit, an authentication failure, or a billing error it stops:
 - it exits with code 4 (0 is done, 1 is a failed smoke check, 2 a usage error, 3 a crash, 130 an
   interrupt).
 
-A rate limit (a short throttle, not the plan quota) or an overload does not stop the run: the
-affected run is retried in place after 30 seconds and again after 120 seconds, and only then
-recorded as an infra error. `attempts` in the row says how many sessions it took.
+A rate limit (a short throttle, not the plan quota), an overload, or a plugin hook that gave the
+agent nothing does not stop the run: the affected run is retried in place after 30 seconds and
+again after 120 seconds, and only then recorded as an infra error. `attempts` in the row says how many sessions it took.
 
 `--resume <results dir>` reruns exactly the runs that have no row or an infra-error row there, in
 the original order (repeat first, then case, then arm). Pass the same `--cases`, `--arms`,
@@ -368,7 +383,8 @@ claude -p "<task.md>" --model claude-opus-5-5 --setting-sources project --strict
     "Bash(ls *)" "Bash(cat *)"
 ```
 
-with stdin from `/dev/null`, its own process group, and the case's wall timeout.
+with `ANTHROPIC_MODEL` set to the `--model` value, stdin from `/dev/null`, its own process group,
+and the case's wall timeout.
 
 ## Reading results
 
@@ -416,16 +432,42 @@ Definitions:
     holds both managed block markers;
   - `baseline` and `pack`: no plugin loaded besides Claude Code's built-in ones (reported with
     `path: "builtin"`), and no SessionStart hook ran;
-  - `plugin`: exactly the plugin named in `<plugin-dir>/.claude-plugin/plugin.json` loaded, and at
-    least one SessionStart hook started and finished with outcome `success`. Hook events do not
-    name their plugin; since the other arms prove no SessionStart hook runs without the plugin,
-    every SessionStart hook in this arm is the plugin's. A hook that ran and printed nothing (the
-    llm-docs hook says nothing when it has nothing to say) passes and is shown as "ran, no
-    output"; a hook that never started, or started and never reported back, fails;
+  - `plugin`: exactly the plugin named in `<plugin-dir>/.claude-plugin/plugin.json` loaded, at
+    least one SessionStart hook started and finished with outcome `success`, and the
+    `additionalContext` the hooks gave the agent equals the case's expected hook note (below).
+    Hook events do not name their plugin; since the other arms prove no SessionStart hook runs
+    without the plugin, every SessionStart hook in this arm is the plugin's. A hook that never
+    started, or started and never reported back, fails; so does one that gave nothing (it missed
+    its 1.5 second deadline) or a different note (for example another model's cutoff), because
+    either way the run would be graded as a plugin run without the plugin's treatment;
   - every arm: the session reports the requested model and no MCP servers.
 
   A failed assertion makes the run an infra error named after it, for example
-  `arm-invalid: plugin hook did not run`.
+  `arm-invalid: plugin hook did not run` or `arm-invalid: plugin hook gave the agent nothing, not
+  the expected 842-character note` (the `zod-4-6` note). The row's `hookNote` holds the verdict (`match`, `empty`,
+  `different`), the expected note, and what the hooks actually gave. A hook that gave nothing,
+  when nothing else was wrong, is a transient condition of the machine and is retried in place
+  like a rate limit (after 30 seconds, then 120 seconds); a different note is not retried.
+- **Expected hook note**: what the plugin's session-start hook must inject for a case.
+  `prepare-packs --plugin-dir <plugin>` computes it once the case's pack is built and its
+  release-date cache is warm: it lays out the plugin arm's workspace under the OS temp directory
+  (the fixture's `package.json` and lockfile, the prepared pack, `llm-docs.json`, `AGENTS.md`),
+  runs `node <plugin>/bin/llm-docs.mjs hook session-start` there with the headless payload on
+  stdin, `CLAUDECODE=1`, `ANTHROPIC_MODEL`, and `LLM_DOCS_CACHE_DIR` as a session gets them, and
+  repeats it (at most 5 times) until two consecutive runs print the same non-empty note. It is
+  stored as `.cache/packs/<case>/expected-hook-note.json` with the model and a hash of the
+  plugin's `bin/llm-docs.mjs`; `run` and `smoke` refuse the plugin arm when a case has no note,
+  or one for another model or another build of the plugin. The note holds only project-relative
+  paths, and with a known cutoff its release windows do not depend on the date (the hook uses
+  "recent" only when it knows no cutoff), so nothing in it is normalized; prepare-packs fails a
+  case whose note names the temporary workspace path. It also fails a case whose note does not
+  list the case's pack as pinned docs for a library released after the cutoff (post-cutoff
+  cases), or lists the case's library or the pack's bound dependency among the dependencies with
+  no pinned docs, because either means the pack recipe is bound to the wrong thing. A listed
+  dependency whose installed `package.json` names one of the pack's source repositories, other
+  than the dependency the pack binds, is a warning instead: a pack binds a single dependency
+  today, so both MCP cases list `@modelcontextprotocol/client` without pinned docs although the
+  MCP pack covers it.
 - **Docs consulted**: a Read, Grep, Glob, or Bash call named a path under `agent-docs/`.
 - **Web used**: at least one WebSearch or WebFetch call. Claude Code 2.1 reads pages through its
   `web-fetch` subagent rather than a top-level WebFetch tool, so launching that subagent counts as
@@ -491,10 +533,9 @@ date, model, Claude Code version, and run count.
   machine is enough to cause that: the hook's 1.5 second deadline counts from process start,
   including loading the bundled CLI. With a load average near 100, runs of the hook on prepared
   `hono-4-13` and `mcp-sdk-v2-tools` workspaces took 1.0 to 1.7 seconds, and two of them printed
-  nothing (`hook.log`: "stdin did not end within 0 ms", then "missed its 1500 ms deadline"). For a
-  post-cutoff case the hook always has something to say, so an empty hook output there means the
-  plugin arm ran without its treatment; the arm assertion still passes it. Run on a quiet machine
-  and read the hook output in the smoke check.
+  nothing (`hook.log`: "stdin did not end within 0 ms", then "missed its 1500 ms deadline"). The
+  plugin arm's assertion catches this (the hook's note must equal the expected one), and the run
+  is retried in place, but each retry is another session: run on a quiet machine.
 - **Resumed runs are later in time.** A run stopped by a usage limit and continued with `--resume`
   executes its remaining cells hours or days after the first part, so service drift no longer
   touches all arms alike for those cells. Ordering keeps the damage small (the remaining cells

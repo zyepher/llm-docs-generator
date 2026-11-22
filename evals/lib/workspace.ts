@@ -16,6 +16,7 @@ import {
   type EvalCase,
   listFiles,
 } from './cases.js';
+import { checkHookNote } from './hook-note.js';
 import { runProcess } from './proc.js';
 import type { TranscriptSummary } from './transcript.js';
 
@@ -443,6 +444,8 @@ export interface ArmExpectation {
   packId: string;
   /** `name` from the plugin's `.claude-plugin/plugin.json`; null outside the plugin arm. */
   pluginName: string | null;
+  /** The note prepare-packs stored for the case; null outside the plugin arm. */
+  hookNote: string | null;
 }
 
 /**
@@ -530,14 +533,22 @@ export function assertArm(
         : `plugin ${name} did not load${session !== null && session.pluginErrors.length > 0 ? ` (${session.pluginErrors.join('; ')})` : ''}`
     );
     const finished = hooks.filter((hook) => hook.outcome === 'success');
-    const withOutput = finished.filter((hook) => hook.output.length > 0).length;
     check(
       'plugin hook ran',
       hooks.length > 0 && finished.length === hooks.length,
-      `${finished.length} SessionStart hook(s) ran, ${withOutput} with output`,
+      `${finished.length} SessionStart hook(s) ran`,
       hooks.length === 0
         ? 'plugin hook did not run'
         : `plugin hook did not finish: ${hooks.map((hook) => hook.outcome ?? 'no response').join(', ')}`
+    );
+    const note = checkHookNote(expected.hookNote ?? '', hooks);
+    check(
+      'plugin hook note',
+      note.verdict === 'match',
+      `plugin hook gave the expected ${note.expected.length}-character note`,
+      note.verdict === 'empty'
+        ? `plugin hook gave the agent nothing, not the expected ${note.expected.length}-character note`
+        : `plugin hook gave a ${note.actual.length}-character note that differs from the expected ${note.expected.length}-character one`
     );
   } else {
     check(
