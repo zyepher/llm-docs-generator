@@ -10,7 +10,7 @@ import { createReadStream } from 'node:fs';
  *   to string, or recorded source/content hashes would change.
  * - HASH_PREFIX is the canonical "sha256:" prefix used in recorded hashes.
  */
-export const HASH_PREFIX = 'sha256:';
+const HASH_PREFIX = 'sha256:';
 
 export function sha256Hex(data: BinaryLike): string {
   return createHash('sha256').update(data).digest('hex');
@@ -31,12 +31,4 @@ export async function sha256File(path: string): Promise<string> {
   });
 
   return `${HASH_PREFIX}${hash.digest('hex')}`;
-}
-
-export function isSha256Hash(value: unknown): value is string {
-  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
-}
-
-export function isUnprefixedSha256Hash(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 }

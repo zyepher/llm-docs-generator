@@ -91,7 +91,7 @@ const common = {
   passthrough: [],
   convert: null,
   transforms: [],
-} as const;
+};
 
 describe('acquireUrls', () => {
   it('fetches exactly the listed URLs with fetch metadata and redirects recorded', async () => {

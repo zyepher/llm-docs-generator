@@ -373,7 +373,7 @@ export function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-export async function readTextIfExists(path: string): Promise<string | undefined> {
+async function readTextIfExists(path: string): Promise<string | undefined> {
   try {
     return await readFile(path, 'utf-8');
   } catch (error) {

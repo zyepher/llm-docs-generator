@@ -87,7 +87,7 @@ function extractIdFromPath(path: string): string {
  *
  * Performance: O(n) where n = total content + children
  */
-export function convertSection(section: MarkdownSection, mapH2ToCategory: boolean): DocNode {
+function convertSection(section: MarkdownSection, mapH2ToCategory: boolean): DocNode {
   // Determine node type based on heading level
   let nodeType: DocNodeType;
   if (section.level === 2 && mapH2ToCategory) {
@@ -124,7 +124,7 @@ export function convertSection(section: MarkdownSection, mapH2ToCategory: boolea
  *
  * Performance: O(1)
  */
-export function convertContent(content: MarkdownContent): ContentBlock {
+function convertContent(content: MarkdownContent): ContentBlock {
   switch (content.type) {
     case 'code':
       // Pass the fence info string through verbatim, including the empty string

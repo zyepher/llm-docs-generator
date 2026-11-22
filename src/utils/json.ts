@@ -29,9 +29,13 @@ export async function writeJsonFileSafely(path: string, value: unknown): Promise
 
 /**
  * Serialize `value` with object keys sorted (by code unit) at every depth, so
- * two structurally equal values always produce the same bytes. Array order is
- * kept: callers that need sorted arrays sort them before serializing. Keys
- * whose value is `undefined` are dropped, as JSON.stringify does.
+ * two structurally equal values always produce the same bytes. Integer-like
+ * keys ("2", "10") are the exception: JavaScript objects always enumerate them
+ * first in ascending numeric order, so they precede the other keys. The output
+ * is still independent of insertion order, and it feeds recorded hashes, so
+ * that ordering is part of the on-disk contract. Array order is kept: callers
+ * that need sorted arrays sort them before serializing. Keys whose value is
+ * `undefined` are dropped, as JSON.stringify does.
  */
 export function canonicalJsonStringify(value: unknown, indent?: number): string {
   return JSON.stringify(sortKeysDeep(value), null, indent);

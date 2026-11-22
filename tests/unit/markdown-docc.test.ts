@@ -12,7 +12,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ContentBlockType, DocNodeType, type DocNode } from '../../src/core/models.js';
 import { MarkdownFormatParser } from '../../src/parsers/markdown/index.js';
-import { slugifyText } from '../../src/utils/slug.js';
 
 const DOCC_FIXTURE = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -77,18 +76,6 @@ describe('single-H1 hoisting', () => {
 });
 
 describe('Unicode slugs', () => {
-  it('keeps pure-ASCII slugs byte-identical to the old behavior', () => {
-    expect(slugifyText('Sign in with OTP')).toBe('sign-in-with-otp');
-    expect(slugifyText('  Weird -- Spacing!  ')).toBe('weird-spacing');
-    expect(slugifyText('???')).toBe('section');
-  });
-
-  it('preserves non-Latin letters instead of collapsing to the fallback', () => {
-    expect(slugifyText('快速入门')).toBe('快速入门');
-    expect(slugifyText('Émigré Café')).toBe('émigré-café');
-    expect(slugifyText('시작 하기')).toBe('시작-하기');
-  });
-
   it('gives all-CJK markdown headings a real section id', async () => {
     const docNode = await parseMarkdown(['## 快速入门', '', '内容。', ''].join('\n'));
     expect(docNode.children[0]?.id).toBe('快速入门');

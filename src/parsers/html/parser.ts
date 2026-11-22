@@ -147,7 +147,7 @@ interface HtmlTextNode {
 
 type HtmlNode = HtmlRootNode | HtmlElementNode | HtmlTextNode;
 
-export class HtmlParser {
+class HtmlParser {
   constructor(private readonly filePath: string) {}
 
   async parse(): Promise<HtmlDocument> {
@@ -617,8 +617,8 @@ function parseHtmlTree(content: string): HtmlRootNode {
  * Tokenize HTML into markup and text tokens with a single linear scan. Each
  * markup construct is consumed to its terminator or, when unterminated, to
  * end-of-input exactly once. The previous global-regex tokenizer rescanned to
- * end-of-input from every `<` on unterminated `<!`/`<!--`/`<tag` runs — O(n^2),
- * ~54s on one ~400KB malformed document.
+ * end-of-input from every `<` on unterminated `<!`/`<!--`/`<tag` runs (O(n^2),
+ * ~54s on one ~400KB malformed document).
  */
 function* tokenizeHtml(content: string): Generator<string> {
   const length = content.length;
@@ -762,8 +762,8 @@ function stripUnsafeElements(content: string): string {
 /**
  * Remove every `<tag>…</tag>` (and self-closing / unclosed variants) with a
  * single linear indexOf scan. The previous global lazy regex rescanned to
- * end-of-input from every opening on unterminated runs — O(n^2), several
- * seconds on ~100KB of `<script`-flooded input. An unterminated opening drops
+ * end-of-input from every opening on unterminated runs (O(n^2), several
+ * seconds on ~100KB of `<script`-flooded input). An unterminated opening drops
  * the remainder conservatively (parity with the old unclosed pattern).
  */
 function stripElement(content: string, tag: string): string {

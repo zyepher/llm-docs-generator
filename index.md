@@ -486,7 +486,6 @@ Utilities:
 - [src/config/loader.ts](src/config/loader.ts)
 - [src/config/schemas.ts](src/config/schemas.ts)
 - [src/utils/fetcher.ts](src/utils/fetcher.ts)
-- [src/utils/logger.ts](src/utils/logger.ts)
 - [src/utils/safe-write.ts](src/utils/safe-write.ts) - atomic temp+rename, symlink-refusing writes
 - [src/utils/json.ts](src/utils/json.ts) - shared JSON read / atomic write
 - [src/utils/hash.ts](src/utils/hash.ts), [src/utils/fs-path.ts](src/utils/fs-path.ts), [src/utils/guards.ts](src/utils/guards.ts), [src/utils/sort.ts](src/utils/sort.ts), [src/utils/text-metrics.ts](src/utils/text-metrics.ts), [src/utils/source-files-hash.ts](src/utils/source-files-hash.ts) - shared determinism/path/hash helpers
