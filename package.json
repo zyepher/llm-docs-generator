@@ -20,6 +20,14 @@
   ],
   "author": "Zyepher",
   "license": "MIT",
+  "homepage": "https://github.com/Zyepher/llm-docs-generator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zyepher/llm-docs-generator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Zyepher/llm-docs-generator/issues"
+  },
   "engines": {
     "node": ">=22.19.0"
   },

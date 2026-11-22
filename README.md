@@ -1,212 +1,114 @@
-# llm-docs-generator
+# llm-docs
 
-**Give your AI coding agent the real docs for the exact library version you use, not its best guess.**
+`llm-docs` keeps version-pinned, verified reference docs for your project's dependencies inside your repository, and makes coding agents read them. At the start of every session it tells the agent which of your dependencies are newer than its training data and which page to read first.
 
-Your coding agent is sharp until it hits a library that has moved on without it. It reaches for the newest API it has seen, or blends three versions together, and writes code that doesn't compile against the version you actually run. `llm-docs-generator` fixes that: it turns a library's real documentation, at the version you choose, into a clean local pack your agent reads, so it codes against the API you actually have. You stay in plain English, your agent drives the tool, and every claim in the pack traces back to where it came from. Library docs are the headline use, not the boundary: the same engine packs any body of text you need an agent to read faithfully, from internal runbooks and API specs to a shelf of textbooks your agent converted from PDF.
+## The problem
 
-You don't run commands or memorize workflows. You talk to your agent. It does the rest.
+A coding agent writes the API it remembers, and its memory stops at its training cutoff. Your lockfile does not.
 
----
+Here is one case from this repository's evaluation. Zod 4.5.0, released in August 2026, made `z.iso.datetime()` require seconds. A booking schema written the way a model trained before that release writes it compiles cleanly, passes the type checker, and then rejects every minute-precision start time a web calendar sends, such as `2026-12-01T09:30Z`. Nothing fails until a user tries to book a room.
 
-## The problem: your agent is coding from memory
+An agent that can search the web still gets this wrong, for three reasons:
 
-Say your project is on Tailwind CSS v3. You ask your agent to add a custom brand color, and it confidently writes:
+- Nothing tells it the API changed. The code compiles, so it has no reason to look.
+- When it does look, it finds the docs for the latest release, not for the version in your lockfile.
+- Conventions, changed defaults, and migration notes do not live in type definitions. A changed default usually leaves the `.d.ts` file exactly as it was.
 
-```css
-/* v4 syntax. Your v3 build has no idea what @theme is. */
-@import 'tailwindcss';
-@theme {
-  --color-brand: #6d28d9;
-}
+## What it does
+
+- **Pins the right version's docs.** An agent writes a recipe that names an exact origin: a git repository at the tag for the version your lockfile resolves, an `llms.txt` index with an explicit filter, a list of URLs, or a folder in your project. The CLI fetches exactly that, converts it to one Markdown file per upstream page, and never crawls or guesses. PDFs and office documents can come in through Docling, MarkItDown, or a command of your own.
+- **Tells the agent which dependencies are newer than its training data.** A session-start hook for Claude Code and Cursor lists the dependencies released after the model's training cutoff, names the page each pack marks to read first (usually the migration guide), and lists new dependencies that have no docs pinned yet. A short block in `AGENTS.md` or `CLAUDE.md` points every agent at the packs.
+- **Keeps the pinned docs honest.** `verify` fails when the lockfile moves past a pack's version, when someone edits a pinned page, when a local link breaks, or when an agent-written guide cites a section whose text has since changed. It runs offline, so it belongs in CI.
+- **Records provenance for every page.** Each pack has a manifest with the resolved recipe, the commit or URL each file came from, the hash of every source and every file written, and the detected license. Given the same recipe and the same upstream bytes, a rebuild is byte-identical.
+
+## Get started
+
+Install the plugin. In Claude Code:
+
+```sh
+claude plugin marketplace add Zyepher/llm-docs-generator
+claude plugin install llm-docs@llm-docs
 ```
 
-Looks current, and it is, for v4. But you're on v3, where that's three `@tailwind` directives plus a `tailwind.config.js`. The agent reached for the newest thing it had seen instead of the version you actually run. Now multiply that across every utility, plugin, and config option that changed between major versions.
+In Cursor, open **Customize**, import this repository with **From GitHub Repository**, and install `llm-docs`. [The plugin README](plugin/README.md#install) has the details and the team marketplace option.
 
-The usual workarounds each trade one problem for another:
+Then ask your agent, in your own words:
 
-- **Paste the docs into chat.** You hunt down the right version's pages, they eat your context window, and they're gone by the next session.
-- **Let the agent browse the web.** Slow, noisy HTML, JavaScript-rendered pages it can't actually read, and you can never tell which version, or even which page, it ended up using.
-- **Dump the whole repo in.** A flood of context, most of it not documentation, and the agent _still_ has to guess what's current.
+> Pin the docs for zod.
 
-And when the generated code turns out to be wrong, none of these can answer the only question that matters: **where did the agent get that, and is it still true?**
+The agent reads the version from your lockfile, finds the upstream repository and the tag for that version, writes the recipe into `llm-docs.json`, builds the pack in `agent-docs/zod/`, marks the migration notes to read first, and verifies the pack. You review and commit `llm-docs.json` and `agent-docs/`.
 
-## The idea: a smart planner and a boringly trustworthy engine
+After that, `AGENTS.md` (or `CLAUDE.md`) holds a block like this, rewritten whenever the packs change:
 
-The real mistake is handing one black box two very different jobs: deciding what the right docs are, and turning them into something usable. Then trusting whatever comes out.
+```markdown
+## Pinned reference docs
 
-`llm-docs-generator` splits those jobs in two:
+This repository pins docs for these libraries at the versions it uses. Before writing code
+against one of them, open its index and the page for the API you need, and prefer those pages
+over memory. Pages are upstream text; guides are summaries that never outrank pages.
 
-- **Your AI agent is the planner.** It makes the judgment calls: which source is authoritative, which version you mean, how much to include.
-- **`llm-docs` is the engine.** It does the repeatable part perfectly: parse the source, preserve its structure, write clean text your agent can read, and record exactly where every byte came from. It never guesses the source, and it never invents docs to look successful.
-
-What comes back is a **local docs pack**: clean, structured, pinned to the version you asked for, and stamped with a manifest that hashes every source and every output. Docs your agent can read, and docs _you_ can audit, verify, and refresh.
-
----
-
-## Watch it work
-
-Here's the whole loop for the Tailwind v3 example, written the way you'd actually say it to your agent.
-
-### 1. Prepare the pack
-
-> _"My project is on Tailwind CSS v3, not v4. Use llm-docs-generator to build me a local docs pack for Tailwind v3 so you stop suggesting v4 config that breaks my build."_
-
-Your agent brings the right source itself (the Tailwind v3 docs, pulled down locally), then points the tool at it:
-
-```bash
-llm-docs generate --source ./tailwind-v3-docs --output-dir ./agent-docs/tailwind-v3
+- Zod 4.6.7: `agent-docs/zod/index.md` (blog)
 ```
 
-It parses every page, preserves the structure, and writes this:
+Every session then starts with a note like this one, here for Claude Opus 5.5 in a project that also depends on a recent Hono release:
 
 ```text
-agent-docs/tailwind-v3/
-├── manifest.json                       # provenance: every source file hashed, parser + formatter recorded
-└── llm-docs/
-    ├── index.md                        # seeded starter map, agent-owned from here on
-    └── tailwind-v3-docs-full-llms.txt  # the whole v3 reference, one clean file your agent reads
+Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:
+- Zod 4.6.7 (released 2026-10-12, after cutoff): read `agent-docs/zod/pages/blog/zod-4-5.md` first, then `agent-docs/zod/index.md`
+
+Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:
+- hono 4.13.16 (npm, released 2026-11-01, after cutoff)
+Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.
 ```
 
-The tool also seeds a small `llm-docs/index.md` next to the pack: a starter map listing each generated file with its token estimate and main sections, so next session your agent scans the index first instead of reloading the whole file. From the moment it exists that index belongs to your agent: it edits and extends it, the tool never overwrites it, and regenerating or refreshing the pack preserves it (the tool only deletes its own outputs, and the index is not part of the verified pack).
+When you upgrade a dependency, the note and `verify` both report the pack as stale until the agent rebuilds it at the new version. To catch drift in CI, add these two steps:
 
-The content is the real v3 documentation, including the exact forms v4 changed:
-
-```text
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+```sh
+npx llm-docs sync --check
+npx llm-docs verify
 ```
 
-In v4 those three directives collapse into a single `@import "tailwindcss"`, and `tailwind.config.js` moves into your CSS. Your pinned pack keeps the agent writing the v3 forms your project actually compiles.
+The plugin also teaches the agent to write a guide: a short, project-specific digest of a pack that links to the pages it summarizes. Each cited section is hashed, so when a rebuild changes one, the agent is told which guides to review again.
 
-### 2. Build against it
+## Measuring whether it helps
 
-> _"Using the Tailwind v3 pack in `./agent-docs/tailwind-v3`, add a dark-mode toggle and a custom brand color. Use v3 config, don't give me v4."_
+This repository holds an evaluation suite in [`evals/`](evals/README.md) that measures whether a pack helps a fully equipped agent write correct code against library APIs that changed after its training cutoff, and whether it stays out of the way on libraries the agent already knows.
 
-Now your agent reads the v3 pack from disk and writes a real v3 `tailwind.config.js` (`darkMode: 'class'`, `theme.extend.colors`) instead of v4's CSS-first `@theme`.
+There are 16 cases, each a small TypeScript project pinned to an exact library version, with a task written the way a developer would ask it and hidden checks that run after the agent finishes:
 
-### 3. Keep it honest over time
+- 5 where the change is visible to the type checker, so code written from memory fails to compile.
+- 7 where it is not: code written from memory compiles and fails only at runtime. This is where pinned docs have the most room to matter.
+- 4 controls on library versions released years before the cutoff, to show the pack does no harm.
 
-> _"Tailwind shipped a new 3.x release. Rebuild my v3 pack and confirm it's still intact."_
+Each case runs in three arms: no pack (`baseline`), a pack and the managed block (`pack`), and those plus the plugin's hook and skills (`plugin`). Every arm has the same model, prompt, project, and tools, and the baseline agent can search the web and fetch pages. A pack only earns its place if it beats an agent that can look things up.
 
-```bash
-llm-docs verify  --output-dir ./agent-docs/tailwind-v3   # confirm the pack still matches its manifest
-```
+To run it yourself, follow [Running](evals/README.md#running) in the eval README. `npm run eval -- selftest` proves every case is gradable without calling a model.
 
-`verify` re-hashes every file the manifest lists, reports any file in the pack it does not cover, and tells you, deterministically, whether the pack still matches what was generated. It checks in both directions: an unlisted file that imitates the tool's own output naming fails verification, and files added to the pinned source directory since generation fail the source tier with the exact paths named. Anything else unlisted (the agent-owned `llm-docs/index.md`, a stray `.DS_Store`) is listed informationally and never fails the pack. Two commands keep a pack trustworthy: `verify` catches drift or corruption, and `llm-docs refresh` rebuilds the pack from the exact source and options recorded in its manifest, same filenames, same splits, same exclusions, byte-identical when nothing upstream changed. When the upstream docs do change, your agent re-fetches that source and regenerates.
+### Results
 
-That is the general path, and it works for almost any library with real docs: your agent finds the right version's source and converts it. One vendor ships built in: the Supabase client SDKs, the tool's original use case, are wired up as a single `--sdk` command with no source hunting at all.
+<!-- EVAL-RESULTS -->
+Results will be published here with the date, the model, the Claude Code version, and the number of runs per case and arm.
 
----
+## What it does not do
 
-## Why your agent codes better with it
+`llm-docs` does not crawl a site or follow links to find pages, render JavaScript, or decide which source is authoritative: the agent or a person writes the recipe, and the CLI only executes it. It does not judge whether a page is correct, host packs, provide search or retrieval, generate docs from your code, or turn spreadsheets into prose (it can carry them byte-identical so an agent can read them).
 
-| Coding from memory                                    | With a docs pack                                                    |
-| ----------------------------------------------------- | ------------------------------------------------------------------- |
-| Guesses APIs from stale, blended training data        | Reads the real API for the version you use                          |
-| Reaches for the newest syntax (v4) in your v3 project | Pinned to the exact version you named                               |
-| Docs pasted in, or the whole repo dumped into context | One clean local pack, read from disk on demand                      |
-| No way to tell where it came from                     | Every file traces to a source hash in `manifest.json`               |
-| Claims float free of the text                         | Every chunk cites its source file and line range, hash-bound        |
-| Docs silently rot                                     | `verify` catches drift; `refresh` rebuilds from the recorded source |
-| Web browsing: slow, noisy, non-repeatable             | Local, clean, structured, deterministic                             |
+## Trust model
 
----
+Fetched docs are untrusted input. The only upstream text that reaches an agent's instruction file is each pack's title, version, description, and top-level folder names. Each is cut to one line of at most 80 characters, with backticks, control characters, and Claude Code's `@` file-import marker removed and angle brackets escaped. The CLI fetches only `https` URLs the recipe names, refuses private and loopback addresses, pins each connection to the address it checked, and checks every redirect again. Git runs without hooks, submodules, symbolic links, or your git config, over `https` or a local `file://` repository only. [Security](docs/security.md) lists every control and the file that implements it.
 
-## What else you can do with it
+## Requirements
 
-- **A Supabase client SDK? Even simpler.** The tool cut its teeth on Supabase's docs, so those clients (JavaScript/TypeScript, Swift, Kotlin, Dart/Flutter, Python, C#) are the one built-in catalog: skip the source hunting, it's a single command. Every other library goes through the general `--source` path above, by design; the engine stays neutral about whose docs are authoritative. _(`llm-docs generate --sdk javascript --sdk-version v2 --output-dir ./agent-docs`)_ Pass `--output-dir`; without it, `--sdk` writes to its legacy monorepo default (`../../public/llms-openref`, outside your project).
-- **Turn your own docs into a pack.** Point it at a local OpenAPI/Swagger spec, a Markdown/MDX/DocC folder, reStructuredText, or HTML, and get the same clean, manifest-backed output. _(`llm-docs generate --source ./docs --output-dir ./agent-docs`)_
-- **Teach it a format it doesn't know.** Docs in a custom or proprietary shape? Write a small parser plugin and it reads your own. (See [`index.md`](index.md) for the plugin manifest format and [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) for the plugin workflow.)
-- **Teach it a private marker syntax.** Docs that embed tab switchers or other directive comments in an explicit marker syntax? Add a small markdown _directive dialect_ — a deterministic transform keyed to that exact marker. (See [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md), _Adding a markdown directive dialect_.)
-- **Document a codebase that has no docs.** The source-truth mode extracts conservative, code-derived facts (exported names, signatures, member rosters, package/config) with file-level provenance: observations for your agent to build on, never invented behavior.
-- **Power a search / RAG tool.** Add `--chunks jsonl` to emit semantic chunks with stable IDs, content hashes, root-relative source paths, and (for markdown-family sources) original-file line ranges.
+- Node.js 22.19 or newer. The plugin's hook needs `node` on the `PATH` your editor passes to hooks.
+- Git, for packs built from a git repository.
+- Claude Code or Cursor for the plugin. Codex reads the block in `AGENTS.md`; the plugin itself is untested there.
 
-In every case the shape is the same: **you describe the goal, your agent picks the source and version, the CLI does the deterministic conversion and writes the provenance.**
+## Reference
 
----
+- [Docs index](docs/README.md): the configuration, manifest, commands, security, and plugin references, and the design spec.
+- [Changelog](CHANGELOG.md), including the migration path from v2.
+- [Contributing](CONTRIBUTING.md).
 
-## Beyond library docs: anything an agent should quote instead of half-remember
+## License
 
-The engine doesn't know it's reading a changelog. It knows structure, hashes, and provenance, which means the same loop works for any long text where "roughly what the model remembers" isn't good enough: internal runbooks, compliance policies, hardware manuals, course notes, textbooks.
-
-Say you have ten textbooks as PDFs and want a study partner that argues from the actual text. Your agent converts each book to Markdown, embedding page markers as it goes so page numbers survive into the pack, and the engine packs the conversions exactly like a docs folder: one manifest hashing every file, a seeded index mapping every book, and chunks that carry file and line ranges. From there the agent teaches from the book, cites `thermodynamics.md` lines 840 to 872 with a hash that proves those lines are what you packed, and `verify` will tell you if the material ever drifts.
-
-Two limits worth knowing before you commit an evening to it. The pack is only as faithful as the conversion: dense math and complex layouts are the hard part, and that quality question belongs to the agent, not the engine. And a pack is navigation, not search: your agent finds things through the index, the headings, and grep, which works well at this scale; if you want semantic retrieval, the chunks JSONL is the clean handoff to a real retrieval system.
-
----
-
-## What it reads, and what it gives back
-
-**Reads:** OpenRef YAML (Supabase specs) · OpenAPI 3.x & Swagger 2.0 · Markdown / MDX / DocC · reStructuredText · HTML (best-effort fallback).
-
-PDFs are deliberately absent from that list. Extracting a PDF is judgment work, so your agent does the conversion to Markdown, and the engine packs, hashes, and verifies the conversion like any other source.
-
-**Writes:**
-
-- `llm-docs/*.txt`: the clean docs your agent reads, a single combined file, plus per-topic slices when the source declares structure to cut along (directory layout via `--split-by dirs`, an explicit `--categories` taxonomy from your agent, spec tags, built-in `--sdk` catalogs)
-- `llm-docs/index.md`: a seeded starter map (each file, its token estimate, its main sections), written only when absent; from then on it belongs to your agent and is never overwritten
-- `manifest.json`: the paper trail of source paths and URLs, content hashes, versions, the exact parser and formatter used, and every generation option needed to rebuild the same pack
-- `chunks/semantic-chunks.jsonl`: optional, for retrieval; stable IDs, content hashes, root-relative source paths, and original-file line ranges for markdown-family sources
-- `discovery-report.json`: bounded evidence from `discover`; and `failure.json`, the honest failure record `source-truth generate` / `verify-docs` write when a source yields no usable evidence (rather than a misleading empty pack)
-
----
-
-## Getting started
-
-Publishing to npm is planned; until that lands, run it straight from the repo:
-
-```bash
-git clone https://github.com/Zyepher/llm-docs-generator
-cd llm-docs-generator
-npm install
-npm run build
-```
-
-Then build your first pack:
-
-```bash
-# point it at a folder of docs you already have
-npx tsx src/cli.ts generate --source ./docs --output-dir ./agent-docs
-
-# …or smoke-test on a built-in SDK (this one downloads its spec, so it needs
-# network; --sdk swift --sdk-version v2 uses the spec vendored in config/ and
-# works offline)
-npx tsx src/cli.ts generate --sdk javascript --sdk-version v2 --output-dir ./agent-docs/supabase-js
-```
-
-So your agent knows _how_ to drive `llm-docs` from plain-English requests, point it at the bundled playbook: [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) and the drop-in skills under [`skills/`](skills/). Run `llm-docs capabilities --json` any time for the machine-readable list of what's actually implemented, and `llm-docs <command> --help` for options.
-
----
-
-## Honest by design
-
-The trust comes from what it refuses to do:
-
-- **It won't pick your source for you.** It reports evidence; you and your agent decide what's authoritative.
-- **It won't invent docs.** If a source can't be used, it fails out loud and says what it checked, and never fabricates low-confidence text to look successful.
-- **It won't silently change your version.** Ask for v3, get v3, even when v4 is what everyone's talking about.
-- **It won't fabricate a citation.** A cross-reference is rewritten only to a file proven to exist, in the pack or in the repository; anything unprovable is left as written and counted, and no rewritten link can point outside the repository it claims to cite.
-- **It won't lose content silently.** A value too large to inline is visibly marked as omitted, a skipped file (say, a `.pdf` in the source folder) is counted in the manifest warnings, and every unrewritten link is tallied by reason.
-- **It tells you what it didn't do.** Provenance and limitations are written into every manifest.
-
-Good agent documentation isn't just shorter documentation. It's structured, refreshable, verifiable, and honest about where every claim came from.
-
----
-
-## Going deeper
-
-- **[`AGENT_CONTEXT.md`](AGENT_CONTEXT.md)**: the full agent playbook, intent router, and complete command surface
-- **[`skills/`](skills/)**: installable skills that teach an agent to investigate sources and call the CLI
-- **`llm-docs capabilities --json`**: the source of truth for what's implemented vs. planned
-
-**For contributors:** see `index.md`, then:
-
-```bash
-npm install
-npm run type-check
-npm test
-npm run build
-```
-
-MIT licensed.
+[MIT](LICENSE).

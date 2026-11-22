@@ -1,237 +1,101 @@
-# Contributing to llm-docs-generator
+# Contributing to llm-docs
 
-Thank you for your interest in contributing! This project uses a community-maintained source hint catalog to help AI coding assistants find likely documentation locations.
+This guide covers setting up the repository, the checks a change must pass, where each kind of extension goes, and the conventions reviewers hold every change to. Read [the design spec](docs/design/v3-spec.md) before changing behavior: the CLI is the engine that executes recipes, records provenance, and refuses to guess, and the agent is the planner that chooses sources. A change that makes the engine choose a source, crawl, or guess a version will not be accepted.
 
-## Ways to Contribute
+## Set up
 
-### 1. Add or Update Source Hints
+You need Node.js 22.19 or newer and git.
 
-The most valuable contribution is improving `config/known-sources.json`. Despite the compatibility filename, this file is a non-authoritative hint catalog, not a registry of verified sources. Every hint must be checked against the current upstream repository, path, version, and format before use.
-
-#### Requirements
-
-- Documentation must be publicly accessible
-- Format must be one the parsers implement today: `openref`, `markdown`, `mdx`, `openapi`, `rst`, or `html` (anything else must be marked as planned until parser and CLI support exists)
-- Verify the repository, path, version, and format before submitting
-- Include a note that explains how the hint was verified
-
-#### Process
-
-1. Fork the repository
-2. Add or update an entry in `config/known-sources.json`
-3. Verify the hint against the current upstream source
-4. Update `tested: true` only after the hint is verified against upstream and supported by implemented parser/CLI behavior
-5. Update related docs only when they describe implemented behavior
-6. Submit pull request
-
-#### Hint Entry Format
-
-```json
-{
-  "id": "unique-project-id",
-  "name": "Human Readable Project Name",
-  "repository": "https://github.com/org/repo",
-  "format": "openref|markdown|mdx|openapi|rst|html",
-  "path": "path/to/docs",
-  "pattern": "**/*.md",
-  "description": "Brief description of the documentation",
-  "examples": [
-    {
-      "file": "path/to/example.md",
-      "description": "What this file contains"
-    }
-  ],
-  "hint": "Likely docs live under path/to/docs. Verify the current repository layout before use.",
-  "tested": false,
-  "maintainer": "Organization or Individual"
-}
-```
-
-#### Required Fields
-
-- `id`: Unique identifier (lowercase, hyphens)
-- `name`: Display name
-- `repository`: GitHub repository URL
-- `format`: Documentation format; implemented parser formats are `openref`, `markdown`, `mdx`, `openapi`, `rst`, and `html`. Any other value must stay marked as planned until parser/CLI support exists
-- `path`: Path to documentation within repo
-- `description`: Brief description
-- `hint`: Verification-oriented note for agents and maintainers
-- `tested`: Boolean (set to true only after confirming the hint against current upstream sources and implemented parser support)
-- `maintainer`: Who maintains the original docs
-
-#### Optional Fields
-
-- `pattern`: Glob pattern for finding files
-- `examples`: Array of example files
-- `sections`: Array of documentation sections
-- `subformat`: Additional format info (e.g., "docc" for markdown)
-- `languages`: Supported programming languages
-- `versions`: Available versions
-- `status`: "planned" if not yet tested
-- `note`: Additional information
-
-### 2. Add Format Parsers
-
-To support a new documentation format:
-
-1. Create parser in `src/parsers/yourformat/`
-2. Implement Parser interface from `src/parsers/base.ts`
-3. Create adapter to convert to unified IR (DocNode)
-4. Register parser in `src/core/detector.ts`
-5. Add tests
-6. Update documentation
-
-Required files:
-- `src/parsers/yourformat/parser.ts`: Format-specific parser
-- `src/parsers/yourformat/adapter.ts`: Format → IR converter
-- `src/parsers/yourformat/index.ts`: Parser wrapper
-
-### 3. Improve Existing Code
-
-- Bug fixes
-- Performance improvements
-- Better error messages
-- Documentation improvements
-
-### 4. Add Tests
-
-- Unit tests for models
-- Integration tests for parsers
-- End-to-end tests for CLI
-
-## Development Setup
-
-```bash
-# Clone repository
+```sh
 git clone https://github.com/Zyepher/llm-docs-generator.git
 cd llm-docs-generator
-
-# Install dependencies
-npm install
-
-# Run tests
-npm test
-
-# Run linter
-npm run lint
-
-# Build
+npm ci
 npm run build
+node dist/cli.js --help
 ```
 
-## Code Style
+To try a change against a project, run `node dist/cli.js` in a throwaway directory, never against real data. A `local` source in a temp directory needs `LLM_DOCS_ALLOW_TEMP_SOURCES=1`, and a local HTTP server needs `LLM_DOCS_ALLOW_PRIVATE_NETWORK=1`.
 
-- TypeScript with strict mode enabled
-- Biome for linting (`npm run lint`)
-- Prettier for formatting
-- Zod for validation schemas
+## Pass the gate
 
-Run before committing:
-```bash
-npm run lint:fix
-npm run format
+CI runs these on Linux, macOS, and Windows with Node 22 and 24. Run all of them before you open a pull request:
+
+```sh
 npm run type-check
+npm run lint
+npm run format:check
+npm run build
+npm run check:plugin
 npm test
 ```
 
-## Commit Messages
+- `npm test` is slow: the CLI suite builds the CLI and spawns real subprocesses against temp projects. Let it finish; a run killed partway can leave temp state behind. Never run two copies at once in one checkout.
+- `npm run format` and `npm run lint:fix` fix most formatting and lint findings.
 
-Use clear, descriptive commit messages:
-- Present tense ("Add feature" not "Added feature")
-- Imperative mood ("Move cursor to..." not "Moves cursor to...")
-- Reference issues/PRs when applicable
+Two generated artifacts are committed, and a check fails when they are stale:
 
-Examples:
-```
-Add Python documentation source hint
-Fix markdown parser handling of nested lists
-Update README with new usage examples
-```
+- After any change under `src/`, run `npm run build:plugin` to regenerate `plugin/bin/llm-docs.mjs`, the CLI bundled into the plugin. The build is byte-identical across runs, and `npm run check:plugin` fails CI when the committed bundle or the plugin versions are out of date. It also fails when the skills or the plugin README name a command or flag the CLI does not have.
+- After a change to the config or manifest zod schemas, run `npm run schema` to regenerate `schema/llm-docs.schema.json` and `schema/manifest.schema.json`. A test fails when they are out of date.
 
-## Pull Request Process
+## Write tests
 
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/your-feature`)
-3. Make your changes
-4. Run tests and linters
-5. Commit with clear messages
-6. Push to your fork
-7. Submit pull request
+Tests are Vitest files in `tests/unit/`, one or more per module, named after the area they cover (`sources-git.test.ts`, `pack-sync.test.ts`, `deps-lockfiles.test.ts`). Fixtures live in `tests/fixtures/`, and shared helpers in `tests/helpers/`: `fake-converters.ts` provides `docling` and `markitdown` stand-ins that follow the real tools' command-line contracts, and `symlinks.ts` skips symbolic link cases where the platform cannot create them.
 
-### PR Description Template
+- No test touches the real network. Network tests start a local HTTP server and set `LLM_DOCS_ALLOW_PRIVATE_NETWORK=1`. Git tests create repositories in temp directories and use them over `file://`.
+- Test what a user of the code can observe: command output, exit codes, files written, returned values. A test that passes while the behavior is broken, or breaks when only the internals change, is not worth keeping.
+- End-to-end cases run the built `dist/cli.js` against temp projects and belong in `tests/unit/cli-v3.test.ts`. Group scenarios so that one subprocess covers several assertions, to keep the suite fast.
 
-```markdown
-## Description
-Brief description of changes
+## Extend the tool
 
-## Type of Change
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Documentation source addition
-- [ ] Format parser
-- [ ] Documentation update
+Each extension point is a table in one file. Add to the table and to the code next to it, then update the reference page that describes it.
 
-## Testing
-- [ ] Tests added/updated
-- [ ] Manual testing completed
-- [ ] Source hint verified (for hint catalog additions)
+### Add a source type
 
-## Checklist
-- [ ] Code follows project style
-- [ ] Tests pass
-- [ ] Documentation updated
-- [ ] No breaking changes (or documented)
-```
+1. In `src/config/project.ts`, add the type to `SOURCE_TYPES`, add its strict zod schema to `sourceConfigSchema`, add its resolved shape to `resolvedSourceSchema`, and fill its defaults and placeholders in `resolveSource`.
+2. In `src/pack/manifest.ts`, add its origin to `originSchema`.
+3. Write the acquirer in `src/sources/` and register it in `ACQUIRERS` in `src/sources/acquire.ts`, marking whether it uses the network. A network acquirer fetches through `createHttpClient` in `src/sources/http.ts` and nothing else.
+4. If `add` should create it, add its flags to the `add` entry of the `COMMANDS` table in `src/cli.ts`. `capabilities --json` is generated from that table and from `SOURCE_TYPES`.
+5. Run `npm run schema`, and document it in [`docs/config.md`](docs/config.md) and [`docs/manifest.md`](docs/manifest.md).
 
-## Adding Source Hints - Detailed Guide
+### Add a converter
 
-### Step 1: Find Candidate Documentation
+1. Add the tool name to `CONVERTER_TOOLS` in `src/config/project.ts`, and its default `include` if it has one.
+2. In `src/sources/convert.ts`, add its install command to `CONVERTER_INSTALL_HINTS` and its argument list to `invocationTemplate`. The converter runs through `execFile`, never a shell.
+3. Add a fake executable for it to `tests/helpers/fake-converters.ts` that follows the real tool's documented contract, and test conversion, failure, timeout, and caching against it.
+4. Run `npm run schema`, and document it in [`docs/config.md`](docs/config.md#convert).
 
-Identify publicly accessible documentation candidates:
-- GitHub repositories with markdown/rst docs
-- OpenRef YAML specifications
-- DocC documentation
+### Add a lockfile parser or an ecosystem
 
-### Step 2: Verify the Hint
+- A lockfile format for an existing ecosystem: write the parser in `src/deps/lockfiles.ts` (npm formats live in `src/deps/lockfiles-npm.ts`) and register its file name in `LOCKFILE_PARSERS`. A format that cannot be read goes in `UNSUPPORTED_LOCKFILES` with a message that names the fix. Parsers never execute project code.
+- A new ecosystem: also add it to `ECOSYSTEMS` in `src/deps/lockfiles.ts`, add its release-date lookup to `LOOKUPS` and its registry metadata to `PACKAGE_METADATA` in `src/deps/registries.ts`, and handle its name format in `src/core/package-discovery.ts` when `discover --package` needs it.
+- Put real-shaped lockfiles in `tests/fixtures/deps/` and test the resolved versions, directness, and skipped entries.
 
-Clone or inspect the documentation repository and confirm the current path, format, version, and maintainer. Do not assume `config/known-sources.json` is authoritative.
+### Add a verify check
 
-```bash
-# Clone docs repo
-git clone https://github.com/org/docs-repo
-cd docs-repo
+1. Add the name to `PACK_CHECK_NAMES` or `PROJECT_CHECK_NAMES` in `src/pack/verify.ts`, and add the check function to `PACK_CHECKS` in report order. Each finding says what is wrong and the command or config key that fixes it.
+2. Add a row to the `Check` table in `plugin/skills/llm-docs/SKILL.md`. `npm run check:plugin` fails until that table lists exactly the checks the CLI reports.
+3. Document it under [Verify checks](docs/commands.md#verify-checks), then run `npm run build:plugin`.
 
-# Verify the hinted docs path and format
-find ./docs -maxdepth 2 -type f | head
+## Run the evaluation selftest
+
+The evaluation suite in `evals/` measures whether packs help an agent; [its README](evals/README.md) describes it. After a change to `evals/` or to anything a case depends on, run:
+
+```sh
+npm run eval -- selftest
 ```
 
-Source-driven generation is supported: once you have the source locally, `llm-docs generate --source <path> --output-dir <dir>` produces a pack you can inspect and `llm-docs verify` against. Use it to sanity-check a hint's format before adding it to the catalog.
+It proves every case is gradable without running a model: the fixture alone fails, every reference solution passes, every known wrong answer fails, and the from-memory solution fails the way its stratum says. It needs the network for npm installs, which it caches per lockfile. Full runs call a model and cost money; do not start one without the maintainer's agreement.
 
-### Step 3: Add to Hint Catalog
+## Follow the conventions
 
-Edit `config/known-sources.json` and add or update the entry with all required fields.
+- **Strict TypeScript.** Strict mode with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` stays green. No `as any`, no `as unknown as`, no `@ts-ignore` or `@ts-expect-error`. A non-null assertion is allowed only next to the bounds check that proves it.
+- **Locality of behaviour.** Keep one unit of behavior in one place. Do not add a layer, a wrapper with one caller, or an option nobody uses. Reuse the shared helpers instead of writing new ones: `errorMessage`, `isRecord`, and `isFileNotFoundError` in `src/utils/guards.ts`; `writeJsonFileSafely` and `readJsonFile` in `src/utils/json.ts`; `writeTextFileSafely` in `src/utils/safe-write.ts`; `sha256Prefixed` and `sha256File` in `src/utils/hash.ts`; `isSameOrDescendant` in `src/utils/fs-path.ts`; and `walkBoundedDirectoryTree` in `src/utils/traversal.ts`.
+- **Everything added is used.** Anything you remove must be dead across `src/`, `tests/`, `evals/`, and `scripts/`.
+- **Comments explain a non-obvious why.** Do not narrate the change or address the reviewer.
+- **Errors say what to do.** Every message a user or agent can see names what went wrong and the command or config key that fixes it. Use the exit codes in [Commands](docs/commands.md#exit-codes).
+- **No em dashes** anywhere: code comments, docs, test names, commit messages. Use commas, colons, periods, or parentheses.
+- **Commit messages** use a conventional subject (`feat(scope):`, `fix(scope):`, `refactor:`, `test:`, `docs:`, `build:`, `chore:`) and a body that explains what changed and why. Write them as the engineer who made the change, with no tool or assistant attribution and no `Co-Authored-By` trailers for tools.
 
-### Step 4: Update Docs When Needed
+## Report a security problem
 
-Update README.md or other docs only when they describe implemented behavior or clearly labeled planned behavior.
-
-### Step 5: Submit PR
-
-Include in PR description:
-- What documentation source was added
-- How the hint was verified
-- Any special considerations
-
-## Questions?
-
-- Open an issue for questions
-- Check existing issues and PRs
-- Review README.md and code examples
-
-## Code of Conduct
-
-Be respectful and inclusive. This is a community project for AI coding assistants and the developers who use them.
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
+Do not open a public issue. Follow [Report a vulnerability](docs/security.md#report-a-vulnerability).
