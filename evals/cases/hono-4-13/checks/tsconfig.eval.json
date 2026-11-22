@@ -12,5 +12,11 @@
     "isolatedModules": true,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src/**/*.ts", "__eval__/**/*.ts"]
+  "include": ["src/**/*.ts", "__eval__/**/*.ts"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts",
+    "src/**/*.test-d.ts",
+    "src/**/__tests__/**"
+  ]
 }

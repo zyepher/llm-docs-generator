@@ -1,11 +1,21 @@
 import { constants, existsSync } from 'node:fs';
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
+
+import picomatch from 'picomatch';
 
 import { errorMessage, isRecord } from '../../src/utils/guards.js';
 import { sha256File, sha256Hex } from '../../src/utils/hash.js';
 import { readJsonFile } from '../../src/utils/json.js';
-import { type Arm, CACHE_DIR, type CheckSpec, type EvalCase, listFiles } from './cases.js';
+import {
+  AGENT_TEST_GLOBS,
+  type Arm,
+  CACHE_DIR,
+  type CheckSpec,
+  type EvalCase,
+  listFiles,
+} from './cases.js';
 import { runProcess } from './proc.js';
 import type { TranscriptSummary } from './transcript.js';
 
@@ -110,12 +120,207 @@ export interface CheckResult {
   detail: string;
 }
 
-const SUPPRESSION_PATTERNS: Array<[RegExp, string]> = [
+/** Patterns over code with comments and string, template, and regex literals blanked out. */
+const CODE_SUPPRESSIONS: Array<[RegExp, string]> = [
   [/\bas\s+any\b/, '`as any`'],
   [/:\s*any\b/, '`: any`'],
   [/\bas\s+unknown\s+as\b/, '`as unknown as`'],
-  [/@ts-(ignore|expect-error|nocheck)/, 'a @ts- directive'],
 ];
+/** A directive only works inside a comment, so only comments are searched for it. */
+const COMMENT_SUPPRESSION = /@ts-(ignore|expect-error|nocheck)/;
+
+/** The slice of the TypeScript compiler API the suppression scan uses. */
+interface TsNode {
+  kind: number;
+  pos: number;
+  end: number;
+  getStart(sourceFile: TsNode): number;
+  getChildren(sourceFile: TsNode): TsNode[];
+}
+interface TypeScriptApi {
+  createSourceFile(
+    fileName: string,
+    text: string,
+    languageVersion: number,
+    setParentNodes: boolean,
+    scriptKind: number
+  ): TsNode;
+  ScriptTarget: Record<string, unknown>;
+  ScriptKind: Record<string, unknown>;
+  SyntaxKind: Record<string, unknown>;
+}
+
+function isTypeScriptApi(value: unknown): value is TypeScriptApi {
+  return (
+    isRecord(value) &&
+    typeof value.createSourceFile === 'function' &&
+    isRecord(value.ScriptTarget) &&
+    isRecord(value.ScriptKind) &&
+    isRecord(value.SyntaxKind)
+  );
+}
+
+function enumValue(table: Record<string, unknown>, name: string): number {
+  const value = table[name];
+  if (typeof value !== 'number') {
+    throw new Error(`the installed typescript has no ${name}`);
+  }
+  return value;
+}
+
+/**
+ * Loads the TypeScript compiler the project pins (every fixture installs one), so the scan
+ * tokenizes exactly as that compiler does.
+ */
+function loadTypeScript(projectDir: string): TypeScriptApi {
+  const ts: unknown = createRequire(join(projectDir, 'package.json'))('typescript');
+  if (!isTypeScriptApi(ts)) {
+    throw new Error(`typescript in ${projectDir}/node_modules does not expose the compiler API`);
+  }
+  return ts;
+}
+
+const blank = (char: string | undefined): string => (char === '\n' || char === '\r' ? char : ' ');
+
+/**
+ * Splits TypeScript source into code and comments, each as long as the input with everything else
+ * blanked (newlines kept, so line numbers survive). Walking the parsed tokens rather than a raw
+ * scan is what tells a regex literal from a division, and a template's text from its expressions.
+ * Comments live in the trivia between one token and the next.
+ */
+function splitCodeAndComments(
+  ts: TypeScriptApi,
+  fileName: string,
+  text: string
+): { code: string[]; comments: string[] } {
+  const kinds = ts.SyntaxKind;
+  const literalKinds = new Set(
+    [
+      'StringLiteral',
+      'NoSubstitutionTemplateLiteral',
+      'TemplateHead',
+      'TemplateMiddle',
+      'TemplateTail',
+      'RegularExpressionLiteral',
+      'JsxText',
+    ].map((name) => enumValue(kinds, name))
+  );
+  const firstJsDoc = enumValue(kinds, 'FirstJSDocNode');
+  const lastJsDoc = enumValue(kinds, 'LastJSDocNode');
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    text,
+    enumValue(ts.ScriptTarget, 'Latest'),
+    true,
+    enumValue(ts.ScriptKind, fileName.endsWith('.tsx') ? 'TSX' : 'TS')
+  );
+  const code = text.split('');
+  const comments = code.map(blank);
+  const visit = (node: TsNode): void => {
+    // A JSDoc block is also the leading trivia of the token after it, which covers it.
+    if (node.kind >= firstJsDoc && node.kind <= lastJsDoc) {
+      return;
+    }
+    const children = node.getChildren(sourceFile);
+    if (children.length > 0) {
+      children.forEach(visit);
+      return;
+    }
+    const start = node.getStart(sourceFile);
+    for (let index = node.pos; index < start; index += 1) {
+      comments[index] = text[index] ?? ' ';
+      code[index] = blank(text[index]);
+    }
+    if (literalKinds.has(node.kind)) {
+      for (let index = start; index < node.end; index += 1) {
+        code[index] = blank(text[index]);
+      }
+    }
+  };
+  visit(sourceFile);
+  return { code, comments };
+}
+
+/**
+ * The TypeScript a Svelte component holds, as [offset, text] segments: its `<script>` blocks and
+ * the `{...}` expressions in its markup. Markup prose, styles, and HTML comments are not code.
+ */
+function svelteSegments(text: string): Array<[number, string]> {
+  const segments: Array<[number, string]> = [];
+  const expressions = (from: number, to: number): void => {
+    let depth = 0;
+    let open = 0;
+    for (let index = from; index < to; index += 1) {
+      if (text[index] === '{') {
+        open = depth === 0 ? index + 1 : open;
+        depth += 1;
+      } else if (text[index] === '}' && depth > 0) {
+        depth -= 1;
+        if (depth === 0) {
+          segments.push([open, text.slice(open, index)]);
+        }
+      }
+    }
+  };
+  let markupFrom = 0;
+  for (const match of text.matchAll(/<(script|style)\b[^>]*>([\s\S]*?)<\/\1>|<!--[\s\S]*?-->/g)) {
+    expressions(markupFrom, match.index);
+    const body = match[2];
+    if (match[1] === 'script' && body !== undefined) {
+      segments.push([match.index + match[0].indexOf('>') + 1, body]);
+    }
+    markupFrom = match.index + match[0].length;
+  }
+  expressions(markupFrom, text.length);
+  return segments;
+}
+
+/**
+ * Type suppressions in the TypeScript and Svelte files under `srcDir`, as `src/<file>:<line> uses
+ * <what>`, with the TypeScript compiler `projectDir` installs. Only code counts: the same words in
+ * a comment or a string are prose. The agent's own test files are not graded (AGENT_TEST_GLOBS).
+ */
+export async function findTypeSuppressions(srcDir: string, projectDir: string): Promise<string[]> {
+  if (!existsSync(srcDir)) {
+    return [];
+  }
+  const ts = loadTypeScript(projectDir);
+  const isAgentTest = picomatch(AGENT_TEST_GLOBS);
+  const hits: string[] = [];
+  for (const rel of await listFiles(srcDir)) {
+    if (!/\.(ts|mts|cts|tsx|svelte)$/.test(rel) || isAgentTest(`src/${rel}`)) {
+      continue;
+    }
+    const text = await readFile(join(srcDir, rel), 'utf8');
+    let split: { code: string[]; comments: string[] };
+    if (rel.endsWith('.svelte')) {
+      split = { code: text.split('').map(blank), comments: text.split('').map(blank) };
+      for (const [offset, segment] of svelteSegments(text)) {
+        const part = splitCodeAndComments(ts, `${rel}.ts`, segment);
+        part.code.forEach((char, index) => {
+          split.code[offset + index] = char;
+        });
+        part.comments.forEach((char, index) => {
+          split.comments[offset + index] = char;
+        });
+      }
+    } else {
+      split = splitCodeAndComments(ts, rel, text);
+    }
+    const commentLines = split.comments.join('').split('\n');
+    for (const [index, line] of split.code.join('').split('\n').entries()) {
+      for (const [pattern, label] of CODE_SUPPRESSIONS) {
+        if (pattern.test(line)) {
+          hits.push(`src/${rel}:${index + 1} uses ${label}`);
+        }
+      }
+      if (COMMENT_SUPPRESSION.test(commentLines[index] ?? '')) {
+        hits.push(`src/${rel}:${index + 1} uses a @ts- directive`);
+      }
+    }
+  }
+  return hits;
+}
 
 async function runBuiltin(
   evalCase: EvalCase,
@@ -148,23 +353,7 @@ async function runBuiltin(
       : done(false, `changed: ${changed.join(', ')}`);
   }
 
-  const hits: string[] = [];
-  const srcDir = join(dir, 'src');
-  if (existsSync(srcDir)) {
-    for (const rel of await listFiles(srcDir)) {
-      if (!/\.(ts|mts|cts|tsx|svelte)$/.test(rel)) {
-        continue;
-      }
-      const lines = (await readFile(join(srcDir, rel), 'utf8')).split('\n');
-      for (const [index, line] of lines.entries()) {
-        for (const [pattern, label] of SUPPRESSION_PATTERNS) {
-          if (pattern.test(line)) {
-            hits.push(`src/${rel}:${index + 1} uses ${label}`);
-          }
-        }
-      }
-    }
-  }
+  const hits = await findTypeSuppressions(join(dir, 'src'), dir);
   return hits.length === 0
     ? done(true, 'no type suppressions in src/')
     : done(false, hits.join('\n'));

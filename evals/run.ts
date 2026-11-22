@@ -19,6 +19,8 @@ import {
   listFiles,
   loadCases,
   RESULTS_DIR,
+  STRATA,
+  STRATUM_CHECKS,
 } from './lib/cases.js';
 import { installSignalHandlers, isShuttingDown, runProcess } from './lib/proc.js';
 import {
@@ -39,9 +41,11 @@ import {
 } from './lib/transcript.js';
 import {
   assertArm,
+  type CheckResult,
   copyTree,
   createWorkspace,
   ensureTemplate,
+  findTypeSuppressions,
   gradeWorkspace,
   inspectWorkspace,
   overlay,
@@ -53,7 +57,9 @@ const USAGE = `Usage: npx tsx evals/run.ts <command> [options]
 Commands:
   selftest       [--cases <globs>] [--concurrency N] [--keep]
                  Install each fixture once, then prove the checks discriminate: the fixture alone
-                 fails, fixture + solution passes, fixture + naive fails (post-cutoff cases).
+                 fails, every solution*/ passes, every wrong-*/ fails, and naive/ (post-cutoff
+                 cases) fails the way the case's stratum says. Also proves the suppression scan
+                 on tests/fixtures/evals/suppressions.
   prepare-packs  --llm-docs <cli entry> [--cases <globs>]
                  Build each case's docs pack with the llm-docs CLI into .cache/packs/<id>.
   plan           [--cases] [--arms] [--runs N] [--model M] [--max-budget-usd-per-run X]
@@ -164,6 +170,96 @@ class UsageError extends Error {}
 /* selftest                                                                                   */
 /* ------------------------------------------------------------------------------------------ */
 
+/**
+ * One workspace the selftest grades: the bare fixture or the fixture with one overlay directory.
+ * `solution*` overlays must pass, `wrong-*` overlays (solutions a check once let through, or must
+ * keep rejecting) must fail, and `naive` must fail the way the case's stratum says.
+ */
+interface SelftestVariant {
+  evalCase: EvalCase;
+  name: string;
+  expect: 'pass' | 'fail' | 'naive';
+}
+
+async function selftestVariants(evalCase: EvalCase): Promise<SelftestVariant[] | string> {
+  const dirs = (await readdir(evalCase.dir, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  if (!dirs.includes('solution')) {
+    return 'solution/ is missing';
+  }
+  const hasNaive = dirs.includes('naive');
+  if (evalCase.kind === 'post-cutoff' && !hasNaive) {
+    return 'naive/ is missing; a post-cutoff case needs it to prove its stratum';
+  }
+  if (evalCase.kind === 'control' && hasNaive) {
+    return 'naive/ is for post-cutoff cases; a control has no wrong from-memory solution';
+  }
+  const variants: SelftestVariant[] = [{ evalCase, name: 'fixture', expect: 'fail' }];
+  for (const name of dirs) {
+    if (/^solution(-[a-z0-9-]+)?$/.test(name)) {
+      variants.push({ evalCase, name, expect: 'pass' });
+    } else if (/^wrong-[a-z0-9-]+$/.test(name)) {
+      variants.push({ evalCase, name, expect: 'fail' });
+    } else if (name === 'naive') {
+      variants.push({ evalCase, name, expect: 'naive' });
+    } else if (!['fixture', 'checks'].includes(name)) {
+      return `${name}/ is not a known case directory (fixture, checks, solution*, wrong-*, naive)`;
+    }
+  }
+  return variants;
+}
+
+/**
+ * What the from-memory solution must do for the case's stratum, or null when it does it. It must
+ * fail for the reason the stratum names, never for a trivial one such as a changed lockfile.
+ */
+function naiveProblem(evalCase: EvalCase, results: CheckResult[]): string | null {
+  const passed = (name: string): boolean | undefined =>
+    results.find((result) => result.name === name)?.passed;
+  const trivial = results.filter(
+    (result) => !result.passed && !STRATUM_CHECKS.some((name) => name === result.name)
+  );
+  if (trivial.length > 0) {
+    return `naive must fail only ${STRATUM_CHECKS.join(' or ')}`;
+  }
+  if (evalCase.stratum === 'type-visible' && passed('typecheck') !== false) {
+    return 'type-visible requires naive to fail typecheck';
+  }
+  if (
+    evalCase.stratum === 'type-invisible' &&
+    (passed('typecheck') !== true || passed('behaviour') !== false)
+  ) {
+    return 'type-invisible requires naive to pass typecheck and fail behaviour';
+  }
+  return null;
+}
+
+const SUPPRESSION_FIXTURES = join(EVALS_DIR, '..', 'tests', 'fixtures', 'evals', 'suppressions');
+
+/**
+ * The suppression scan must flag exactly the suppressions in code that `expected.json` lists and
+ * nothing in comments, strings, templates, regexes, Svelte markup prose, or the agent's own tests.
+ */
+async function selftestSuppressionScan(templateDir: string): Promise<string[]> {
+  const expected = await readJsonFile(join(SUPPRESSION_FIXTURES, 'expected.json'));
+  if (!Array.isArray(expected) || !expected.every((hit) => typeof hit === 'string')) {
+    return [
+      `${relative(process.cwd(), SUPPRESSION_FIXTURES)}/expected.json must be a string array`,
+    ];
+  }
+  const found = await findTypeSuppressions(join(SUPPRESSION_FIXTURES, 'src'), templateDir);
+  const missed = expected.filter((hit) => !found.includes(hit));
+  const extra = found.filter((hit) => !expected.includes(hit));
+  if (missed.length === 0 && extra.length === 0) {
+    log(`ok   suppression scan flags exactly the ${expected.length} expected suppressions`);
+    return [];
+  }
+  log('BAD  suppression scan');
+  return [`suppression scan: missed [${missed.join('; ')}], flagged wrongly [${extra.join('; ')}]`];
+}
+
 async function selftest(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
@@ -188,28 +284,22 @@ async function selftest(argv: string[]): Promise<number> {
     templates.set(evalCase.id, await ensureTemplate(evalCase, log));
   }
 
-  const variants = cases.flatMap((evalCase) => {
-    const list: Array<{
-      evalCase: EvalCase;
-      name: string;
-      overlayDir: string | null;
-      expectPass: boolean;
-    }> = [
-      { evalCase, name: 'fixture', overlayDir: null, expectPass: false },
-      { evalCase, name: 'solution', overlayDir: join(evalCase.dir, 'solution'), expectPass: true },
-    ];
-    if (evalCase.kind === 'post-cutoff') {
-      list.push({
-        evalCase,
-        name: 'naive',
-        overlayDir: join(evalCase.dir, 'naive'),
-        expectPass: false,
-      });
-    }
-    return list;
-  });
+  const firstTemplate = templates.values().next().value;
+  if (firstTemplate !== undefined) {
+    failures.push(...(await selftestSuppressionScan(firstTemplate)));
+  }
 
-  await pool(variants, concurrency, async ({ evalCase, name, overlayDir, expectPass }) => {
+  const variants: SelftestVariant[] = [];
+  for (const evalCase of cases) {
+    const found = await selftestVariants(evalCase);
+    if (typeof found === 'string') {
+      failures.push(`${evalCase.id}: ${found}`);
+    } else {
+      variants.push(...found);
+    }
+  }
+
+  await pool(variants, concurrency, async ({ evalCase, name, expect }) => {
     const label = `${evalCase.id}/${name}`;
     const dir = join(root, `${evalCase.id}-${name}`);
     const template = templates.get(evalCase.id);
@@ -217,28 +307,33 @@ async function selftest(argv: string[]): Promise<number> {
       return;
     }
     try {
-      if (overlayDir !== null && !existsSync(overlayDir)) {
-        failures.push(`${label}: ${relative(EVALS_DIR, overlayDir)} is missing`);
-        return;
-      }
       await createWorkspace(evalCase, template, dir);
-      if (overlayDir !== null) {
-        await overlay(overlayDir, dir);
+      if (name !== 'fixture') {
+        await overlay(join(evalCase.dir, name), dir);
       }
       const results = await gradeWorkspace(evalCase, dir);
       const passed = results.every((result) => result.passed);
       const failed = results.filter((result) => !result.passed);
-      const ok = passed === expectPass;
+      const problem =
+        expect === 'naive'
+          ? naiveProblem(evalCase, results)
+          : passed === (expect === 'pass')
+            ? null
+            : `expected to ${expect}`;
       const verdict = passed
         ? 'passes'
         : `fails (${failed.map((result) => result.name).join(', ')})`;
-      log(
-        `${ok ? 'ok  ' : 'BAD '} ${label} ${verdict}${expectPass ? '' : ', as expected to fail'}`
-      );
-      if (!ok) {
+      const expected =
+        expect === 'naive'
+          ? `, as ${evalCase.stratum} requires`
+          : expect === 'fail'
+            ? ', as expected to fail'
+            : '';
+      log(`${problem === null ? 'ok  ' : 'BAD '} ${label} ${verdict}${expected}`);
+      if (problem !== null) {
         const details = failed.map((result) => `  [${result.name}] ${result.detail}`).join('\n');
         failures.push(
-          `${label}: expected to ${expectPass ? 'pass' : 'fail'} but ${verdict}\n${details}\n  workspace kept at ${dir}`
+          `${label}: ${problem} but ${verdict}\n${details}\n  workspace kept at ${dir}`
         );
       } else if (!values.keep) {
         await rm(dir, { recursive: true, force: true });
@@ -506,14 +601,20 @@ async function plan(argv: string[]): Promise<number> {
   const planned = planRuns(cases, arms, runs);
 
   process.stdout.write(`Model ${model}, ${runs} run(s) per cell, arms ${arms.join(', ')}\n\n`);
-  process.stdout.write(`${'case'.padEnd(18)} ${'kind'.padEnd(12)} ${'library'.padEnd(40)} runs\n`);
+  process.stdout.write(
+    `${'case'.padEnd(20)} ${'stratum'.padEnd(15)} ${'library'.padEnd(40)} ${'pkg docs'.padEnd(9)} runs\n`
+  );
   for (const evalCase of cases) {
     const library = `${evalCase.library.name}@${evalCase.library.version}`;
     process.stdout.write(
-      `${evalCase.id.padEnd(18)} ${evalCase.kind.padEnd(12)} ${library.padEnd(40)} ${arms.length * runs}\n`
+      `${evalCase.id.padEnd(20)} ${evalCase.stratum.padEnd(15)} ${library.padEnd(40)} ${evalCase.packageDocumentsAnswer.padEnd(9)} ${arms.length * runs}\n`
     );
   }
-  process.stdout.write(`\nTotal runs: ${planned.length}\n`);
+  const perStratum = STRATA.map(
+    (stratum) => `${cases.filter((evalCase) => evalCase.stratum === stratum).length} ${stratum}`
+  );
+  process.stdout.write(`\n${cases.length} case(s): ${perStratum.join(', ')}\n`);
+  process.stdout.write(`Total runs: ${planned.length}\n`);
   process.stdout.write(
     `Assumed cost: $${(planned.length * low).toFixed(2)} to $${(planned.length * high).toFixed(2)} ` +
       `($${low.toFixed(2)} to $${high.toFixed(2)} per run)\n`
@@ -736,6 +837,7 @@ async function executeRun(
     runId,
     caseId: evalCase.id,
     kind: evalCase.kind,
+    stratum: evalCase.stratum,
     arm,
     repeat,
     model: settings.model,
@@ -1111,6 +1213,11 @@ async function executePlan(plan: EvalPlan): Promise<{ rows: RunRow[]; exitCode: 
       arms,
       gitCommit: commit,
       segments: [...priorSegments, segment],
+      cases: cases.map((evalCase) => ({
+        id: evalCase.id,
+        stratum: evalCase.stratum,
+        packageDocumentsAnswer: evalCase.packageDocumentsAnswer,
+      })),
     };
     await writeJsonFileSafely(join(resultsDir, 'results.json'), {
       meta: {
@@ -1118,6 +1225,8 @@ async function executePlan(plan: EvalPlan): Promise<{ rows: RunRow[]; exitCode: 
         cases: cases.map((evalCase) => ({
           id: evalCase.id,
           kind: evalCase.kind,
+          stratum: evalCase.stratum,
+          packageDocumentsAnswer: evalCase.packageDocumentsAnswer,
           library: evalCase.library,
         })),
         maxBudgetUsdPerRun: settings.perRunUsd,

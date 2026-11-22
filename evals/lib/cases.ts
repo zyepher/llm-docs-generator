@@ -12,6 +12,28 @@ export const CACHE_DIR = join(EVALS_DIR, '.cache');
 export const RESULTS_DIR = join(EVALS_DIR, 'results');
 
 export type CaseKind = 'post-cutoff' | 'control';
+
+/**
+ * How visible the post-cutoff change is to an agent that never reads documentation. The selftest
+ * enforces the label against what the `naive/` solution actually does.
+ *
+ * - `type-visible`: the from-memory solution fails the type check, so the compiler points at the
+ *   change.
+ * - `type-invisible`: the from-memory solution type-checks and fails only the behaviour checks, so
+ *   nothing in the edit-compile loop says anything changed.
+ * - `control`: a library version the model has known for years.
+ */
+export const STRATA = ['type-visible', 'type-invisible', 'control'] as const;
+export type Stratum = (typeof STRATA)[number];
+
+/**
+ * Whether the installed package itself states the answer: in its `.d.ts` or JSDoc (`types`), in
+ * prose or agent files it ships such as README, CHANGELOG, AGENTS.md, or ai-docs/ (`docs`), or
+ * not at all (`none`). Evidence for readers of the results; never used for grading.
+ */
+export const PACKAGE_DOCUMENTS_ANSWER = ['types', 'docs', 'none'] as const;
+export type PackageDocumentsAnswer = (typeof PACKAGE_DOCUMENTS_ANSWER)[number];
+
 export const ARMS = ['baseline', 'pack', 'plugin'] as const;
 export type Arm = (typeof ARMS)[number];
 
@@ -19,6 +41,8 @@ export interface EvalCase {
   id: string;
   title: string;
   kind: CaseKind;
+  stratum: Stratum;
+  packageDocumentsAnswer: PackageDocumentsAnswer;
   library: { name: string; version: string; released: string };
   notes: string;
   maxTurns: number;
@@ -44,6 +68,20 @@ export interface PackRecipe {
   /** Source types the recipe uses, so prepare-packs can check CLI support up front. */
   sourceTypes: string[];
 }
+
+/**
+ * Test files the agent writes are not graded unless the task says so. The suppression scan skips
+ * them, and every case's `checks/tsconfig.eval.json` must exclude them (lintCase checks it).
+ */
+export const AGENT_TEST_GLOBS = [
+  'src/**/*.test.ts',
+  'src/**/*.spec.ts',
+  'src/**/*.test-d.ts',
+  'src/**/__tests__/**',
+];
+
+/** The check names the selftest reads to enforce a post-cutoff case's stratum. */
+export const STRATUM_CHECKS = ['typecheck', 'behaviour'] as const;
 
 /** Sentences every task prompt must contain, so all cases share the same ground rules. */
 export const REQUIRED_TASK_LINES = [
@@ -148,6 +186,26 @@ async function loadCase(id: string): Promise<EvalCase> {
   if (kind !== 'post-cutoff' && kind !== 'control') {
     fail(id, 'kind must be "post-cutoff" or "control"');
   }
+  const stratum = STRATA.find((candidate) => candidate === raw.stratum);
+  if (stratum === undefined) {
+    fail(id, `stratum must be one of ${STRATA.join(', ')}`);
+  }
+  if ((stratum === 'control') !== (kind === 'control')) {
+    fail(id, 'stratum is "control" exactly when kind is "control"');
+  }
+  const packageDocumentsAnswer = PACKAGE_DOCUMENTS_ANSWER.find(
+    (candidate) => candidate === raw.packageDocumentsAnswer
+  );
+  if (packageDocumentsAnswer === undefined) {
+    fail(id, `packageDocumentsAnswer must be one of ${PACKAGE_DOCUMENTS_ANSWER.join(', ')}`);
+  }
+  const notes = requireString(id, raw.notes, 'notes');
+  if (packageDocumentsAnswer !== 'none' && !/node_modules\/\S+:\d+/.test(notes)) {
+    fail(
+      id,
+      `packageDocumentsAnswer is "${packageDocumentsAnswer}", so notes must cite the evidence as node_modules/<file>:<line>`
+    );
+  }
   const library = raw.library;
   if (!isRecord(library)) {
     fail(id, 'library must be an object');
@@ -173,6 +231,12 @@ async function loadCase(id: string): Promise<EvalCase> {
   if (names.size !== checks.length) {
     fail(id, 'check names must be unique');
   }
+  if (stratum !== 'control' && !STRATUM_CHECKS.every((name) => names.has(name))) {
+    fail(
+      id,
+      `a post-cutoff case needs checks named ${STRATUM_CHECKS.join(' and ')}, which the selftest reads to enforce its stratum`
+    );
+  }
   if (!checks.some((check) => check.kind === 'builtin' && check.builtin === 'deps-unchanged')) {
     fail(id, 'checks must include the deps-unchanged builtin');
   }
@@ -181,12 +245,14 @@ async function loadCase(id: string): Promise<EvalCase> {
     id,
     title: requireString(id, raw.title, 'title'),
     kind,
+    stratum,
+    packageDocumentsAnswer,
     library: {
       name: requireString(id, library.name, 'library.name'),
       version: requireString(id, library.version, 'library.version'),
       released,
     },
-    notes: requireString(id, raw.notes, 'notes'),
+    notes,
     maxTurns: requirePositiveInt(id, raw.maxTurns, 'maxTurns'),
     timeoutSeconds: requirePositiveInt(id, raw.timeoutSeconds, 'timeoutSeconds'),
     dir,
@@ -275,6 +341,15 @@ export async function lintCase(evalCase: EvalCase): Promise<string[]> {
   }
   if (!existsSync(join(fixtureDir, 'package-lock.json'))) {
     problems.push('fixture/package-lock.json is missing');
+  }
+  const evalConfig = await readJsonFile(join(evalCase.dir, 'checks', 'tsconfig.eval.json'));
+  const excluded =
+    isRecord(evalConfig) && Array.isArray(evalConfig.exclude) ? evalConfig.exclude : [];
+  const missing = AGENT_TEST_GLOBS.filter((glob) => !excluded.includes(glob));
+  if (missing.length > 0) {
+    problems.push(
+      `checks/tsconfig.eval.json must exclude the agent's own test files: add ${missing.join(', ')} to "exclude"`
+    );
   }
   return problems;
 }
