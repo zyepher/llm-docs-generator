@@ -5,6 +5,7 @@ import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
+import { normalizeRepositoryUrl } from '../src/core/package-discovery.js';
 import { errorMessage, isRecord } from '../src/utils/guards.js';
 import { sha256File } from '../src/utils/hash.js';
 import { readJsonFile, writeJsonFileSafely } from '../src/utils/json.js';
@@ -24,6 +25,16 @@ import {
   STRATA,
   STRATUM_CHECKS,
 } from './lib/cases.js';
+import {
+  checkHookNote,
+  type ExpectedHookNote,
+  expectedNoteProblems,
+  HOOK_NOTE_ATTEMPTS,
+  hookNotePath,
+  type NoteExpectation,
+  readExpectedHookNote,
+  settleHookNote,
+} from './lib/hook-note.js';
 import { installSignalHandlers, isShuttingDown, runProcess } from './lib/proc.js';
 import {
   type CaseRule,
@@ -45,6 +56,7 @@ import {
   type CouldNotRunReason,
   classifyOutcome,
   describeOutcome,
+  hookText,
   summarizeTranscript,
   TRANSIENT_REASONS,
 } from './lib/transcript.js';
@@ -70,8 +82,11 @@ Commands:
                  cases) fails the way the case's stratum says. Also proves the suppression scan
                  on tests/fixtures/evals/suppressions, and that every pack.json follows the
                  read-first rule (needs prepare-packs first).
-  prepare-packs  --llm-docs <cli entry> [--cases <globs>]
-                 Build each case's docs pack with the llm-docs CLI into .cache/packs/<id>.
+  prepare-packs  --llm-docs <cli entry> [--plugin-dir <path>] [--model M] [--cases <globs>]
+                 Build each case's docs pack with the llm-docs CLI into .cache/packs/<id>. With
+                 --plugin-dir, also run the plugin's session-start hook in each case's plugin-arm
+                 workspace (ANTHROPIC_MODEL=M, default claude-opus-5-5) and store the note it must
+                 inject; the plugin arm of run and smoke needs it.
   read-first-rule [--cases <globs>] [--write] [--refresh]
                  Compute each pack's readFirst from discover's change documents and the prepared
                  pack's pages (evals/README.md states the rule), print the table, and exit 1 when
@@ -445,10 +460,111 @@ async function assertCliSupports(cliPath: string, cases: EvalCase[]): Promise<vo
   }
 }
 
+function pluginBundlePath(pluginDir: string): string {
+  return join(pluginDir, 'bin', 'llm-docs.mjs');
+}
+
+/** A repository URL as normalizeRepositoryUrl writes it, lowercased; null when it is not one. */
+function repositoryKey(declared: unknown): string | null {
+  const url = isRecord(declared) ? declared.url : declared;
+  if (typeof url !== 'string') {
+    return null;
+  }
+  const normalized = normalizeRepositoryUrl(url);
+  return 'url' in normalized ? normalized.url.toLowerCase() : null;
+}
+
+/**
+ * What prepare-packs checks in a case's expected note (`expectedNoteProblems`): which of the
+ * fixture's direct dependencies come from one of the pack's source repositories, read from the
+ * installed package's own `repository` field.
+ */
+async function noteExpectation(evalCase: EvalCase, templateDir: string): Promise<NoteExpectation> {
+  const sources = Array.isArray(evalCase.pack.pack.sources) ? evalCase.pack.pack.sources : [];
+  const packRepositories = new Set(
+    sources.flatMap((source) => {
+      const key = isRecord(source) && source.type === 'git' ? repositoryKey(source.repo) : null;
+      return key === null ? [] : [key];
+    })
+  );
+  const manifest = await readJsonFile(join(evalCase.dir, 'fixture', 'package.json'));
+  const names = (field: string): string[] =>
+    isRecord(manifest) && isRecord(manifest[field]) ? Object.keys(manifest[field]) : [];
+  const dependencies = [];
+  for (const name of [...names('dependencies'), ...names('devDependencies')]) {
+    const installed = await readJsonFile(join(templateDir, 'node_modules', name, 'package.json'));
+    const key = isRecord(installed) ? repositoryKey(installed.repository) : null;
+    dependencies.push({ name, sharesPackRepository: key !== null && packRepositories.has(key) });
+  }
+  const binding = evalCase.pack.pack.dependency;
+  return {
+    kind: evalCase.kind,
+    packId: evalCase.pack.id,
+    library: evalCase.library.name,
+    boundDependency: isRecord(binding) && typeof binding.name === 'string' ? binding.name : null,
+    dependencies,
+  };
+}
+
+/**
+ * The note the plugin's hook gives the agent in this case's plugin-arm workspace, run as Claude
+ * Code runs it (hooks/hooks.json): `node <plugin>/bin/llm-docs.mjs hook session-start` in the
+ * workspace, the headless payload on stdin, and the session's environment. The workspace lives
+ * under the OS temp directory like run's, because the hook looks for a CLAUDE.md above the project.
+ */
+async function computeHookNote(
+  evalCase: EvalCase,
+  pluginDir: string,
+  model: string,
+  root: string
+): Promise<{ note: string } | { failure: string }> {
+  const dir = join(root, `${evalCase.id}-plugin-1`);
+  await mkdir(dir, { recursive: true });
+  await cp(join(evalCase.dir, 'fixture', 'package.json'), join(dir, 'package.json'));
+  await cp(join(evalCase.dir, 'fixture', 'package-lock.json'), join(dir, 'package-lock.json'));
+  await copyPackInto(evalCase, dir);
+  // The payload a headless session sends (measured with Claude Code 2.1.330): no model in it.
+  const payload = JSON.stringify({
+    session_id: 'prepare-packs',
+    transcript_path: join(dir, 'transcript.jsonl'),
+    cwd: dir,
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+  });
+  const settled = await settleHookNote(async () => {
+    const result = await runProcess(
+      'node',
+      [pluginBundlePath(pluginDir), 'hook', 'session-start'],
+      {
+        cwd: dir,
+        env: { ...agentEnv(model), CLAUDECODE: '1' },
+        timeoutMs: 30_000,
+        input: payload,
+      }
+    );
+    return hookText(result.stdout);
+  });
+  if ('outputs' in settled) {
+    return {
+      failure: `the plugin hook did not print the same non-empty note twice in a row in ${HOOK_NOTE_ATTEMPTS} runs (lengths ${settled.outputs.map((output) => output.length).join(', ')}); a loaded machine makes it miss its deadline, so prepare again when the machine is quieter, or read hook.log in ${LLM_DOCS_CACHE_DIR}`,
+    };
+  }
+  // The session's workspace has another path, so a note that names this one could never match.
+  if (settled.note.includes(tmpdir())) {
+    return { failure: `the hook's note names the workspace path:\n${settled.note}` };
+  }
+  return settled;
+}
+
 async function preparePacks(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
-    options: { cases: { type: 'string' }, 'llm-docs': { type: 'string' } },
+    options: {
+      cases: { type: 'string' },
+      'llm-docs': { type: 'string' },
+      'plugin-dir': { type: 'string' },
+      model: { type: 'string' },
+    },
   });
   const cliArg = values['llm-docs'];
   if (cliArg === undefined) {
@@ -458,11 +574,21 @@ async function preparePacks(argv: string[]): Promise<number> {
   if (!existsSync(cliPath)) {
     throw new UsageError(`llm-docs CLI not found at ${cliPath}`);
   }
+  const pluginDir = values['plugin-dir'] === undefined ? null : resolve(values['plugin-dir']);
+  if (pluginDir !== null && !existsSync(pluginBundlePath(pluginDir))) {
+    throw new UsageError(
+      `${pluginBundlePath(pluginDir)} does not exist; --plugin-dir takes the llm-docs plugin directory`
+    );
+  }
+  const model = values.model ?? DEFAULT_MODEL;
   const cases = await loadCases(values.cases);
 
   await assertCliSupports(cliPath, cases);
 
   const failures: string[] = [];
+  const warnings: string[] = [];
+  await mkdir(join(tmpdir(), 'llm-docs-evals'), { recursive: true });
+  const noteRoot = await mkdtemp(join(tmpdir(), 'llm-docs-evals', 'hook-note-'));
   for (const evalCase of cases) {
     const dir = join(PACK_CACHE_DIR, evalCase.id);
     log(`preparing pack ${evalCase.pack.id} for ${evalCase.id}`);
@@ -519,13 +645,50 @@ async function preparePacks(argv: string[]): Promise<number> {
       log(`warning: llm-docs status failed for ${evalCase.id}; the hook may lack release dates`);
     }
 
+    if (pluginDir !== null) {
+      const computed = await computeHookNote(evalCase, pluginDir, model, noteRoot);
+      if ('failure' in computed) {
+        failures.push(`${evalCase.id}: ${computed.failure}`);
+        continue;
+      }
+      const problems = expectedNoteProblems(
+        computed.note,
+        await noteExpectation(evalCase, await ensureTemplate(evalCase, log))
+      );
+      warnings.push(...problems.warnings.map((warning) => `${evalCase.id}: ${warning}`));
+      if (problems.failures.length > 0) {
+        failures.push(
+          ...problems.failures.map(
+            (problem) => `${evalCase.id}: ${problem} (the pack recipe is bound to the wrong thing)`
+          )
+        );
+        continue;
+      }
+      const stored: ExpectedHookNote = {
+        model,
+        pluginBundle: await sha256File(pluginBundlePath(pluginDir)),
+        note: computed.note,
+      };
+      await writeJsonFileSafely(hookNotePath(evalCase.id), stored);
+      log(`${evalCase.id}: expected hook note stored (${computed.note.length} characters)`);
+    }
+
     await writeJsonFileSafely(join(dir, PREPARED_STAMP), {
       pack: packFingerprint(evalCase),
       cli: cliPath,
       preparedAt: new Date().toISOString(),
     });
   }
+  await rm(noteRoot, { recursive: true, force: true });
 
+  for (const warning of warnings) {
+    log(`WARNING ${warning}`);
+  }
+  if (pluginDir === null) {
+    log(
+      'no expected hook notes computed (no --plugin-dir): run and smoke refuse the plugin arm until prepare-packs runs with --plugin-dir'
+    );
+  }
   if (failures.length > 0) {
     log(`prepare-packs FAILED:\n${failures.join('\n')}`);
     return 1;
@@ -731,6 +894,18 @@ async function plan(argv: string[]): Promise<number> {
   } else {
     process.stdout.write(`No previous ${model} runs in evals/results to estimate from.\n`);
   }
+  if (arms.includes('plugin')) {
+    const ready = (
+      await Promise.all(cases.map((evalCase) => readExpectedHookNote(evalCase.id)))
+    ).filter((stored) => stored?.model === model).length;
+    process.stdout.write(
+      `\nThe plugin arm asserts that each session's hook gave the note prepare-packs stored for ${model}: ` +
+        `${ready} of ${cases.length} case(s) have one.` +
+        (ready < cases.length
+          ? ` Run \`npm run eval -- prepare-packs --llm-docs dist/cli.js --plugin-dir plugin --model ${model}\` first.\n`
+          : '\n')
+    );
+  }
   process.stdout.write(
     `\nBefore a full run, prove the pipeline with \`npm run eval -- smoke\`: case ${SMOKE_CASE} (or --case <id>) ` +
       `once per arm (${arms.join(', ')}) = ${arms.length} session(s) with the same invocation as run, ` +
@@ -745,10 +920,13 @@ async function plan(argv: string[]): Promise<number> {
 /* ------------------------------------------------------------------------------------------ */
 
 /**
+ * The environment of every agent session, and of the hook run that computes its expected note.
  * The parent session's Claude Code variables must not leak into the agent under test (they carry
- * the parent's session id, effort level, and entrypoint).
+ * the parent's session id, effort level, and entrypoint). `ANTHROPIC_MODEL` names the evaluated
+ * model: a headless session's SessionStart payload names none, so without it the plugin's hook
+ * falls back to the operator's own `model` setting and states the wrong training cutoff.
  */
-function agentEnv(): NodeJS.ProcessEnv {
+export function agentEnv(model: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (key === 'CLAUDECODE' || key.startsWith('CLAUDE_CODE_')) {
@@ -768,19 +946,27 @@ function agentEnv(): NodeJS.ProcessEnv {
     env[key] = value;
   }
   env.LLM_DOCS_CACHE_DIR = LLM_DOCS_CACHE_DIR;
+  env.ANTHROPIC_MODEL = model;
   return env;
 }
 
-interface RunSettings {
+export interface RunSettings {
   model: string;
   perRunUsd: number;
   pluginDir: string | null;
   /** `name` from the plugin's manifest, which the plugin arm asserts the session loaded. */
   pluginName: string | null;
+  /** Case id to the note prepare-packs stored, which the plugin arm asserts its hook gave. */
+  hookNotes: ReadonlyMap<string, string>;
   effort: string | null;
 }
 
-function claudeArgs(evalCase: EvalCase, arm: Arm, settings: RunSettings): string[] {
+/** The `claude` arguments and environment of one session; only the arguments differ by arm. */
+export function agentInvocation(
+  evalCase: EvalCase,
+  arm: Arm,
+  settings: RunSettings
+): { args: string[]; env: NodeJS.ProcessEnv } {
   const args = [
     '-p',
     evalCase.task,
@@ -811,7 +997,7 @@ function claudeArgs(evalCase: EvalCase, arm: Arm, settings: RunSettings): string
   }
   // Variadic option last, so it cannot swallow anything that follows.
   args.push('--allowedTools', ...ALLOWED_TOOLS);
-  return args;
+  return { args, env: agentEnv(settings.model) };
 }
 
 async function copyPackInto(evalCase: EvalCase, dir: string): Promise<void> {
@@ -856,11 +1042,11 @@ async function saveAgentFiles(evalCase: EvalCase, dir: string, outFile: string):
   await writeJsonFileSafely(outFile, files);
 }
 
-async function claudeVersion(): Promise<string> {
+async function claudeVersion(model: string): Promise<string> {
   const result = await runProcess('claude', ['--version'], {
     cwd: EVALS_DIR,
     timeoutMs: 30_000,
-    env: agentEnv(),
+    env: agentEnv(model),
   });
   if (result.exitCode !== 0) {
     throw new UsageError(`claude --version failed: ${result.spawnError ?? result.stderr}`);
@@ -949,6 +1135,7 @@ async function executeRun(
     toolCalls: {},
     permissionDenials: [],
     sessionStartHooks: [],
+    hookNote: null,
     session: null,
     armAssertions: [],
     infraError: null,
@@ -967,9 +1154,10 @@ async function executeRun(
 
   try {
     const transcriptPath = join(runDir, 'transcript.jsonl');
-    const agent = await runProcess('claude', claudeArgs(evalCase, arm, settings), {
+    const invocation = agentInvocation(evalCase, arm, settings);
+    const agent = await runProcess('claude', invocation.args, {
       cwd: dir,
-      env: agentEnv(),
+      env: invocation.env,
       timeoutMs: evalCase.timeoutSeconds * 1000,
       stdoutFile: transcriptPath,
     });
@@ -987,6 +1175,7 @@ async function executeRun(
 
     const summary = summarizeTranscript(await readFile(transcriptPath, 'utf8'));
     const outcome = classifyOutcome(summary, agent);
+    const expectedNote = arm === 'plugin' ? (settings.hookNotes.get(evalCase.id) ?? '') : null;
     const armAssertions =
       outcome.kind === 'could-not-run'
         ? []
@@ -994,6 +1183,7 @@ async function executeRun(
             model: settings.model,
             packId: evalCase.pack.id,
             pluginName: settings.pluginName,
+            hookNote: expectedNote,
           });
     const observed: RunRow = {
       ...base,
@@ -1012,6 +1202,8 @@ async function executeRun(
       toolCalls: summary.toolCalls,
       permissionDenials: summary.result?.permissionDenials ?? [],
       sessionStartHooks: summary.sessionStartHooks,
+      hookNote:
+        expectedNote === null ? null : checkHookNote(expectedNote, summary.sessionStartHooks),
       session: summary.session,
       armAssertions,
     };
@@ -1036,8 +1228,24 @@ async function executeRun(
   }
 }
 
-/** In-place retries for a rate limit or an overload: wait 30 s, retry, wait 120 s, retry, give up. */
+/** In-place retries for a transient condition: wait 30 s, retry, wait 120 s, retry, give up. */
 export const TRANSIENT_BACKOFF_MS = [30_000, 120_000] as const;
+
+/**
+ * Transient conditions: a rate limit or an overload, and a plugin hook that gave the agent nothing
+ * when that was the only thing wrong (it missed its deadline on a loaded machine). A hook that gave
+ * a different note is not retried: a rerun on the same machine would say the same.
+ */
+function isTransient(row: RunRow): boolean {
+  const reason = couldNotRunReason(row);
+  if (reason !== null) {
+    return TRANSIENT_REASONS.has(reason);
+  }
+  return (
+    row.hookNote?.verdict === 'empty' &&
+    row.armAssertions.filter((assertion) => !assertion.passed).length === 1
+  );
+}
 
 /** Exit code when the account ran out of quota or lost its login partway through. */
 const EXIT_ACCOUNT_STOP = 4;
@@ -1075,8 +1283,8 @@ function couldNotRunReason(row: RunRow): CouldNotRunReason | null {
 }
 
 /**
- * Runs `todo` in order on `concurrency` lanes. A rate limit or overload is retried in place with
- * backoff. The first usage-limit, auth, or billing outcome stops the schedule: no new run starts,
+ * Runs `todo` in order on `concurrency` lanes. A transient condition (`isTransient`) is retried in
+ * place with backoff. The first usage-limit, auth, or billing outcome stops the schedule: no new run starts,
  * runs already in flight finish and are recorded. Returns that stop, or null when every run got
  * its turn.
  */
@@ -1093,8 +1301,7 @@ export async function runSchedule(
     let row = await scheduler.runSession(run);
     let attempts = 1;
     for (const backoffMs of TRANSIENT_BACKOFF_MS) {
-      const reason = couldNotRunReason(row);
-      if (stop !== null || reason === null || !TRANSIENT_REASONS.has(reason)) {
+      if (stop !== null || !isTransient(row)) {
         break;
       }
       await scheduler.sleep(backoffMs);
@@ -1221,8 +1428,34 @@ async function resolveSettings(
     }
     pluginName = manifest.name;
   }
+  const model = values.model ?? DEFAULT_MODEL;
+  const hookNotes = new Map<string, string>();
   if (arms.some((arm) => arm !== 'baseline')) {
     await assertPacksPrepared(cases);
+  }
+  if (pluginDir !== null && arms.includes('plugin')) {
+    const bundle = await sha256File(pluginBundlePath(pluginDir));
+    const prepare = `prepare-packs --llm-docs dist/cli.js --plugin-dir ${relative(process.cwd(), pluginDir) || '.'} --model ${model}`;
+    const problems: string[] = [];
+    for (const evalCase of cases) {
+      const stored = await readExpectedHookNote(evalCase.id);
+      if (stored === null) {
+        problems.push(`${evalCase.id}: no expected hook note; the plugin arm needs \`${prepare}\``);
+      } else if (stored.model !== model) {
+        problems.push(
+          `${evalCase.id}: the expected hook note is for model ${stored.model}, not ${model}; run \`${prepare}\``
+        );
+      } else if (stored.pluginBundle !== bundle) {
+        problems.push(
+          `${evalCase.id}: the plugin's bin/llm-docs.mjs changed since its expected hook note was computed; run \`${prepare}\``
+        );
+      } else {
+        hookNotes.set(evalCase.id, stored.note);
+      }
+    }
+    if (problems.length > 0) {
+      throw new UsageError(problems.join('\n'));
+    }
   }
   const resultsDir = values.resume === undefined ? freshResultsDir : resolve(values.resume);
   if (values.resume !== undefined && !existsSync(resultsDir)) {
@@ -1231,7 +1464,7 @@ async function resolveSettings(
   return {
     arms,
     settings: {
-      model: values.model ?? DEFAULT_MODEL,
+      model,
       perRunUsd: parsePositiveNumber(
         values['max-budget-usd-per-run'],
         '--max-budget-usd-per-run',
@@ -1239,6 +1472,7 @@ async function resolveSettings(
       ),
       pluginDir,
       pluginName,
+      hookNotes,
       effort: values.effort ?? null,
     },
     maxTotalUsd: parsePositiveNumber(
@@ -1265,7 +1499,7 @@ async function executePlan(plan: EvalPlan): Promise<{ rows: RunRow[]; exitCode: 
     `${planned.length} planned run(s), ${planned.length - todo.length} already done, ${todo.length} to run`
   );
 
-  const version = await claudeVersion();
+  const version = await claudeVersion(settings.model);
   const commit = await gitCommit();
   const templates = new Map<string, string>();
   for (const evalCase of cases) {
@@ -1498,6 +1732,9 @@ async function smoke(argv: string[]): Promise<number> {
           ? '  hook: did not run\n'
           : `  hook output: ${outputs.length === 0 ? '(ran, no output)' : outputs.join('\n  ')}\n`
       );
+      if (row.hookNote !== null && row.hookNote.verdict !== 'match') {
+        process.stdout.write(`  expected hook note: ${row.hookNote.expected}\n`);
+      }
     }
     for (const assertion of row.armAssertions) {
       process.stdout.write(

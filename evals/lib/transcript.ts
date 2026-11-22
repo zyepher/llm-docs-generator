@@ -103,8 +103,11 @@ function addedPlugins(value: unknown): Array<{ name: string; path: string }> {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** A SessionStart hook prints a JSON envelope; the agent sees its `additionalContext`. */
-function hookText(raw: string): string {
+/**
+ * A SessionStart hook prints a JSON envelope; the agent sees its `additionalContext`. prepare-packs
+ * reads the expected note from the hook's stdout with this too, so both sides parse alike.
+ */
+export function hookText(raw: string): string {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (isRecord(parsed) && isRecord(parsed.hookSpecificOutput)) {

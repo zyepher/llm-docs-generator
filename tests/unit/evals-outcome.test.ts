@@ -199,6 +199,7 @@ function rowFor(run: PlannedRun, outcome: SessionOutcome): RunRow {
     toolCalls: {},
     permissionDenials: [],
     sessionStartHooks: [],
+    hookNote: null,
     session: null,
     armAssertions: [],
     infraError: outcome.kind === 'could-not-run' ? `could not run (${outcome.reason})` : null,
@@ -214,8 +215,36 @@ const couldNotRun = (
   resetsAt: reason === 'usage-limit' ? '2026-11-22T15:45:00.000Z' : null,
 });
 
+/**
+ * A completed plugin session whose arm assertions failed on the hook note: `empty` when the hook
+ * gave nothing, `different` when it gave another note, `empty-unloaded` when the plugin also
+ * failed to load.
+ */
+type HookAttempt = 'empty' | 'different' | 'empty-unloaded';
+
+function hookRow(run: PlannedRun, attempt: HookAttempt): RunRow {
+  const verdict = attempt === 'different' ? 'different' : 'empty';
+  const failed = [
+    ...(attempt === 'empty-unloaded'
+      ? [{ name: 'plugin loaded', passed: false, detail: 'plugin llm-docs did not load' }]
+      : []),
+    { name: 'plugin hook note', passed: false, detail: `the note was ${verdict}` },
+  ];
+  return {
+    ...rowFor(run, { kind: 'completed' }),
+    passed: false,
+    hookNote: {
+      verdict,
+      expected: 'the stored note',
+      actual: verdict === 'empty' ? '' : 'another note',
+    },
+    armAssertions: [{ name: 'model', passed: true, detail: 'session model' }, ...failed],
+    infraError: `arm-invalid: ${failed.map((assertion) => assertion.detail).join('; ')}`,
+  };
+}
+
 /** A scheduler whose sessions answer from a script keyed by run id, one entry per attempt. */
-function scriptedScheduler(script: Record<string, SessionOutcome[]>) {
+function scriptedScheduler(script: Record<string, Array<SessionOutcome | HookAttempt>>) {
   const started: string[] = [];
   const recorded: RunRow[] = [];
   const slept: number[] = [];
@@ -223,8 +252,8 @@ function scriptedScheduler(script: Record<string, SessionOutcome[]>) {
     canStart: () => true,
     runSession: async (run) => {
       started.push(run.runId);
-      const outcome = script[run.runId]?.shift() ?? { kind: 'completed' };
-      return rowFor(run, outcome);
+      const attempt = script[run.runId]?.shift() ?? { kind: 'completed' };
+      return typeof attempt === 'string' ? hookRow(run, attempt) : rowFor(run, attempt);
     },
     record: async (row) => {
       recorded.push(row);
@@ -356,6 +385,39 @@ describe('scheduling', () => {
       infraError: 'could not run (overloaded)',
     });
     expect(fake.recorded[1]?.runId).toBe('a.pack.1');
+  });
+
+  it('retries a plugin session whose hook gave nothing in place, on the transient schedule', async () => {
+    const fake = scriptedScheduler({ 'a.plugin.1': ['empty', { kind: 'completed' }] });
+    expect(await runSchedule(planned.slice(0, 3), 1, fake.scheduler)).toBeNull();
+    expect(fake.slept).toEqual([30_000]);
+    expect(fake.recorded.map((row) => [row.runId, row.attempts, row.infraError])).toEqual([
+      ['a.baseline.1', 1, null],
+      ['a.pack.1', 1, null],
+      ['a.plugin.1', 2, null],
+    ]);
+  });
+
+  it('records a hook that stays silent as an infra error with both notes after two retries', async () => {
+    const fake = scriptedScheduler({ 'a.plugin.1': ['empty', 'empty', 'empty'] });
+    await runSchedule(planned.slice(2, 3), 1, fake.scheduler);
+    expect(fake.slept).toEqual([...TRANSIENT_BACKOFF_MS]);
+    expect(fake.recorded).toHaveLength(1);
+    expect(fake.recorded[0]).toMatchObject({
+      attempts: 3,
+      infraError: 'arm-invalid: the note was empty',
+      hookNote: { verdict: 'empty', expected: 'the stored note', actual: '' },
+    });
+  });
+
+  it('does not retry a hook that gave another note, or one that failed with the plugin', async () => {
+    for (const attempt of ['different', 'empty-unloaded'] as const) {
+      const fake = scriptedScheduler({ 'a.plugin.1': [attempt] });
+      await runSchedule(planned.slice(2, 3), 1, fake.scheduler);
+      expect(fake.slept).toEqual([]);
+      expect(fake.recorded[0]?.attempts).toBe(1);
+      expect(fake.recorded[0]?.infraError).toMatch(/^arm-invalid: /);
+    }
   });
 
   it('does not retry or stop on other could-not-run reasons', async () => {

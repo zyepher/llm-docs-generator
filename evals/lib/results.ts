@@ -1,5 +1,6 @@
 import { isRecord } from '../../src/utils/guards.js';
 import type { Arm, CaseKind, PackageDocumentsAnswer, Stratum } from './cases.js';
+import type { HookNoteCheck } from './hook-note.js';
 import {
   describeOutcome,
   type SessionOutcome,
@@ -37,6 +38,8 @@ export interface RunRow {
   toolCalls: Record<string, number>;
   permissionDenials: string[];
   sessionStartHooks: SessionStartHook[];
+  /** Plugin arm: the note prepare-packs expects, what the hook gave the agent, and the verdict. */
+  hookNote: HookNoteCheck | null;
   session: TranscriptSummary['session'];
   /** Evidence that the session ran the arm it claims; any failure makes the row an infra error. */
   armAssertions: ArmAssertion[];

@@ -4,6 +4,7 @@ import type { EvalCase } from '../../evals/lib/cases.js';
 import {
   applyReadFirstRule,
   type CaseRule,
+  namedMajors,
   namesMajor,
   type RuleOutput,
   ruleProblems,
@@ -76,6 +77,70 @@ describe('read-first rule', () => {
     expect(namesMajor('docs/dev2/upgrade.md', '2')).toBe(false);
     expect(namesMajor('docs/14.x/upgrade.md', '4')).toBe(false);
     expect(namesMajor('migration/support-2026-07-28.md', '2')).toBe(false);
+  });
+
+  it('reads every major a path names, in each recognized form, and none from a date', () => {
+    expect(namedMajors('guides/migrating-to-v5.md')).toEqual(['5']);
+    expect(namedMajors('docs/4.x/upgrade.md')).toEqual(['4']);
+    expect(namedMajors('appendix/30-migrating-to-sveltekit-2.md')).toEqual(['2']);
+    expect(namedMajors('packages/docs-v3/MIGRATION.md')).toEqual(['3']);
+    expect(namedMajors('migration/v3-to-v4.md')).toEqual(['3', '4']);
+    expect(namedMajors('migration/3-to-4.md')).toEqual(['4', '3']);
+    expect(namedMajors('blog/zod-4-6.md')).toEqual(['4', '6']);
+    expect(namedMajors('migration/support-2026-07-28.md')).toEqual([]);
+    expect(namedMajors('docs/dev2/CHANGELOG.md')).toEqual([]);
+    expect(namedMajors('docs/4.0_migration.md')).toEqual([]);
+  });
+
+  it('drops a candidate that names only other majors and keeps one that names the pinned major', () => {
+    const accepted = [
+      'docs/migration/upgrade-to-v4.md',
+      'docs/4.x/upgrade.md',
+      'appendix/35-migrating-to-v-4.md',
+      'migration/v3-to-v4.md',
+      'migration/4-to-5.md',
+      'docs-v4/MIGRATION.md',
+      'CHANGELOG.md',
+    ];
+    const rejected = [
+      'guides/migrating-to-v5.md',
+      'docs/3.x/upgrade.md',
+      'appendix/30-migrating-to-sveltekit-3.md',
+      'migration/v2-to-v3.md',
+      'migration/2-to-3.md',
+      'docs-v3/MIGRATION.md',
+      'docs/v14/upgrade.md',
+    ];
+    const documents: ChangeDocument[] = [...accepted, ...rejected].map((path) => ({
+      path,
+      pattern: path === 'CHANGELOG.md' ? 'changelog' : 'migration',
+    }));
+    const output = applyReadFirstRule({
+      documents,
+      takenPaths: ['.'],
+      pageOf: pagesFor(documents.map((document) => document.path)),
+      major: '4',
+    });
+
+    expect(output.candidates.map((candidate) => candidate.path).sort()).toEqual(
+      [...accepted].sort()
+    );
+    expect(output.additions).toEqual([]);
+  });
+
+  it('keeps a guide for another major in the taken paths while dropping it as a candidate', () => {
+    const output = applyReadFirstRule({
+      documents: [{ path: 'docs/guides/migrating-to-v5.md', pattern: 'migrating' }],
+      takenPaths: ['docs/api'],
+      pageOf: new Map(),
+      major: '4',
+    });
+
+    expect(output).toEqual({
+      additions: ['docs/guides/migrating-to-v5.md'],
+      candidates: [],
+      readFirst: [],
+    });
   });
 
   it('adds change documents outside the taken paths and takes only pages as candidates', () => {

@@ -53,6 +53,8 @@ export interface RunOptions {
   stdoutFile?: string;
   /** Bytes of combined output kept in memory (the tail is kept). */
   keepBytes?: number;
+  /** Written to stdin, which is then closed; stdin is /dev/null without it. */
+  input?: string;
 }
 
 export interface RunResult {
@@ -89,8 +91,8 @@ class TailBuffer {
 }
 
 /**
- * Run `command` without a shell, stdin from /dev/null, in a new process group. On timeout the
- * group gets SIGTERM, then SIGKILL after 10 seconds.
+ * Run `command` without a shell, stdin from `input` or /dev/null, in a new process group. On
+ * timeout the group gets SIGTERM, then SIGKILL after 10 seconds.
  */
 export function runProcess(
   command: string,
@@ -119,9 +121,14 @@ export function runProcess(
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env ?? process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       detached: true,
     });
+    if (options.input !== undefined) {
+      // A child that exits without reading its stdin must not crash the runner with EPIPE.
+      child.stdin?.on('error', () => undefined);
+      child.stdin?.end(options.input);
+    }
     const pid = child.pid;
     if (pid !== undefined) {
       liveGroups.add(pid);
@@ -131,14 +138,15 @@ export function runProcess(
       options.stdoutFile === undefined
         ? null
         : createWriteStream(options.stdoutFile, { flags: 'w' });
-    child.stdout.on('data', (chunk: Buffer) => {
+    // Both are pipes (stdio above); the optional chain only satisfies the computed stdio's type.
+    child.stdout?.on('data', (chunk: Buffer) => {
       if (fileStream) {
         fileStream.write(chunk);
       } else {
         stdoutTail.push(chunk);
       }
     });
-    child.stderr.on('data', (chunk: Buffer) => stderrTail.push(chunk));
+    child.stderr?.on('data', (chunk: Buffer) => stderrTail.push(chunk));
 
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;

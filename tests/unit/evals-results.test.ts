@@ -39,6 +39,7 @@ function row(caseId: string, stratum: Stratum, arm: Arm, repeat: number, passed:
     toolCalls: {},
     permissionDenials: [],
     sessionStartHooks: [],
+    hookNote: null,
     session: null,
     armAssertions: [],
     infraError: null,
