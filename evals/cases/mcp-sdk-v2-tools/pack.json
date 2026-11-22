@@ -7,6 +7,12 @@
       "ecosystem": "npm",
       "name": "@modelcontextprotocol/server"
     },
+    "covers": [
+      {
+        "ecosystem": "npm",
+        "name": "@modelcontextprotocol/client"
+      }
+    ],
     "sources": [
       {
         "type": "git",
