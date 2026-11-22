@@ -51,6 +51,8 @@ const originSchema = z.discriminatedUnion('type', [
   z.strictObject({
     type: z.literal('git'),
     repo: z.string(),
+    /** The repository the recipe's `repo` redirected to, which git fetched from. */
+    finalRepo: z.string().optional(),
     ref: z.string(),
     commit: z.string().regex(/^[0-9a-f]{40}$/),
     refKind: z.enum(['tag', 'branch', 'commit']),

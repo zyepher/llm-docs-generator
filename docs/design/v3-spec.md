@@ -250,7 +250,7 @@ no lock.
   "acquiredAt": "2026-11-05T10:00:00.000Z",
   "origins": [                          // one per source, same order as recipe.sources
     { "type": "git", "repo": "https://github.com/vitejs/vite", "ref": "v8.2.0",
-      "commit": "<40 hex>", "refKind": "tag" },
+      "commit": "<40 hex>", "refKind": "tag" },   // + "finalRepo" after a redirect
     { "type": "llms-txt", "url": "https://x.dev/llms.txt", "sha256": "sha256:..." },  // + "finalUrl" after a redirect
     { "type": "urls" },
     { "type": "local", "path": "manuals", "hostCommit": "<hex>|null", "hostDirty": false }  // both null outside git
@@ -321,12 +321,18 @@ to `api.github.com` and only when set.
 every `GIT_*` variable from the parent is dropped except `GIT_SSL_CAINFO` and `GIT_SSL_CAPATH`
 (TLS trust a corporate network needs), `SSH_ASKPASS` is removed, and `GIT_TERMINAL_PROMPT=0`,
 `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` pointed at an empty file, `GIT_LITERAL_PATHSPECS=1`,
-and `GCM_INTERACTIVE=never` are set. Config flags on every invocation:
+`GIT_CEILING_DIRECTORIES` set to the work directory's parent (so no enclosing repository's config
+applies), and `GCM_INTERACTIVE=never` are set. Config flags on every invocation:
 `-c core.hooksPath=<empty dir>`, `-c core.symlinks=false`, `-c core.fsmonitor=false`,
 `-c protocol.allow=never -c protocol.https.allow=always` (`protocol.file.allow=always` only for
-`file://` repos), `-c submodule.recurse=false`, `-c fetch.recurseSubmodules=false`. Before git
-runs, an `https` repository's host is checked against the address rules above (git connects on
-its own, so this check is not pinned). Fetch strategy: `git ls-remote` first resolves the ref
+`file://` repos), `-c http.followRedirects=false`, `-c credential.helper=` (no helper),
+`-c transfer.fsckObjects=true`, `-c submodule.recurse=false`, `-c fetch.recurseSubmodules=false`.
+A repository URL with a query or fragment is refused. Before git runs, an `https` repository's
+discovery URL (`<repo>/info/refs?service=git-upload-pack`) is requested through the HTTP client,
+which applies the address rules above to every redirect hop; when it redirects to another
+repository URL, git runs against that URL, and the origin records it as `finalRepo` with a
+warning; a redirect to anything else is an error. git resolves the host on its own, so its
+connection is not pinned. Fetch strategy: `git ls-remote` first resolves the ref
 kind (a tag wins over a branch of the same name; a 40-hex name is a commit only when no tag or
 branch has it), then `git init --template=`, `git remote add origin <repo>`, `git fetch --depth
 1 --filter=blob:none --no-tags --no-recurse-submodules origin <refspec>` (`refs/tags/<ref>`,

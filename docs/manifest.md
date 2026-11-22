@@ -69,7 +69,7 @@ The pack's recipe from `llm-docs.json` with every default filled in and every pl
 
 | `type` | Fields |
 |---|---|
-| `git` | `repo`, `ref` (as resolved, placeholders substituted), `commit` (40 hex), `refKind` (`tag`, `branch`, or `commit`). |
+| `git` | `repo`, `ref` (as resolved, placeholders substituted), `commit` (40 hex), `refKind` (`tag`, `branch`, or `commit`), and `finalRepo` when the repository redirected and git fetched from there. |
 | `llms-txt` | `url` of the index, `sha256` of its bytes, and `finalUrl` when redirects led elsewhere. |
 | `urls` | No other fields; each page's URL is on its `sources` entry. |
 | `local` | `path` (project-relative), `hostCommit` (the host repository's `HEAD`, or `null` outside git), `hostDirty` (whether that repository had uncommitted changes, or `null` outside git). |

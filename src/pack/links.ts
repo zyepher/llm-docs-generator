@@ -331,7 +331,7 @@ export function createPackLinkRewriter(context: PackLinkContext): LinkRewriter {
 
     if (origin?.type === 'git') {
       const blob = page.url === undefined ? null : GITHUB_BLOB_URL.exec(page.url);
-      const remote = parseGithubRemote(origin.repo);
+      const remote = parseGithubRemote(origin.finalRepo ?? origin.repo);
       const owner = blob?.[1] ?? remote?.owner;
       const name = blob?.[2] ?? remote?.name;
       const commit = blob?.[3] ?? origin.commit;

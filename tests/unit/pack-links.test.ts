@@ -358,6 +358,23 @@ describe('createPackLinkRewriter: targets outside the pack (spec 4.5 steps 4 and
     expect(other({ ...page, url: undefined, text: '[a](../x.md)', mdx: false }).unresolved).toEqual(
       [{ target: '../x.md', reason: 'outside-pack-non-github-remote' }]
     );
+
+    // A recipe repository that redirected to GitHub pins to where the commit was fetched.
+    const moved = createPackLinkRewriter({
+      recipe: recipe([{ ...gitSource, repo: 'https://git.example.com/widgets' }]),
+      origins: [
+        {
+          ...origin,
+          repo: 'https://git.example.com/widgets',
+          finalRepo: 'https://github.com/acme/widgets',
+        },
+      ],
+      pages: [{ ...page, url: undefined }],
+      passthrough: [],
+    });
+    expect(moved({ ...page, url: undefined, text: '[a](../x.md)', mdx: false }).text).toBe(
+      `[a](https://github.com/acme/widgets/blob/${COMMIT}/x.md)`
+    );
   });
 
   it('resolves links of http-acquired pages in URL space', () => {
