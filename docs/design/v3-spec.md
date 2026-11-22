@@ -61,7 +61,8 @@ explicitly named index (`llms.txt`) lists after an explicit planner-written filt
       vite.full.md              optional combined layout, tool-written, verified
       guides/                   agent-owned; never written or deleted by the tool
         *.md
-        citations.lock.json     tool-written by `guides stamp`, verified
+        citations.lock.json     written only by `guides stamp`; not a manifest output, verified
+                                by the `citations` check through recomputation (section 8)
 ```
 
 The project root is the nearest ancestor of the working directory containing `llm-docs.json`.
@@ -243,8 +244,10 @@ with a clear message instead of waiting.
 - Hashes use the `sha256:<hex>` form via `sha256Prefixed`.
 - `tokens` uses the existing `estimateTokenCount`.
 - `outputs` covers every tool-written file in the pack except `manifest.json` itself and
-  `guides/**` (guides are covered by `guides/citations.lock.json`, which is itself listed with
-  kind `citations` once it exists).
+  `guides/**`. Guides are covered by `guides/citations.lock.json`, which `guides stamp` writes
+  and only it. The lock is not a manifest output: sync never reads or writes it, so the
+  manifest stays a function of the recipe and the upstream bytes, and the `citations` check
+  verifies it by recomputing every hash it records (section 8).
 - Reading a manifest whose `schemaVersion` is not 3 fails with a message pointing to
   `llm-docs migrate`.
 
