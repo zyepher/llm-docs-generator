@@ -7,7 +7,15 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/dist", "!**/coverage", "!**/output", "!**/node_modules"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/coverage",
+      "!**/output",
+      "!**/node_modules",
+      "!tests/fixtures",
+      "!evals/cases"
+    ]
   },
   "formatter": {
     "enabled": false

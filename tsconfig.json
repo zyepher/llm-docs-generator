@@ -37,14 +37,20 @@
     "skipLibCheck": true,
     "skipDefaultLibCheck": true
   },
+  // Type-checks everything that is TypeScript. tsconfig.build.json narrows this back to src/ for
+  // the published declarations. Eval case fixtures compile against their own pinned
+  // dependencies inside each case workspace, so only the eval runner is included here.
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "evals/*.ts",
+    "evals/lib/**/*.ts",
+    "vitest.config.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "tests",
-    "**/*.test.ts",
-    "**/*.spec.ts"
+    "tests/fixtures"
   ]
 }

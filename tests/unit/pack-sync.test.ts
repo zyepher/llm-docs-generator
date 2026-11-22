@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { canCreateSymlinks } from '../helpers/symlinks.js';
 
-import { syncPacks, type SyncOptions } from '../../src/pack/build.js';
+import { syncPacks } from '../../src/pack/build.js';
 import { readPackManifest } from '../../src/pack/manifest.js';
 import { verifyPacks, type VerifyReport } from '../../src/pack/verify.js';
 import { ALLOW_TEMP_SOURCES_ENV } from '../../src/sources/acquire.js';
@@ -92,10 +92,7 @@ const PACK = {
   license: 'MIT',
   sources: [{ type: 'local', path: 'docs' }],
 };
-const fixedClock =
-  (iso: string): SyncOptions['now'] =>
-  () =>
-    new Date(iso);
+const fixedClock = (iso: string) => (): Date => new Date(iso);
 
 function problems(report: VerifyReport): string[] {
   return report.results.flatMap((result) =>

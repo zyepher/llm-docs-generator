@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ResolvedPackRecipe, ResolvedSource } from '../../src/config/project.js';
+import type {
+  ResolvedPackRecipe,
+  ResolvedSource,
+  ResolvedSourceOfType,
+} from '../../src/config/project.js';
 import { createPackLinkRewriter, routeKey } from '../../src/pack/links.js';
 import type { ManifestOrigin } from '../../src/pack/manifest.js';
 import type { LinkRewriteResult, PackFileRef } from '../../src/pack/markdown.js';
@@ -14,7 +18,7 @@ const COMMON = {
   passthrough: [],
   convert: null,
   transforms: [],
-} as const;
+};
 
 function localSource(path: string, mount = ''): ResolvedSource {
   return { type: 'local', path, ...COMMON, mount };
@@ -307,7 +311,7 @@ describe('createPackLinkRewriter: targets outside the pack (spec 4.5 steps 4 and
   });
 
   it('pins out-of-pack targets of GitHub sources to the recorded commit', () => {
-    const gitSource: ResolvedSource = {
+    const gitSource: ResolvedSourceOfType<'git'> = {
       type: 'git',
       repo: 'https://github.com/acme/widgets',
       ref: 'v1',
