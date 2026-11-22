@@ -660,11 +660,14 @@ command carries `--project <dir>` when the user passed it. The CLI prints no col
   [--include <glob>]... [--dependency <eco>:<name>] [--covers <eco>:<name>]... [--version <v>]
   [--mount <m>] [--title <t>]
   [--convert docling|markitdown|agent] [--convert-include <glob>...] [--site <baseUrl>]
+  [--alias <from>=<to>]... [--license <license>]
   [--recipe <json>] [--read-first <target>]... [--replace] [--dry-run]`: write the recipe into
   config (creating config if absent), then `sync <id>`. `--version` or `--dependency` is
   required. `--include` applies to every source type (file paths, or URL paths for
   `--llms-txt`). `--recipe` adds source fields as JSON, a `command` converter among them, and
-  can name the whole source by itself. Refuses to overwrite an existing id unless `--replace`.
+  can name the whole source by itself. `--license` writes the pack's declared `license`, and
+  each `--alias` (which needs `--site`) one `site.aliases` entry; both are validated by the
+  config schema and shown by `--dry-run`. Refuses to overwrite an existing id unless `--replace`.
   When the build rejects the recipe as a config error (exit 2, an unresolved read-first target
   among them), `llm-docs.json` is put back as it was; after a runtime failure (exit 3) the
   recipe stays so that `sync <id>` can retry. `--dry-run` prints the recipe and the file list

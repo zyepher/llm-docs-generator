@@ -48,13 +48,15 @@ Run the CLI as `llm-docs`. If that command is not found, run `node <skill-dir>/.
 | `--mount <dir>` | Subfolder under `pages/` and `files/` for this source. |
 | `--title <title>` | Pack title. The id by default. |
 | `--site <baseUrl>` | The docs website, so absolute links to it resolve to pack pages. |
+| `--alias <from>=<to>` | A path on the `--site` website that stands for another, such as `/guide/latest=/guide/{version}` (repeatable). |
+| `--license <license>` | The docs license: an SPDX expression such as `CC-BY-4.0`, or `proprietary`. Set it for pages fetched from a website, which have no license file. |
 | `--convert <tool>` | Converts documents with `docling`, `markitdown`, or `agent`. `--convert-include <glob...>` names the documents. |
 | `--recipe <json>` | Extra source fields as JSON, such as `exclude`, `passthrough`, `transforms`, or a `command` converter. |
 | `--read-first <target>` | A page to read first, `pages/...` or `files/...` with an optional `#fragment` (repeatable, at most 5). The index lists it at the top and the session-start note names it. |
 | `--replace` | Overwrites an existing pack with the same id. |
 | `--dry-run` | Prints the recipe and every output path with its source. Writes nothing. |
 
-`{version}`, `{major}`, `{minor}`, and `{patch}` in `ref`, `paths`, `url`, `urls`, `include`, and `exclude` are replaced from the resolved version. A recipe whose ref is `v{version}` follows the lockfile to the next version.
+`{version}`, `{major}`, `{minor}`, and `{patch}` in `ref`, `paths`, `url`, `urls`, `include`, `exclude`, and `--alias` targets are replaced from the resolved version. A recipe whose ref is `v{version}` follows the lockfile to the next version.
 
 ### Options of `sync` and `refresh`
 

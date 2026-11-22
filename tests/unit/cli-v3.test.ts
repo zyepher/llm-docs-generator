@@ -1572,6 +1572,71 @@ describe('--json: one document on stdout when the command runs, nothing when it 
     expectJsonFailure(await runCli(root, ['add', 'Bad', '--local', 'docs', '--json']), 2);
   });
 
+  it('add --license and --alias', async () => {
+    const flags = [
+      'add',
+      'other',
+      '--local',
+      'docs',
+      '--version',
+      '2026-07-28',
+      '--site',
+      'https://docs.example.com',
+      '--alias',
+      '/spec/latest=/spec/{version}',
+      '--alias',
+      '/old=/new',
+      '--license',
+      'Apache-2.0 AND CC-BY-4.0',
+      '--dry-run',
+    ];
+    const json = await runCli(root, [...flags, '--json']);
+    expect(json.code, json.stderr).toBe(0);
+    expect(expectJsonDocument(json)).toMatchObject({
+      recipe: {
+        license: 'Apache-2.0 AND CC-BY-4.0',
+        site: {
+          baseUrl: 'https://docs.example.com',
+          aliases: { '/spec/latest': '/spec/2026-07-28', '/old': '/new' },
+        },
+      },
+    });
+    const human = await runCli(root, flags);
+    expect(human.code, human.stderr).toBe(0);
+    expect(human.stderr).toContain(
+      '"aliases": {\n        "/spec/latest": "/spec/{version}",\n        "/old": "/new"\n      }'
+    );
+    expect(human.stderr).toContain('"license": "Apache-2.0 AND CC-BY-4.0"');
+
+    const noSite = await runCli(root, [
+      'add',
+      'other',
+      '--local',
+      'docs',
+      '--version',
+      '1',
+      '--alias',
+      '/a=/b',
+    ]);
+    expect(noSite.code).toBe(2);
+    expect(noSite.stderr).toContain('--alias needs --site <baseUrl>');
+    const malformed = await runCli(root, [...flags.slice(0, 8), '--alias', '/a']);
+    expect(malformed.code).toBe(2);
+    expect(malformed.stderr).toContain('--alias must be <from>=<to>');
+    const empty = await runCli(root, [
+      'add',
+      'other',
+      '--local',
+      'docs',
+      '--version',
+      '1',
+      '--license',
+      '',
+    ]);
+    expect(empty.code).toBe(2);
+    expect(empty.stderr).toContain('--license needs an SPDX expression');
+  });
+
   it('sync', async () => {
     expect(expectJsonDocument(await runCli(root, ['sync', '--check', '--json']))).toMatchObject({
       check: true,

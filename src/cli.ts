@@ -134,6 +134,28 @@ const COMMANDS = [
         note: "Pin Vite's docs at the version the lockfile resolves, and follow it on every sync",
       },
       {
+        argv: [
+          'add',
+          'mcp',
+          '--llms-txt',
+          'https://modelcontextprotocol.io/llms.txt',
+          '--include',
+          '/specification/{version}/**',
+          '--version',
+          '2026-07-28',
+          '--title',
+          'Model Context Protocol',
+          '--site',
+          'https://modelcontextprotocol.io',
+          '--alias',
+          '/specification/latest=/specification/{version}',
+          '--license',
+          'Apache-2.0 AND MIT AND CC-BY-4.0',
+          '--dry-run',
+        ],
+        note: 'Preview a protocol revision from a site index, with links to "latest" kept in the pack',
+      },
+      {
         argv: ['add', 'mylib', '--local', 'docs/mylib', '--version', '2.1.0', '--json'],
         note: 'Add and build the pack, printing the recipe and the sync report as JSON',
       },
@@ -425,6 +447,8 @@ interface AddOptions extends ProjectOptions {
   include?: string[];
   stripPrefix?: string;
   site?: string;
+  alias?: string[];
+  license?: string;
   dependency?: string;
   covers?: string[];
   version?: string;
@@ -616,6 +640,29 @@ function parseDependency(
   return { ecosystem, name };
 }
 
+/** `--alias <from>=<to>` values as `site.aliases`, in the order given. */
+function parseAliases(values: readonly string[]): Record<string, string> {
+  const aliases: Record<string, string> = {};
+
+  for (const value of values) {
+    const separator = value.indexOf('=');
+    const from = value.slice(0, separator);
+    const to = value.slice(separator + 1);
+
+    if (separator <= 0 || to === '') {
+      throw new UsageError(
+        `--alias must be <from>=<to>, two site paths such as /guide/latest=/guide/{version}; got "${value}".`
+      );
+    }
+    if (Object.hasOwn(aliases, from)) {
+      throw new UsageError(`--alias ${from} is given twice; pass one --alias per site path.`);
+    }
+    aliases[from] = to;
+  }
+
+  return aliases;
+}
+
 function parseRecipeJson(value: string): Record<string, unknown> {
   let parsed: unknown;
 
@@ -719,8 +766,24 @@ function buildPackRecipe(options: AddOptions): PackConfig {
   if (pack.version === undefined && pack.dependency === undefined) {
     throw new UsageError('Pass --version <v> or --dependency <ecosystem>:<name>.');
   }
+  if (options.alias !== undefined && options.site === undefined) {
+    throw new UsageError(
+      '--alias needs --site <baseUrl>: an alias maps one path on that website to another.'
+    );
+  }
   if (options.site !== undefined) {
-    pack.site = { baseUrl: options.site };
+    pack.site = {
+      baseUrl: options.site,
+      ...(options.alias === undefined ? {} : { aliases: parseAliases(options.alias) }),
+    };
+  }
+  if (options.license !== undefined) {
+    if (options.license.trim() === '') {
+      throw new UsageError(
+        '--license needs an SPDX expression such as CC-BY-4.0 or "Apache-2.0 AND MIT", or "proprietary".'
+      );
+    }
+    pack.license = options.license;
   }
   // Keep the source exactly as the user wrote it (not the parsed copy) so the config stays minimal.
   pack.sources = [source];
@@ -1114,6 +1177,15 @@ function buildProgram(): Command {
   add.option(
     '--site <baseUrl>',
     'The docs website, so links to it resolve to pack pages (default: none)'
+  );
+  add.option(
+    '--alias <from=to>',
+    'A path on the --site website that stands for another, such as /guide/latest=/guide/{version}; the target may use {version} (repeatable; default: none)',
+    collect
+  );
+  add.option(
+    '--license <license>',
+    'The license of these docs: an SPDX expression such as CC-BY-4.0, or "proprietary"; recorded next to the license detected from license files, and it wins for the license status (default: none)'
   );
 
   withProjectOptions(

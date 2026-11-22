@@ -50,6 +50,9 @@ Use it to create a pack. The [`add-docs` skill](../plugin/skills/add-docs/SKILL.
 
 - An existing pack id is refused unless `--replace` is given.
 - `--covers <ecosystem>:<name>` (repeatable) lists another package the same docs describe, such as the client package next to a server SDK. It writes `covers` (see [`covers`](config.md#covers)) and binds no version; `--dry-run` shows it in the recipe.
+- `--license <license>` declares the docs license, an SPDX expression such as `CC-BY-4.0` or `"Apache-2.0 AND MIT"`, or `proprietary`. It writes `license`, which is recorded next to the license detected from license files and wins for the license status. Pages fetched from a website have no license file, so set it there.
+- `--alias <from>=<to>` (repeatable, needs `--site`) writes one entry of `site.aliases`: a path on the website that stands for another, such as `/specification/latest=/specification/{version}`. The target may use placeholders.
+- A pack with several sources is added with one source flag; append the other sources to `packs.<id>.sources` in `llm-docs.json` and run `llm-docs sync <id>`.
 - When the build rejects the recipe as a config error, including an unresolved `--read-first` target, `llm-docs.json` is put back as it was.
 - `--dry-run` lists the files the recipe takes without building anything, and writes nothing. It prints the recipe and every output path with the source it comes from, and says for each `--read-first` target whether a taken file lands at its path. A heading fragment can only be checked once pages are built.
 - A rebuild that changes sections cited by guides prints the guides to re-review, as `sync` does.

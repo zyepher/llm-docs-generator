@@ -88,7 +88,7 @@ Then run the command without `--dry-run`. `llm-docs add` writes the recipe into 
 
 ## 6. Set the license
 
-The manifest records the license it detects from the repository's license files. Pages fetched from a website have no license file, so their license is `unknown`, and `llm-docs verify --strict` fails on it. If the discover output or the site states the terms, set `"license"` on the pack in `llm-docs.json` to the SPDX id (such as `"CC-BY-4.0"`), or to `"proprietary"`, then run `llm-docs sync <id>`. A declared license is recorded next to the detected one, and a mismatch is a warning worth reading.
+The manifest records the license it detects from the repository's license files. Pages fetched from a website have no license file, so their license is `unknown`, and `llm-docs verify --strict` fails on it. If the discover output, the repository's license file, or the site states the terms, pass `--license` on the `add` command with the SPDX expression (such as `CC-BY-4.0`, or `"Apache-2.0 AND CC-BY-4.0"` when parts of the docs carry different terms), or `proprietary`. Read the license file itself: a repository can license its code, its specification, and its prose differently. For a pack that already exists, set `"license"` on it in `llm-docs.json` and run `llm-docs sync <id>`. A declared license is recorded next to the detected one, and a mismatch is a warning worth reading.
 
 ## 7. Verify and read the pack
 
