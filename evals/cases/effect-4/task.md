@@ -1,7 +1,7 @@
 Add `src/fetch-rate.ts` to this project, written with Effect, exporting:
 
 1. `RateUnavailable`: an error class with `_tag` equal to `'RateUnavailable'` and a readonly `attempts: number` field.
-2. `loadRate(fetchRate: () => Promise<number>, options: { retries: number; cachedRate?: number })`, which returns an Effect that never fails. It succeeds with effect's `Result` type: a success holding a `RateQuote` (from `src/rates.ts`), or a failure holding a `RateUnavailable`.
+2. `loadRate(fetchRate: () => Promise<number>, options: { retries: number; cachedRate?: number })`, which returns an Effect that never fails. Instead, the outcome comes back as a value: use Effect's own built-in data type for a value that is either a success or a failure (not a hand-written union), holding a `RateQuote` (from `src/rates.ts`) on success or a `RateUnavailable` on failure.
 
 Behaviour:
 

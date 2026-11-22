@@ -1,14 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport, type JSONRPCMessage } from '@modelcontextprotocol/server';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createCounterServer } from '../src/server.js';
 
 type Connected = {
   client: Client;
-  /** Progress values the server put on the wire, whatever the client did with them. */
-  sentProgress: number[];
+  /** Progress notifications the server put on the wire, whatever the client did with them. */
+  sentProgress: Array<{ token: string | number; progress: number }>;
   close: () => Promise<void>;
 };
 
@@ -22,13 +22,14 @@ afterEach(async () => {
 
 async function connect(stepDelayMs: number): Promise<Connected> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const sentProgress: number[] = [];
+  const sentProgress: Connected['sentProgress'] = [];
   const send = serverTransport.send.bind(serverTransport);
   serverTransport.send = async (message: JSONRPCMessage, options) => {
     if ('method' in message && message.method === 'notifications/progress') {
       const progress = message.params?.progress;
-      if (typeof progress === 'number') {
-        sentProgress.push(progress);
+      const token = message.params?.progressToken;
+      if (typeof progress === 'number' && (typeof token === 'string' || typeof token === 'number')) {
+        sentProgress.push({ token, progress });
       }
     }
     return send(message, options);
@@ -84,23 +85,40 @@ describe('count_to', () => {
     expect(textOf(result)).toBe('Counted to 3');
   });
 
-  it('stops counting when the caller cancels', async () => {
-    const { client, sentProgress } = await connect(20);
-    const controller = new AbortController();
+  it('stops counting when the caller cancels', { timeout: 60_000 }, async () => {
+    const { client, sentProgress } = await connect(10);
+    const cancelled = new AbortController();
     const call = client.callTool(
       { name: 'count_to', arguments: { n: 1000 } },
       {
-        signal: controller.signal,
-        onprogress: () => controller.abort('caller gave up'),
+        signal: cancelled.signal,
+        onprogress: () => cancelled.abort('caller gave up'),
       }
     );
     await expect(call).rejects.toThrow();
-    // Uncancelled, the tool would put about 20 more notifications on the wire in this window.
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    const afterCancel = sentProgress.length;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(afterCancel).toBeLessThanOrEqual(3);
-    expect(sentProgress.length).toBe(afterCancel);
+    const cancelledToken = sentProgress[0]?.token;
+    expect(cancelledToken).toBeDefined();
+
+    // No fixed sleep: an identical uncancelled call on the same server is the clock. Once it has
+    // made 20 steps, a tool that ignored the cancellation would have made about 20 more too, on a
+    // fast machine or a loaded one alike.
+    const canary = new AbortController();
+    const canaryCall = client
+      .callTool(
+        { name: 'count_to', arguments: { n: 1000 } },
+        { signal: canary.signal, onprogress: () => {} }
+      )
+      .catch(() => undefined);
+    const stepsOf = (match: (token: string | number) => boolean): number =>
+      sentProgress.filter((sent) => match(sent.token)).length;
+    await vi.waitFor(
+      () => expect(stepsOf((token) => token !== cancelledToken)).toBeGreaterThanOrEqual(20),
+      { timeout: 50_000, interval: 5 }
+    );
+    canary.abort('done');
+    await canaryCall;
+    // The first notification triggers the cancel; one more may already be in flight.
+    expect(stepsOf((token) => token === cancelledToken)).toBeLessThanOrEqual(3);
   });
 
   it('uses the MCP SDK packages', () => {

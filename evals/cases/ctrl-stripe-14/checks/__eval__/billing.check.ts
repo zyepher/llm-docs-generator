@@ -32,6 +32,13 @@ const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Pro
   });
 };
 
+/** The values of a form-encoded array parameter (`name[0]`, `name[1]`, ...). */
+function listParam(form: URLSearchParams, name: string): string[] {
+  return [...form.entries()]
+    .filter(([key]) => key.startsWith(`${name}[`) && /^\[\d+\]$/.test(key.slice(name.length)))
+    .map(([, value]) => value);
+}
+
 function client(): Stripe {
   return new Stripe('sk_test_123', {
     apiVersion: '2023-10-16',
@@ -57,8 +64,8 @@ describe('createCheckout', () => {
     expect(form.get('line_items[0][price]')).toBe('price_123');
     expect(form.get('line_items[0][quantity]')).toBe('2');
     expect(form.get('success_url')).toBe('https://shop.test/thanks');
-    expect(form.get('payment_method_types[0]')).toBe('card');
-    expect(form.get('payment_method_types[1]')).toBe('link');
+    // Only the set of methods is the requirement; Checkout decides the order it shows them in.
+    expect(listParam(form, 'payment_method_types').sort()).toEqual(['card', 'link']);
   });
 });
 

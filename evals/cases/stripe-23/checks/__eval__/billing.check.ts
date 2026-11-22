@@ -32,6 +32,13 @@ const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Pro
   });
 };
 
+/** The values of a form-encoded array parameter (`name[0]`, `name[1]`, ...). */
+function listParam(form: URLSearchParams, name: string): string[] {
+  return [...form.entries()]
+    .filter(([key]) => key.startsWith(`${name}[`) && /^\[\d+\]$/.test(key.slice(name.length)))
+    .map(([, value]) => value);
+}
+
 function client(): Stripe {
   return new Stripe('sk_test_123', {
     httpClient: Stripe.createFetchHttpClient(fakeFetch),
@@ -56,8 +63,8 @@ describe('createCheckout', () => {
     expect(form.get('line_items[0][price]')).toBe('price_123');
     expect(form.get('line_items[0][quantity]')).toBe('2');
     expect(form.get('success_url')).toBe('https://shop.test/thanks');
-    expect(form.get('allowed_payment_method_types[0]')).toBe('card');
-    expect(form.get('allowed_payment_method_types[1]')).toBe('paypay');
+    // Only the set of methods is the requirement; Checkout decides the order it shows them in.
+    expect(listParam(form, 'allowed_payment_method_types').sort()).toEqual(['card', 'paypay']);
     expect([...form.keys()].filter((key) => key.startsWith('payment_method_types'))).toEqual([]);
   });
 });
@@ -70,6 +77,9 @@ describe('pauseSub', () => {
     const [request] = requests;
     expect(request?.method).toBe('POST');
     expect(request?.path).toBe('/v1/subscriptions/sub_123/pause');
-    expect(request?.form.get('invoicing_behavior')).toBe('pending_invoice_item');
+    // pending_invoice_item is the documented default, so sending it and leaving it out both work.
+    expect(request?.form.get('invoicing_behavior') ?? 'pending_invoice_item').toBe(
+      'pending_invoice_item'
+    );
   });
 });
