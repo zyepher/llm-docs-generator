@@ -20,6 +20,9 @@ import { gitTopLevel } from '../core/git-state.js';
 import {
   dependencyKey,
   ECOSYSTEMS,
+  isDependencyName,
+  isVersionText,
+  VERSION_TEXT_MAX,
   type DependencyRef,
   type DependencyVersionLookup,
 } from '../deps/lockfiles.js';
@@ -153,9 +156,9 @@ const gitRepoSchema = z.string().refine(
   }
 );
 
-const versionSchema = z
-  .string()
-  .regex(/^[^\s<>\p{Cc}]+$/u, { error: 'must be a non-empty version without whitespace' });
+const versionSchema = z.string().refine(isVersionText, {
+  error: `must be a version: one line of printable characters without whitespace, at most ${VERSION_TEXT_MAX}`,
+});
 
 const convertSchema = z
   .strictObject({
@@ -241,10 +244,20 @@ export const sourceConfigSchema = z.discriminatedUnion('type', [
   localSourceSchema,
 ]);
 
-const dependencySchema = z.strictObject({
-  ecosystem: z.enum(ECOSYSTEMS),
-  name: z.string().min(1),
-});
+const dependencySchema = z
+  .strictObject({
+    ecosystem: z.enum(ECOSYSTEMS),
+    name: z.string().min(1),
+  })
+  .superRefine((dependency, context) => {
+    if (!isDependencyName(dependency.ecosystem, dependency.name)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['name'],
+        message: `is not a valid ${dependency.ecosystem} package name`,
+      });
+    }
+  });
 
 export const COVERS_MAX = 20;
 
@@ -376,7 +389,7 @@ export type SourceConfig = z.infer<typeof sourceConfigSchema>;
 // what the manifest records and what recipeHash covers.
 
 const resolvedCommonFields = {
-  mount: z.string(),
+  mount: mountSchema,
   include: z.array(z.string()),
   exclude: z.array(z.string()),
   passthrough: z.array(z.string()),
@@ -410,14 +423,14 @@ const resolvedSourceSchema = z.discriminatedUnion('type', [
     stripPrefix: z.string(),
     ...resolvedCommonFields,
   }),
-  z.strictObject({ type: z.literal('local'), path: z.string(), ...resolvedCommonFields }),
+  z.strictObject({ type: z.literal('local'), path: projectPathSchema, ...resolvedCommonFields }),
 ]);
 
 export const resolvedPackRecipeSchema = z.strictObject({
   title: z.string(),
   description: z.string().nullable(),
   dependency: dependencySchema.nullable(),
-  version: z.string(),
+  version: versionSchema,
   sources: z.array(resolvedSourceSchema),
   site: z
     .strictObject({ baseUrl: z.string(), aliases: z.record(z.string(), z.string()) })
@@ -430,7 +443,10 @@ export const resolvedPackRecipeSchema = z.strictObject({
    * a recipe without it, and so its recipeHash, is what it was before the
    * field existed, and packs built then stay up to date.
    */
-  readFirst: z.array(z.string()).min(1).optional(),
+  readFirst: z
+    .array(z.string().refine(isReadFirstTarget, { error: 'must be a path under pages/ or files/' }))
+    .min(1)
+    .optional(),
   /** Absent, never empty, when the pack covers no other package, for the same reason. */
   covers: z.array(dependencySchema).min(1).optional(),
 });
@@ -885,6 +901,12 @@ async function resolvePackVersion(
         .join(', ');
       throw new ConfigError(
         `Pack "${id}": lockfiles resolve ${label} to different versions (${versions}); set packs.${id}.version in ${CONFIG_FILE_NAME} to the one these docs describe.`
+      );
+    }
+    case 'unread': {
+      const unread = lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`);
+      throw new ConfigError(
+        `Pack "${id}": the version of ${label} is unknown because a lockfile was not read (${unread.join('; ')}); set packs.${id}.version in ${CONFIG_FILE_NAME}.`
       );
     }
   }

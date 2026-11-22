@@ -14,7 +14,7 @@ import { ContentBlockType, type ContentBlock, type DocNode } from '../core/model
 import { parseHtmlFile } from '../parsers/html/parser.js';
 import { parseOpenApiFile } from '../parsers/openapi/index.js';
 import { parseRstFile } from '../parsers/rst/parser.js';
-import { errorMessage } from '../utils/guards.js';
+import { errorMessage, isRecord } from '../utils/guards.js';
 import type { SelectedPage } from '../sources/acquire.js';
 
 /** One Markdown page rendered from a source file. */
@@ -276,11 +276,31 @@ export function renderOpenApiPages(root: DocNode, directory: string): RenderedPa
 // Selected pages
 // ---------------------------------------------------------------------------
 
-function parserWarnings(root: DocNode): string[] {
+/**
+ * The parser's warnings, as pack warnings. A warning that locates something
+ * in the page (an RST line, an HTML element) names the page; one that holds
+ * for every page of its format (the HTML parser's static-rendering notice)
+ * does not, so the manifest, which keeps each warning once, records it once.
+ */
+function parserWarnings(root: Pick<DocNode, 'metadata'>, page: SelectedPage): string[] {
   const warnings = root.metadata.get('warnings');
-  return Array.isArray(warnings)
-    ? warnings.filter((warning): warning is string => typeof warning === 'string')
-    : [];
+
+  return (Array.isArray(warnings) ? warnings : []).flatMap((warning: unknown) => {
+    if (typeof warning === 'string') {
+      return [`${page.file.sourceLabel}: ${warning}`];
+    }
+    if (!isRecord(warning) || typeof warning.message !== 'string') {
+      return [];
+    }
+    if (typeof warning.line === 'number') {
+      return [`${page.file.sourceLabel} line ${warning.line}: ${warning.message}`];
+    }
+    return [
+      typeof warning.tag === 'string'
+        ? `${page.file.sourceLabel}: ${warning.message}`
+        : warning.message,
+    ];
+  });
 }
 
 /** Render a reStructuredText, HTML, or OpenAPI page to Markdown. */
@@ -289,28 +309,30 @@ export async function renderSourcePage(page: SelectedPage): Promise<RenderedSour
 
   try {
     switch (page.format) {
-      case 'rst':
+      case 'rst': {
+        const root = await parseRstFile(path);
         return {
-          pages: [
-            { outputPath: page.outputPath, text: renderDocumentMarkdown(await parseRstFile(path)) },
-          ],
-          warnings: [],
+          pages: [{ outputPath: page.outputPath, text: renderDocumentMarkdown(root) }],
+          warnings: parserWarnings(root, page),
         };
-      case 'html':
+      }
+      case 'html': {
+        const root = await parseHtmlFile(path);
         return {
           pages: [
             {
               outputPath: page.outputPath,
-              text: renderDocumentMarkdown(await parseHtmlFile(path), { titleFromSections: true }),
+              text: renderDocumentMarkdown(root, { titleFromSections: true }),
             },
           ],
-          warnings: [],
+          warnings: parserWarnings(root, page),
         };
+      }
       case 'openapi': {
         const root = await parseOpenApiFile(path);
         return {
           pages: renderOpenApiPages(root, posix.dirname(page.outputPath)),
-          warnings: parserWarnings(root).map((warning) => `${page.file.sourceLabel}: ${warning}`),
+          warnings: parserWarnings(root, page),
         };
       }
       case 'markdown':

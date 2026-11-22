@@ -158,7 +158,7 @@ function assertRefName(ref: string): void {
 }
 
 /** Normalize the taken paths: repository-relative POSIX, no `..`; "." is the whole repository. */
-function normalizeTakenPaths(paths: readonly string[]): string[] {
+export function normalizeTakenPaths(paths: readonly string[]): string[] {
   const normalized = paths.map((path) => {
     const value = posix
       .normalize(path.replace(/\\/g, '/'))

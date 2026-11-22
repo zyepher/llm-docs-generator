@@ -135,8 +135,7 @@
             }
           },
           "version": {
-            "type": "string",
-            "pattern": "^[^\\s<>\\p{Cc}]+$"
+            "type": "string"
           },
           "sources": {
             "minItems": 1,

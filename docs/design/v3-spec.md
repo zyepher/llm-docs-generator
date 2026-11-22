@@ -365,8 +365,11 @@ files of their fetch plan. Default include for `git` and `local`:
 `swagger:` key in JSON or YAML) when listed by an explicit include. Files that an include
 matched but no handler, converter, or passthrough glob takes are skipped and reported in one
 warning with a count per extension; files no include matched are not reported. Output paths
-are checked for collisions (case-insensitive after Unicode NFC normalization, because macOS
-and Windows file systems are, and again after rendering, for OpenAPI tag pages), for
+are checked for collisions, of whole paths and of every directory on the way (under one key:
+NFKC, then full Unicode case folding, then NFKC, because macOS and Windows file systems are
+case-insensitive and APFS is normalization-insensitive; the key is deliberately coarser than
+any one file system, so it may refuse a pair, such as `ﬀ` and `ff`, that some file system
+keeps apart; and again after rendering, for OpenAPI tag pages), for
 Windows-reserved names, for characters Windows forbids, and for segments ending in a dot or a
 space; each is an error naming the files.
 
@@ -656,9 +659,9 @@ fails, the other pack checks are skipped):
 
 | Check | Fails when |
 |---|---|
-| `manifest-schema` | manifest missing, unparsable, not schema v3, or for another pack id |
+| `manifest-schema` | manifest missing, unparsable, not schema v3, for another pack id, inconsistent with its own recipe (`recipeHash`, `pack.title`, `pack.version`, `dependency`), or recording a path that is not a contained relative POSIX path under the directory its kind allows; a pack directory or `manifest.json` that is a symbolic link is never read |
 | `outputs` | a listed output is missing or its hash differs |
-| `unlisted-files` | a file in the pack is not listed, or the pack holds a symlink (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info) |
+| `unlisted-files` | a file in the pack is not listed, the pack holds a symlink or is one, or the walk could not examine part of it (depth, entry count, or an unreadable directory, named where it stopped) (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info). Every file verify opens resolves inside the pack directory with no link on the way; an I/O error on one file is a failing finding for that file, and every other check still runs |
 | `links` | a relative link in a page, index, or combined file does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
 | `recipe` | the config recipe for this id, resolved at the version the manifest records, has a different `recipeHash` (the config was edited) or cannot be resolved (warn when the config has no such pack: orphan); a lockfile that moved while the config stayed the same passes here, since `lockfile` reports it: one cause, one finding |
 | `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise. A `covers` entry never fails it: warn when the lockfiles resolve it to a version whose major (the leading `<number>.`) differs from `pack.version`'s, since the pack may not describe that package's version (no finer comparison: a family's packages do not always share versions) |
@@ -677,8 +680,15 @@ per problem with the pack id, check name, and path.
 
 `scanDependencies(projectRoot)` walks the project with the shared walker (max depth 6, at most
 200,000 entries, skip `node_modules`, `.git`, build, vendor, virtualenv, and tool cache dirs,
-and `packsDir`), finds lockfiles, and returns resolved dependencies. The hook's deadline can
-stop the scan early, with a warning:
+and `packsDir`), finds lockfiles, and returns resolved dependencies. Directories below the
+depth limit are named in one warning. A lockfile larger than `maxLockfileBytes` (64 MiB for
+commands; 4 MiB for the hook, whose deadline cannot interrupt a synchronous parse) is skipped
+with a warning naming it and its size. The hook's deadline can stop the scan early, with a
+warning. A lockfile skipped either way is listed in `unread`, and a lookup in its ecosystem
+answers `unread` rather than guessing from the other lockfiles. Every entry a parser returns
+must have a version that is one line of printable characters without whitespace, at most 128
+characters, and a name that follows its registry's rule; any other entry is skipped with a
+warning naming the lockfile and the package:
 
 ```ts
 type Ecosystem = 'npm' | 'pypi' | 'cargo' | 'go' | 'pub' | 'swiftpm'
@@ -711,7 +721,12 @@ Supported inputs and how directness is decided:
 
 Non-registry dependencies (git, path, workspace, `file:`, npm aliases to other names, `link:`,
 URLs, alternate registries, Go modules replaced by a `replace` directive, and SwiftPM pins with
-only a revision) are skipped with one aggregated warning. `bun.lockb` (binary) is reported as unsupported.
+only a revision) are skipped with one aggregated warning. A dependency is from an alternate
+registry when the source its lockfile records is not the ecosystem's public registry
+(`registry.npmjs.org` and its yarn and npmmirror mirrors; `pypi.org` and
+`files.pythonhosted.org`; crates.io; pub.dev), or, for an npm entry that records no URL, when
+the project's `.npmrc` (`.yarnrc.yml` for yarn berry), read as data, sends its scope or the
+default elsewhere. A dependency with no recorded source is taken as the public registry's. `bun.lockb` (binary) is reported as unsupported.
 Name normalization: PyPI names are PEP 503 normalized; others exact. Parsers never execute
 project code. TOML is parsed with `smol-toml`.
 
@@ -778,7 +793,11 @@ and DeepMind model cards (`docs.cloud.google.com/gemini-enterprise-agent-platfor
 Joins the dependency scan, the packs, release dates, and the cutoff:
 
 - Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved or
-  lockfiles disagree with none matching, which wins over `recipe-changed`; `recipe-changed`;
+  lockfiles disagree with none matching; `lockfile-conflict` when the lockfiles disagree and
+  one matches; `not-in-lockfile` when no lockfile resolves the bound dependency;
+  `lockfile-unread` when a lockfile of its ecosystem was skipped (too large, or past the
+  hook's deadline), so its version is unknown; these win over `recipe-changed`;
+  `recipe-changed`;
   `missing` when configured but never synced or its manifest cannot be read; `orphan`), the
   release date of
   the pack's version of its bound dependency and whether it falls after or near the cutoff,
@@ -906,8 +925,14 @@ context for the agent. Behavior:
   dependencies (your training data may predate them)"): a fact from release dates, not a guess
   about the model.
 - Content (at most 2,000 characters; nothing at all when there is nothing to say):
-  1. Packs that need a rebuild (the lockfile moved, the recipe changed, or never built), each
-     with its fix from `status`.
+  1. Packs to fix (the lockfile moved, no lockfile resolves the bound dependency, the
+     lockfiles disagree on it, the recipe changed, or never built), each with its fix from
+     `status`. A dependency name is printed exactly, as a code span (`` `@types/node` ``).
+     Every value from a lockfile, a manifest, a registry, or config passes through one escape
+     where it is placed (one line, no backtick, `<` and `>` as `&lt;` and `&gt;`), here and in
+     the human `status` report. A `lockfile-unread` pack gets no row: the note says nothing
+     about a lockfile it did not read, and the warm-up `status` run, which reads lockfiles up
+     to 64 MiB, is started for it.
   2. Built packs whose library version (the pack's version of its bound dependency), or any
      package it `covers` at the version the lockfiles resolve, was released after the model's
      training cutoff or within the near-cutoff window, most recent first, one line per pack with

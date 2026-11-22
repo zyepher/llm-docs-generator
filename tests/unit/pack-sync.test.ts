@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import {
+  chmod,
   cp,
   mkdir,
   mkdtemp,
@@ -545,6 +547,46 @@ describe('syncPacks', () => {
     );
   });
 
+  it('rejects output paths that a case- and normalization-insensitive file system would merge', async () => {
+    const pairs = [
+      ['ſ.md', 's.mdx'],
+      ['Straße.md', 'STRASSE.mdx'],
+      ['µ.md', 'μ.mdx'],
+      ['ς.md', 'σ.mdx'],
+      ['ﬀ.md', 'ff.mdx'],
+    ];
+    for (const [first = '', second = ''] of pairs) {
+      const root = await makeProject(
+        { demo: PACK },
+        { [`docs/${first}`]: '# A\n', [`docs/${second}`]: '# B\n' }
+      );
+      const report = await syncPacks(root, undefined);
+
+      expect(report.packs[0], first).toMatchObject({ status: 'failed', exitCode: 2 });
+      expect(report.packs[0]?.error).toMatch(/would both be written to pages\/.* and pages\//);
+      expect(report.packs[0]?.error).toContain(`0:${first}`);
+      expect(report.packs[0]?.error).toContain(`0:${second}`);
+    }
+
+    const root = await makeProject(
+      {
+        demo: {
+          ...PACK,
+          sources: [
+            { type: 'local', path: 'one' },
+            { type: 'local', path: 'two' },
+          ],
+        },
+      },
+      { 'one/Guide/a.md': '# A\n', 'two/guide/b.md': '# B\n' }
+    );
+    const report = await syncPacks(root, undefined);
+    expect(report.packs[0]).toMatchObject({ status: 'failed', exitCode: 2 });
+    expect(report.packs[0]?.error).toMatch(
+      /0:Guide\/a\.md and 1:guide\/b\.md would both be written to pages\/Guide and pages\/guide, one path/
+    );
+  });
+
   it('rejects Windows-reserved output names', async () => {
     const root = await makeProject({ demo: PACK }, { 'docs/con.md': '# Con\n' });
     expect((await syncPacks(root, undefined)).packs[0]?.error).toMatch(
@@ -1079,6 +1121,134 @@ describe('verifyPacks', () => {
       "demo lockfile warn:  covers npm:demo-client, which the lockfiles resolve to 3.1.0, another major version than the pack's 2.0.0: the pack may not describe that package's version; add a pack for it, or remove it from packs.demo.covers in llm-docs.json",
     ]);
   });
+
+  async function editManifest(
+    root: string,
+    edit: (manifest: Record<string, unknown> & { pack: { version: string } }) => void
+  ): Promise<void> {
+    const path = join(root, 'agent-docs', 'demo', 'manifest.json');
+    const manifest = JSON.parse(await readFile(path, 'utf-8'));
+    edit(manifest);
+    await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
+  }
+
+  it('fails a manifest edited to disagree with its recipe, and sync rebuilds it', async () => {
+    const root = await builtProject();
+    await editManifest(root, (manifest) => {
+      manifest.pack.version = '9.9.9';
+    });
+
+    expect(problems(await verifyPacks(root, undefined))).toContain(
+      "demo manifest-schema fail: manifest.json manifest.json does not match the v3 schema at pack.version: differs from recipe.version (the manifest was edited); run 'llm-docs sync demo' to rebuild the pack"
+    );
+    const synced = await syncPacks(root, undefined);
+    expect(synced.packs.map((pack) => [pack.id, pack.status])).toEqual([['demo', 'built']]);
+    expect((await readPackManifest(join(root, 'agent-docs', 'demo'))).pack.version).toBe('1.0.0');
+
+    await editManifest(root, (manifest) => {
+      const recipe = manifest.recipe as { sources: { path: string }[] };
+      recipe.sources[0] = { ...recipe.sources[0], path: 'elsewhere' } as { path: string };
+    });
+    expect(problems(await verifyPacks(root, undefined))).toContain(
+      'demo manifest-schema fail: manifest.json manifest.json does not match the v3 schema at recipeHash: is not the hash of "recipe" (the manifest was edited); run \'llm-docs sync demo\' to rebuild the pack'
+    );
+  });
+
+  it('never reads a file a manifest path places outside the pack', async () => {
+    const root = await builtProject();
+    await writeFile(join(root, 'secret.txt'), 'guess-me');
+    await editManifest(root, (manifest) => {
+      (manifest.outputs as unknown[]).push({
+        path: '../../secret.txt',
+        kind: 'passthrough',
+        sha256: `sha256:${createHash('sha256').update('guess-me').digest('hex')}`,
+        bytes: 8,
+      });
+    });
+
+    const report = await verifyPacks(root, undefined);
+    expect(report.ok).toBe(false);
+    expect(problems(report).filter((line) => line.startsWith('demo '))[0]).toMatch(
+      /^demo manifest-schema fail: manifest\.json .* at outputs\.\d+\.path: must be a relative POSIX path with no "\.\."/
+    );
+    expect(report.results.find((result) => result.check === 'outputs')?.status).toBe('skipped');
+  });
+
+  it('fails unlisted-files for a tree deeper than the walk examines, naming where it stopped', async () => {
+    const root = await builtProject();
+    const deep = Array.from({ length: 66 }, () => 'd').join('/');
+    await writeFiles(join(root, 'agent-docs', 'demo'), { [`pages/${deep}/hidden.md`]: 'x' });
+
+    const report = await verifyPacks(root, undefined);
+    expect(report.ok).toBe(false);
+    expect(problems(report)).toEqual([
+      `demo unlisted-files fail: pages/${Array.from({ length: 64 }, () => 'd').join('/')}/ directory is more than 64 levels deep, so verify could not examine what it holds; remove it, or run 'llm-docs sync demo' to rebuild the pack`,
+    ]);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports an unreadable pack file as a finding and still checks every other check and pack',
+    async () => {
+      const root = await makeProject({ demo: PACK, other: PACK }, DOCS);
+      await syncPacks(root, undefined);
+      const page = join(root, 'agent-docs', 'demo', 'pages', 'index.md');
+      await chmod(page, 0o000);
+
+      try {
+        const report = await verifyPacks(root, undefined);
+        expect(report.ok).toBe(false);
+        expect(problems(report)).toEqual([
+          expect.stringMatching(
+            /^demo outputs fail: pages\/index\.md listed output is unreadable \(EACCES.*\); run 'llm-docs sync demo' to rebuild the pack$/
+          ),
+          expect.stringMatching(
+            /^demo links fail: pages\/index\.md file is unreadable \(EACCES.*\), so its links were not checked; run 'llm-docs sync demo' to rebuild the pack$/
+          ),
+        ]);
+        expect(
+          report.results
+            .filter((result) => result.packId === 'other')
+            .map((result) => result.status)
+        ).not.toContain('skipped');
+      } finally {
+        await chmod(page, 0o644);
+      }
+    }
+  );
+
+  it.skipIf(!canCreateSymlinks)(
+    'fails unlisted-files for a linked pack directory or guides/ and reads nothing through either',
+    async () => {
+      const root = await builtProject();
+      const outside = await mkdtemp(join(await realpath(tmpdir()), 'llm-docs-outside-'));
+      tempDirs.push(outside);
+      await writeFiles(outside, { 'a.md': '# Outside\n\nSee [missing](pages/nowhere.md).\n' });
+
+      await symlink(outside, join(root, 'agent-docs', 'demo', 'guides'));
+      const linkedGuides = await verifyPacks(root, undefined);
+      expect(problems(linkedGuides).filter((line) => line.startsWith('demo '))).toEqual([
+        "demo unlisted-files fail: guides symbolic link inside the pack; delete it, or run 'llm-docs sync demo' to rebuild the pack",
+      ]);
+      expect(linkedGuides.results.find((result) => result.check === 'citations')).toMatchObject({
+        status: 'skipped',
+        reason: 'guides/ is a symbolic link, which verify never follows',
+      });
+      await rm(join(root, 'agent-docs', 'demo', 'guides'));
+
+      const packDir = join(root, 'agent-docs', 'demo');
+      await cp(packDir, join(outside, 'demo'), { recursive: true });
+      await rm(packDir, { recursive: true });
+      await symlink(join(outside, 'demo'), packDir);
+      const linkedPack = await verifyPacks(root, undefined);
+      expect(problems(linkedPack).filter((line) => line.startsWith('demo '))).toEqual([
+        "demo unlisted-files fail: . the pack directory is a symbolic link, which verify never follows; delete the link, then run 'llm-docs sync demo' to build the pack in place",
+      ]);
+      expect(linkedPack.ok).toBe(false);
+      await expect(readPackManifest(packDir)).rejects.toThrow(
+        'the pack directory is a symbolic link, which llm-docs never reads a pack through'
+      );
+    }
+  );
 
   it('reports a missing manifest and an invalid config', async () => {
     const root = await makeProject({ demo: PACK }, DOCS);

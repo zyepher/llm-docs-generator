@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 
@@ -10,6 +10,7 @@ import {
   isExactSemver,
   parseYamlStrings,
   readJsonIfExists,
+  readTextIfExists,
   recordValue,
   stringValue,
   type LockfileContext,
@@ -97,6 +98,91 @@ function isRegistryTarball(resolved: string | undefined): boolean {
   return resolved === undefined || resolved.includes('/-/');
 }
 
+/** The public npm registry's hosts, including the yarn and npmmirror mirrors of it. */
+const DEFAULT_NPM_REGISTRY_HOSTS: ReadonlySet<string> = new Set([
+  'registry.npmjs.org',
+  'registry.npmjs.com',
+  'registry.yarnpkg.com',
+  'registry.npmmirror.com',
+  'registry.npm.taobao.org',
+]);
+
+function isDefaultNpmRegistry(url: string): boolean {
+  if (!URL.canParse(url)) {
+    return false;
+  }
+  const parsed = new URL(url);
+  return (
+    (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+    DEFAULT_NPM_REGISTRY_HOSTS.has(parsed.hostname.toLowerCase())
+  );
+}
+
+/** The registries a project's config sends packages to: its default, and per `@scope`. */
+interface NpmRegistries {
+  default: string | undefined;
+  scopes: Map<string, string>;
+}
+
+/**
+ * The registries a project configures next to its lockfile, read as data
+ * only: `.npmrc` (`registry=` and `@scope:registry=`), or for yarn berry,
+ * which ignores it, `.yarnrc.yml` (`npmRegistryServer`, `npmScopes`).
+ */
+async function readNpmRegistries(
+  context: LockfileContext,
+  format: 'npmrc' | 'yarnrc'
+): Promise<NpmRegistries> {
+  const registries: NpmRegistries = { default: undefined, scopes: new Map() };
+
+  if (format === 'yarnrc') {
+    const text = await readTextIfExists(join(context.directory, '.yarnrc.yml'));
+    const config = recordValue(text === undefined ? undefined : parseYamlStrings(text));
+    registries.default = stringValue(config.npmRegistryServer);
+    for (const [scope, value] of Object.entries(recordValue(config.npmScopes))) {
+      const server = stringValue(recordValue(value).npmRegistryServer);
+      if (server !== undefined) {
+        registries.scopes.set(`@${scope.replace(/^@/, '')}`, server);
+      }
+    }
+    return registries;
+  }
+
+  const text = await readTextIfExists(join(context.directory, '.npmrc'));
+  for (const line of (text ?? '').split(/\r?\n/)) {
+    const match = /^\s*(@[^:=\s]+:)?registry\s*=\s*(.*?)\s*$/.exec(line);
+    const value = match?.[2]?.replace(/^(["'])(.*)\1$/, '$2');
+    if (match === null || value === undefined || value === '') {
+      continue;
+    }
+    if (match[1] === undefined) {
+      registries.default = value;
+    } else {
+      registries.scopes.set(match[1].slice(0, -1), value);
+    }
+  }
+  return registries;
+}
+
+/**
+ * Whether a package came from the public registry: by the URL the lockfile
+ * recorded for it when there is one, else by where the project's config
+ * sends its scope (a value such as `${REGISTRY}` is not the public registry).
+ */
+function fromDefaultRegistry(
+  registries: NpmRegistries,
+  name: string,
+  recorded: string | undefined
+): boolean {
+  if (recorded !== undefined && recorded !== '') {
+    return isDefaultNpmRegistry(recorded);
+  }
+  const scope = name.startsWith('@') ? name.slice(0, name.indexOf('/')) : undefined;
+  const configured =
+    (scope === undefined ? undefined : registries.scopes.get(scope)) ?? registries.default;
+  return configured === undefined || isDefaultNpmRegistry(configured);
+}
+
 /** Split `name@version`, keeping the leading `@` of a scoped name. */
 function splitNameAtVersion(value: string): { name: string; version: string } | undefined {
   const at = value.indexOf('@', value.startsWith('@') ? 1 : 0);
@@ -114,12 +200,13 @@ function splitNameAtVersion(value: string): { name: string; version: string } | 
 
 export async function parseNpmPackageLock(context: LockfileContext): Promise<LockfileResult> {
   const lock = recordValue(JSON.parse(context.text));
+  const registries = await readNpmRegistries(context, 'npmrc');
 
   if (isRecord(lock.packages)) {
-    return parseNpmPackagesTree(context, lock.packages);
+    return parseNpmPackagesTree(context, lock.packages, registries);
   }
 
-  return parseNpmLegacyTree(context, recordValue(lock.dependencies));
+  return parseNpmLegacyTree(context, recordValue(lock.dependencies), registries);
 }
 
 /**
@@ -129,7 +216,8 @@ export async function parseNpmPackageLock(context: LockfileContext): Promise<Loc
  */
 function parseNpmPackagesTree(
   context: LockfileContext,
-  packages: Record<string, unknown>
+  packages: Record<string, unknown>,
+  registries: NpmRegistries
 ): LockfileResult {
   const result = createLockfileResult();
   const importers = new Map<string, NpmDeclarations>();
@@ -182,6 +270,11 @@ function parseNpmPackagesTree(
       continue;
     }
 
+    if (!fromDefaultRegistry(registries, installedName, resolved)) {
+      result.skipped.push({ name: installedName, reason: 'alternate-registry' });
+      continue;
+    }
+
     const parentImporter = importers.get(parent);
     const direct =
       (parentImporter?.byName.has(installedName) ?? false) ||
@@ -197,28 +290,69 @@ function parseNpmPackagesTree(
   return result;
 }
 
-/** lockfileVersion 1: the nested `dependencies` tree, with package.json for directness. */
+/**
+ * lockfileVersion 1: the nested `dependencies` tree, with package.json for
+ * directness. A workspace member appears as a `file:<member>` entry whose own
+ * `dependencies` are the ones it could not share with the root, so they are
+ * direct when the member declares them, as in lockfile versions 2 and 3.
+ */
 async function parseNpmLegacyTree(
   context: LockfileContext,
-  dependencies: Record<string, unknown>
+  dependencies: Record<string, unknown>,
+  registries: NpmRegistries
 ): Promise<LockfileResult> {
   const result = createLockfileResult();
   const manifest = await readJsonIfExists(join(context.directory, 'package.json'));
-  const declarations = emptyNpmDeclarations();
+  const root = emptyNpmDeclarations();
+  const members = new Map<string, NpmDeclarations>();
 
   if (manifest === undefined) {
     result.warnings.push(
       'no package.json next to the lockfile, so no dependency is marked direct.'
     );
   } else {
-    addNpmDeclarations(declarations, manifest);
+    addNpmDeclarations(root, manifest);
+    const workspaces = recordValue(manifest).workspaces;
+    const expansion = await expandWorkspacePatterns(
+      context.directory,
+      (Array.isArray(workspaces)
+        ? workspaces
+        : arrayValue(recordValue(workspaces).packages)
+      ).filter(isNonEmptyString)
+    );
+    result.warnings.push(...expansion.warnings);
+    for (const member of expansion.members) {
+      const declarations = emptyNpmDeclarations();
+      addNpmDeclarations(
+        declarations,
+        await readJsonIfExists(join(context.directory, ...member.split('/'), 'package.json'))
+      );
+      members.set(member, declarations);
+    }
   }
 
-  const visit = (tree: Record<string, unknown>, topLevel: boolean): void => {
+  // The root's own entries, plus a member's dependency hoisted to the root.
+  const declaredAtRoot = (name: string): boolean =>
+    root.byName.has(name) ||
+    [...members.values()].some((declarations) => declarations.byName.has(name));
+
+  const visit = (
+    tree: Record<string, unknown>,
+    isDirect: ((name: string) => boolean) | undefined
+  ): void => {
     for (const [name, value] of Object.entries(tree)) {
       const entry = recordValue(value);
       const version = stringValue(entry.version) ?? '';
       const resolved = stringValue(entry.resolved);
+      const member = version.startsWith('file:')
+        ? members.get(posix.normalize(version.slice('file:'.length)).replace(/\/+$/, ''))
+        : undefined;
+
+      if (member !== undefined) {
+        result.skipped.push({ name, reason: 'workspace' });
+        visit(recordValue(entry.dependencies), (child) => member.byName.has(child));
+        continue;
+      }
 
       if (version.startsWith('npm:')) {
         result.skipped.push({ name, reason: 'alias' });
@@ -226,20 +360,22 @@ async function parseNpmLegacyTree(
         result.skipped.push({ name, reason: npmSpecifierSkipReason(version) });
       } else if (!isRegistryTarball(resolved)) {
         result.skipped.push({ name, reason: npmSpecifierSkipReason(resolved ?? '') });
+      } else if (!fromDefaultRegistry(registries, name, resolved)) {
+        result.skipped.push({ name, reason: 'alternate-registry' });
       } else {
         result.dependencies.push(
           npmDependency(context, name, version, {
-            direct: topLevel && declarations.byName.has(name),
+            direct: isDirect?.(name) ?? false,
             dev: entry.dev === true,
           })
         );
       }
 
-      visit(recordValue(entry.dependencies), false);
+      visit(recordValue(entry.dependencies), undefined);
     }
   };
 
-  visit(dependencies, true);
+  visit(dependencies, declaredAtRoot);
   return result;
 }
 
@@ -272,6 +408,11 @@ export async function parsePnpmLock(context: LockfileContext): Promise<LockfileR
 
   const importers = isRecord(lock.importers) ? Object.values(lock.importers) : [lock];
   const direct = new Map<string, { dev: boolean }>();
+  const packages = recordValue(lock.packages);
+  const registries = await readNpmRegistries(context, 'npmrc');
+  // pnpm records a tarball URL only for a package from a registry other than the configured one.
+  const tarballOf = (key: string): string | undefined =>
+    stringValue(recordValue(recordValue(packages[key]).resolution).tarball);
 
   for (const importer of importers.map(recordValue)) {
     for (const field of NPM_DECLARATION_FIELDS) {
@@ -297,6 +438,17 @@ export async function parsePnpmLock(context: LockfileContext): Promise<LockfileR
           continue;
         }
 
+        if (
+          !fromDefaultRegistry(
+            registries,
+            name,
+            tarballOf(`${name}@${raw}`) ?? tarballOf(`/${name}@${raw}`)
+          )
+        ) {
+          result.skipped.push({ name, reason: 'alternate-registry' });
+          continue;
+        }
+
         const key = `${name}@${version}`;
         const dev = field === 'devDependencies';
         const existing = direct.get(key);
@@ -306,7 +458,7 @@ export async function parsePnpmLock(context: LockfileContext): Promise<LockfileR
     }
   }
 
-  for (const [key, value] of Object.entries(recordValue(lock.packages))) {
+  for (const [key, value] of Object.entries(packages)) {
     const entry = recordValue(value);
     const parsed = splitNameAtVersion(stripPeerSuffix(key.replace(/^\//, '')));
     const resolution = recordValue(entry.resolution);
@@ -334,6 +486,11 @@ export async function parsePnpmLock(context: LockfileContext): Promise<LockfileR
 
     if (tarball !== undefined && !isRegistryTarball(tarball)) {
       result.skipped.push({ name: parsed.name, reason: npmSpecifierSkipReason(tarball) });
+      continue;
+    }
+
+    if (!fromDefaultRegistry(registries, parsed.name, tarball)) {
+      result.skipped.push({ name: parsed.name, reason: 'alternate-registry' });
       continue;
     }
 
@@ -477,6 +634,7 @@ async function parseYarnClassic(context: LockfileContext): Promise<LockfileResul
   const declarations =
     (await readNpmWorkspaceDeclarations(context, result)) ?? emptyNpmDeclarations();
   const declaredDescriptors = new Set<string>();
+  const registries = await readNpmRegistries(context, 'npmrc');
 
   for (const [name, declaration] of declarations.byName) {
     for (const range of declaration.ranges) {
@@ -517,6 +675,11 @@ async function parseYarnClassic(context: LockfileContext): Promise<LockfileResul
         name: parsed.name,
         reason: npmSpecifierSkipReason(resolved ?? range),
       });
+      continue;
+    }
+
+    if (!fromDefaultRegistry(registries, parsed.name, resolved)) {
+      result.skipped.push({ name: parsed.name, reason: 'alternate-registry' });
       continue;
     }
 
@@ -591,6 +754,7 @@ async function parseYarnBerry(context: LockfileContext): Promise<LockfileResult>
   const lock = recordValue(parseYamlStrings(context.text));
   const declarations = emptyNpmDeclarations();
   const declaredDescriptors = new Set<string>();
+  const registries = await readNpmRegistries(context, 'yarnrc');
 
   for (const [key, value] of Object.entries(lock)) {
     const entry = recordValue(value);
@@ -659,6 +823,11 @@ async function parseYarnBerry(context: LockfileContext): Promise<LockfileResult>
       continue;
     }
 
+    if (!fromDefaultRegistry(registries, name, undefined)) {
+      result.skipped.push({ name, reason: 'alternate-registry' });
+      continue;
+    }
+
     candidates.push({
       name,
       version: reference.slice('npm:'.length),
@@ -695,6 +864,8 @@ export async function parseBunLock(context: LockfileContext): Promise<LockfileRe
   if (errors.length > 0) {
     throw new Error(`invalid JSONC at offset ${errors[0]?.offset ?? 0}`);
   }
+
+  const registries = await readNpmRegistries(context, 'npmrc');
 
   const lock = recordValue(parsed);
   const workspaceNames = new Set<string>();
@@ -734,6 +905,12 @@ export async function parseBunLock(context: LockfileContext): Promise<LockfileRe
         name: installedName,
         reason: npmSpecifierSkipReason(parsedSpec.version),
       });
+      continue;
+    }
+
+    // The second element is the registry the package came from, empty for the configured default.
+    if (!fromDefaultRegistry(registries, installedName, stringValue(arrayValue(value)[1]))) {
+      result.skipped.push({ name: installedName, reason: 'alternate-registry' });
       continue;
     }
 

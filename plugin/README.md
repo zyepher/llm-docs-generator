@@ -57,7 +57,7 @@ Codex reads `AGENTS.md`, so the pack list that `llm-docs sync` writes there reac
 
 The note has up to four parts. The hook leaves out any part with nothing in it.
 
-1. Packs that need a rebuild because the lockfile moved, the recipe changed, or the pack was never built, each with the command that fixes it.
+1. Packs to fix because the lockfile moved, no lockfile resolves the pack's dependency, the lockfiles disagree on it, the recipe changed, or the pack was never built, each with the step that fixes it.
 2. Packs for library versions released after the model's training data cutoff, or within 90 days before it, newest first, with the path to each pack's index. The note tells the agent its memory of these libraries predates these versions and to read the pinned pages before writing code against them.
 3. Direct dependencies in the same window that have no pack, newest first, at most 8, with their release dates.
 4. The pack list itself, when the agent file this host reads has no managed block. This covers projects that keep `AGENTS.md` out of git, and Claude Code sessions where a `CLAUDE.md` hides `AGENTS.md`.

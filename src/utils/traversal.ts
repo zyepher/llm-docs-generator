@@ -108,7 +108,8 @@ export type TraversalEvent =
   | { kind: 'symlink'; absolutePath: string; relativePath: string; depth: number }
   | { kind: 'skipped-directory'; absolutePath: string; relativePath: string; depth: number }
   | { kind: 'depth-pruned'; absolutePath: string; relativePath: string; depth: number }
-  | { kind: 'entries-exhausted' }
+  /** `relativePath` is the directory the walk was listing, or about to list, when it stopped. */
+  | { kind: 'entries-exhausted'; absolutePath: string; relativePath: string }
   | { kind: 'files-exhausted' }
   | { kind: 'unreadable-directory'; absolutePath: string; relativePath: string; error: unknown };
 
@@ -169,7 +170,11 @@ async function* walkBoundedDirectory(
   if (remainingEntries <= 0) {
     if (!state.emittedEntriesExhausted) {
       state.emittedEntriesExhausted = true;
-      yield { kind: 'entries-exhausted' };
+      yield {
+        kind: 'entries-exhausted',
+        absolutePath: directoryPath,
+        relativePath: relative(options.root, directoryPath),
+      };
     }
 
     state.stopped = true;
@@ -202,7 +207,11 @@ async function* walkBoundedDirectory(
 
   if (entryBudgetExhausted && !state.emittedEntriesExhausted) {
     state.emittedEntriesExhausted = true;
-    yield { kind: 'entries-exhausted' };
+    yield {
+      kind: 'entries-exhausted',
+      absolutePath: directoryPath,
+      relativePath: relative(options.root, directoryPath),
+    };
   }
 
   for (const entry of entries) {

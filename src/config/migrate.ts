@@ -13,6 +13,7 @@ import { z } from 'zod';
 
 import {
   CONFIG_FILE_NAME,
+  ConfigError,
   PACK_ID_PATTERN,
   formatSchemaIssues,
   loadOrEmptyConfig,
@@ -28,6 +29,7 @@ import {
   resolveEffectiveOutputPath,
 } from '../utils/fs-path.js';
 import { projectDependencies } from '../deps/lockfiles.js';
+import { normalizeTakenPaths } from '../sources/git.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { readJsonFile } from '../utils/json.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
@@ -295,6 +297,21 @@ function planMigration(manifest: V2Manifest, facts: MigrationFacts): MigrationPl
       'invalid-recipe',
       `The recipe migrated from ${facts.packDir} is invalid (${formatSchemaIssues(`packs.${facts.id}`, checked.error)}); fix the flag it names, or add the pack with 'llm-docs add'.`
     );
+  }
+
+  if (origin.type === 'git') {
+    try {
+      // The check sync applies when it fetches, so a recipe sync would refuse is never written.
+      normalizeTakenPaths(origin.paths ?? ['.']);
+    } catch (error) {
+      if (!(error instanceof ConfigError)) {
+        throw error;
+      }
+      return refuse(
+        'invalid-recipe',
+        `The recipe migrated from ${facts.packDir} is invalid: its path comes from source.git.sourceRootFromRepo in the v2 manifest (${error.message}); add the pack with 'llm-docs add ${facts.id} --git <https repo> --ref <tag or commit>' instead.`
+      );
+    }
   }
 
   return { status: 'planned', id: facts.id, pack, warnings };

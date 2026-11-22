@@ -105,7 +105,7 @@ Each check reports `pass`, `fail`, or `warn`, one line per problem with the pack
 
 When the plugin is installed, each session starts with a note from `llm-docs hook session-start`. `llm-docs status --brief` prints the same text. It has up to four parts, and leaves out any part with nothing in it.
 
-1. **Pinned docs packs that need a rebuild.** Each line ends with the command that fixes it, usually `llm-docs sync <id>`. Run it before you rely on that pack.
+1. **Pinned docs packs to fix.** Each line says what is wrong and ends with the step that fixes it, usually `llm-docs sync <id>`. Do it before you rely on that pack.
 2. **Pinned docs for libraries released after or close to your training data cutoff.** Your memory of these libraries predates the pinned versions. Read the pack index and the pages for the APIs you touch before you write code against them, starting with the pages the pack marks to read first.
 3. **Direct dependencies released after or close to your cutoff with no pinned docs.** Read their current docs before you use their APIs, or pin them with the `add-docs` skill.
 4. **The pack list**, when the agent file your harness reads has no managed block. Treat it like the managed block.

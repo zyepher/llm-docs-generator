@@ -1,5 +1,5 @@
 import type { Dirent } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join, posix, resolve, sep } from 'node:path';
 
 import { FAILSAFE_SCHEMA } from 'js-yaml';
@@ -19,6 +19,42 @@ import {
 export const ECOSYSTEMS = ['npm', 'pypi', 'cargo', 'go', 'pub', 'swiftpm'] as const;
 export type Ecosystem = (typeof ECOSYSTEMS)[number];
 
+export const VERSION_TEXT_MAX = 128;
+
+/**
+ * A version as every boundary accepts it (lockfiles, manifests, config): one
+ * line of printable characters, no whitespace, at most VERSION_TEXT_MAX. `<`,
+ * `>`, and backticks never occur in a real version and are markup wherever a
+ * version is printed, so they are refused too.
+ */
+export function isVersionText(value: string): boolean {
+  return value.length <= VERSION_TEXT_MAX && /^[^\s\p{C}<>`]+$/u.test(value);
+}
+
+/**
+ * Each registry's own package name rule. npm allows the uppercase letters of
+ * legacy names; SwiftPM names are package identities (a repository name, or a
+ * registry `scope.name`).
+ */
+const DEPENDENCY_NAME_PATTERNS: Readonly<Record<Ecosystem, RegExp>> = {
+  npm: /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/i,
+  pypi: /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/i,
+  cargo: /^[a-z0-9_-]+$/i,
+  go: /^[a-z0-9._~+-]+(?:\/[a-z0-9._~+-]+)*$/i,
+  pub: /^[a-z_][a-z0-9_]*$/,
+  swiftpm: /^[a-z0-9_-][a-z0-9._-]*$/i,
+};
+
+const DEPENDENCY_NAME_MAX = 214;
+
+export function isDependencyName(ecosystem: Ecosystem, name: string): boolean {
+  return (
+    name.length <= DEPENDENCY_NAME_MAX &&
+    DEPENDENCY_NAME_PATTERNS[ecosystem].test(name) &&
+    !name.split('/').some((segment) => segment === '.' || segment === '..')
+  );
+}
+
 export interface ResolvedDependency {
   ecosystem: Ecosystem;
   /** Registry name; npm scoped names keep `@scope/name`, PyPI names are PEP 503 normalized. */
@@ -37,7 +73,22 @@ export interface DependencyScan {
   dependencies: ResolvedDependency[];
   /** Project-relative POSIX paths of every lockfile found (including unsupported ones). */
   lockfiles: string[];
+  /**
+   * Lockfiles found but never read: over `maxLockfileBytes`, or still waiting
+   * when the scan was stopped. What they resolve is unknown, so a lookup in
+   * their ecosystem says so instead of answering from the others.
+   */
+  unread: UnreadLockfile[];
   warnings: string[];
+}
+
+export interface UnreadLockfile {
+  /** The lockfile, or `.` when the scan stopped before it found every lockfile. */
+  lockfile: string;
+  /** The ecosystems it could resolve: its own, or every one for `.`. */
+  ecosystems: readonly Ecosystem[];
+  /** Why, as a clause after the path: "is 70000000 bytes, over the ...". */
+  reason: string;
 }
 
 export interface DependencyRef {
@@ -48,7 +99,11 @@ export interface DependencyRef {
 export type DependencyVersionLookup =
   | { kind: 'found'; version: string; lockfiles: string[] }
   | { kind: 'conflict'; versions: { version: string; lockfile: string }[] }
-  | { kind: 'missing'; searched: string[] };
+  | { kind: 'missing'; searched: string[] }
+  | { kind: 'unread'; lockfiles: UnreadLockfile[] };
+
+/** The lockfile size a command reads; a larger one is skipped with a warning. */
+const DEFAULT_MAX_LOCKFILE_BYTES = 64 * 1024 * 1024;
 
 export interface ScanDependenciesOptions {
   maxDepth?: number;
@@ -59,6 +114,11 @@ export interface ScanDependenciesOptions {
    * warning. The session-start hook passes its deadline.
    */
   signal?: AbortSignal;
+  /**
+   * Largest lockfile read, in bytes (default DEFAULT_MAX_LOCKFILE_BYTES).
+   * Parsing is synchronous, so the hook passes a cap its deadline survives.
+   */
+  maxLockfileBytes?: number;
 }
 
 const SCAN_STOPPED_WARNING =
@@ -169,10 +229,14 @@ export async function scanDependencies(
   const warnings: string[] = [];
   const found: { lockfile: string; parser: LockfileParser | undefined; unsupported?: string }[] =
     [];
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+  const maxLockfileBytes = options.maxLockfileBytes ?? DEFAULT_MAX_LOCKFILE_BYTES;
+  const tooDeep: string[] = [];
+  const unread: UnreadLockfile[] = [];
 
   for await (const event of walkBoundedDirectoryTree({
     root,
-    maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
+    maxDepth,
     maxEntries: MAX_WALK_ENTRIES,
     // The file budget never stops the walk; the entry budget is the real bound.
     maxFiles: MAX_WALK_ENTRIES,
@@ -182,6 +246,11 @@ export async function scanDependencies(
   })) {
     if (options.signal?.aborted === true) {
       warnings.push(SCAN_STOPPED_WARNING);
+      unread.push({
+        lockfile: '.',
+        ecosystems: ECOSYSTEMS,
+        reason: 'was not searched to the end before the time limit',
+      });
       break;
     }
 
@@ -196,6 +265,11 @@ export async function scanDependencies(
       warnings.push(
         `Dependency scan could not read ${toPosixPath(event.relativePath) || '.'}: ${errorMessage(event.error)}`
       );
+      continue;
+    }
+
+    if (event.kind === 'depth-pruned') {
+      tooDeep.push(toPosixPath(event.relativePath));
       continue;
     }
 
@@ -221,13 +295,30 @@ export async function scanDependencies(
 
   found.sort((a, b) => compareStringsByCodeUnit(a.lockfile, b.lockfile));
 
+  if (tooDeep.length > 0) {
+    warnings.push(
+      `Dependency scan did not look more than ${maxDepth} directories deep, so lockfiles below ${tooDeep.slice(0, 3).join(', ')}${tooDeep.length > 3 ? ` and ${tooDeep.length - 3} more directories` : ''} were not read.`
+    );
+  }
+
   const dependencies: ResolvedDependency[] = [];
   const skipped: { lockfile: string; name: string; reason: SkipReason }[] = [];
 
   for (const entry of found) {
+    const ecosystem = lockfileEcosystem(entry.lockfile);
+
     if (options.signal?.aborted === true) {
-      warnings.push(SCAN_STOPPED_WARNING);
-      break;
+      if (entry.parser && ecosystem !== undefined) {
+        unread.push({
+          lockfile: entry.lockfile,
+          ecosystems: [ecosystem],
+          reason: 'was not read before the time limit',
+        });
+      }
+      if (!warnings.includes(SCAN_STOPPED_WARNING)) {
+        warnings.push(SCAN_STOPPED_WARNING);
+      }
+      continue;
     }
 
     if (!entry.parser) {
@@ -238,6 +329,14 @@ export async function scanDependencies(
     const absolutePath = join(root, ...entry.lockfile.split('/'));
 
     try {
+      const bytes = (await stat(absolutePath)).size;
+      if (bytes > maxLockfileBytes) {
+        const reason = `is ${bytes} bytes, over the ${maxLockfileBytes}-byte limit for a lockfile`;
+        unread.push({ lockfile: entry.lockfile, ecosystems: ecosystem ? [ecosystem] : [], reason });
+        warnings.push(`${entry.lockfile}: skipped, it ${reason}.`);
+        continue;
+      }
+
       const result = await entry.parser({
         projectRoot: root,
         lockfile: entry.lockfile,
@@ -245,7 +344,18 @@ export async function scanDependencies(
         text: await readFile(absolutePath, 'utf-8'),
       });
 
-      dependencies.push(...result.dependencies);
+      for (const dependency of result.dependencies) {
+        if (
+          isVersionText(dependency.version) &&
+          isDependencyName(dependency.ecosystem, dependency.name)
+        ) {
+          dependencies.push(dependency);
+        } else {
+          warnings.push(
+            `${entry.lockfile}: skipped ${shownText(dependency.name)} at ${shownText(dependency.version)}: not a valid ${dependency.ecosystem} package name and version (a version is one line of printable characters without whitespace, at most ${VERSION_TEXT_MAX}).`
+          );
+        }
+      }
       warnings.push(...result.warnings.map((warning) => `${entry.lockfile}: ${warning}`));
 
       for (const skip of result.skipped) {
@@ -265,6 +375,7 @@ export async function scanDependencies(
   return {
     dependencies: mergeDependencies(dependencies),
     lockfiles: found.map((entry) => entry.lockfile),
+    unread,
     warnings: [...new Set(warnings)].sort(compareStringsByCodeUnit),
   };
 }
@@ -299,12 +410,20 @@ export function projectDependencies(
 /**
  * The version a project resolves for one dependency. Direct entries win when
  * any exist, so a transitive copy at another version (common in npm trees)
- * does not turn a clear answer into a conflict.
+ * does not turn a clear answer into a conflict. A lockfile of its ecosystem
+ * that was never read makes the answer unknown (`unread`), since it could
+ * resolve the dependency to anything.
  */
 export function findDependencyVersion(
-  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles'>,
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread'>,
   ref: DependencyRef
 ): DependencyVersionLookup {
+  const unread = scan.unread.filter((entry) => entry.ecosystems.includes(ref.ecosystem));
+
+  if (unread.length > 0) {
+    return { kind: 'unread', lockfiles: unread };
+  }
+
   const wanted = normalizeDependencyName(ref.ecosystem, ref.name);
   const matches = scan.dependencies.filter(
     (dependency) =>
@@ -312,7 +431,10 @@ export function findDependencyVersion(
       normalizeDependencyName(dependency.ecosystem, dependency.name) === wanted
   );
   const direct = matches.filter((dependency) => dependency.direct);
-  const relevant = direct.length > 0 ? direct : matches;
+  // A Go build selects one version per module, the highest any requirement
+  // names (parseGoMod already applies that inside a workspace), so a direct
+  // requirement in one module never outranks another module's version.
+  const relevant = direct.length > 0 && ref.ecosystem !== 'go' ? direct : matches;
 
   if (relevant.length === 0) {
     return {
@@ -439,7 +561,7 @@ export function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-async function readTextIfExists(path: string): Promise<string | undefined> {
+export async function readTextIfExists(path: string): Promise<string | undefined> {
   try {
     return await readFile(path, 'utf-8');
   } catch (error) {
@@ -600,6 +722,11 @@ function normalizeSkipDirectories(directories: readonly string[]): string[] {
   return prefixes;
 }
 
+/** Lockfile text quoted into a warning: as is when it is one plain token, else JSON-quoted and cut. */
+function shownText(value: string): string {
+  return /^[^\s\p{C}]{1,80}$/u.test(value) ? value : `${JSON.stringify(value.slice(0, 80))}`;
+}
+
 function uniqueSorted(values: Iterable<string>): string[] {
   return [...new Set(values)].sort(compareStringsByCodeUnit);
 }
@@ -671,7 +798,7 @@ function formatSkippedWarning(
   const reasons = uniqueSorted(entries.map((entry) => entry.reason)).join(', ');
   const examples = entries
     .slice(0, MAX_SKIP_EXAMPLES)
-    .map((entry) => `${entry.lockfile}: ${entry.name} (${entry.reason})`)
+    .map((entry) => `${entry.lockfile}: ${shownText(entry.name)} (${entry.reason})`)
     .join('; ');
   const more =
     entries.length > MAX_SKIP_EXAMPLES ? `; and ${entries.length - MAX_SKIP_EXAMPLES} more` : '';
@@ -813,6 +940,24 @@ function missingManifestWarning(manifest: string): string {
   return `no ${manifest} next to the lockfile, so no dependency is marked direct.`;
 }
 
+/** PyPI's own hosts: an index or file URL elsewhere is an alternate registry. */
+const PYPI_HOSTS: ReadonlySet<string> = new Set([
+  'pypi.org',
+  'pypi.python.org',
+  'files.pythonhosted.org',
+]);
+
+function isPypiUrl(url: string): boolean {
+  if (!URL.canParse(url)) {
+    return false;
+  }
+  const parsed = new URL(url);
+  return (
+    (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+    PYPI_HOSTS.has(parsed.hostname.toLowerCase())
+  );
+}
+
 function pypiDependency(
   context: LockfileContext,
   name: string,
@@ -849,6 +994,11 @@ async function parseUvLock(context: LockfileContext): Promise<LockfileResult> {
     }
 
     const normalized = normalizePypiName(name);
+
+    if (isNonEmptyString(source.registry) && !isPypiUrl(source.registry)) {
+      result.skipped.push({ name: normalized, reason: 'alternate-registry' });
+      continue;
+    }
 
     if (isNonEmptyString(source.registry) && version) {
       result.dependencies.push(
@@ -901,6 +1051,7 @@ async function parsePoetryLock(context: LockfileContext): Promise<LockfileResult
     const name = stringValue(pkg.name);
     const version = stringValue(pkg.version);
     const sourceType = stringValue(recordValue(pkg.source).type);
+    const sourceUrl = stringValue(recordValue(pkg.source).url);
 
     if (!name || !version) {
       continue;
@@ -915,6 +1066,12 @@ async function parsePoetryLock(context: LockfileContext): Promise<LockfileResult
 
     if (sourceType === 'url') {
       result.skipped.push({ name: normalized, reason: 'url' });
+      continue;
+    }
+
+    // A package from PyPI records no source; a legacy or explicit index records its URL.
+    if (sourceType !== undefined && !(sourceUrl !== undefined && isPypiUrl(sourceUrl))) {
+      result.skipped.push({ name: normalized, reason: 'alternate-registry' });
       continue;
     }
 
@@ -958,6 +1115,16 @@ async function parsePdmLock(context: LockfileContext): Promise<LockfileResult> {
       continue;
     }
 
+    // pdm records file URLs only when asked to (static_urls); when it did, they say where.
+    const fileUrls = arrayValue(pkg.files).flatMap((file) => {
+      const url = stringValue(recordValue(file).url);
+      return url === undefined ? [] : [url];
+    });
+    if (fileUrls.length > 0 && !fileUrls.some(isPypiUrl)) {
+      result.skipped.push({ name, reason: 'alternate-registry' });
+      continue;
+    }
+
     const flags = declaredDirect(declared ?? emptyDeclared(), name);
     const groups = arrayValue(pkg.groups).filter(isNonEmptyString);
     const dev = flags.direct ? flags.dev : groups.length > 0 && !groups.includes('default');
@@ -972,6 +1139,14 @@ async function parsePipfileLock(context: LockfileContext): Promise<LockfileResul
   const lock = recordValue(JSON.parse(context.text));
   const pipfile = await readTomlIfExists(join(context.directory, 'Pipfile'));
   const declared = emptyDeclared();
+  const sourceUrls = new Map(
+    arrayValue(recordValue(lock._meta).sources).flatMap((value) => {
+      const source = recordValue(value);
+      const name = stringValue(source.name);
+      const url = stringValue(source.url);
+      return name === undefined || url === undefined ? [] : [[name, url] as const];
+    })
+  );
 
   if (pipfile) {
     addRequirementTable(declared.prod, pipfile.packages);
@@ -1005,6 +1180,13 @@ async function parsePipfileLock(context: LockfileContext): Promise<LockfileResul
         continue;
       }
 
+      const index = stringValue(entry.index);
+      const indexUrl = index === undefined ? undefined : sourceUrls.get(index);
+      if (index !== undefined && !(indexUrl !== undefined && isPypiUrl(indexUrl))) {
+        result.skipped.push({ name, reason: 'alternate-registry' });
+        continue;
+      }
+
       const flags = declaredDirect(declared, name);
       const dev = flags.direct ? flags.dev : section === 'develop';
       result.dependencies.push(
@@ -1031,6 +1213,11 @@ async function parseRequirementsTxt(context: LockfileContext): Promise<LockfileR
     fileName.replace(/\.txt$/, '')
   );
   const logicalLines = context.text.replace(/\\\r?\n/g, ' ').split(/\r?\n/);
+  // An --index-url replaces PyPI for every pin in the file (--extra-index-url only adds one).
+  const indexUrl = logicalLines
+    .map((line) => /^\s*(?:--index-url|-i)(?:\s+|=)(\S+)/.exec(line)?.[1])
+    .find((url) => url !== undefined);
+  const alternate = indexUrl !== undefined && !isPypiUrl(indexUrl);
 
   for (const rawLine of logicalLines) {
     const withoutComment = rawLine.replace(/(?:^|\s)#.*$/, '');
@@ -1046,6 +1233,11 @@ async function parseRequirementsTxt(context: LockfileContext): Promise<LockfileR
     const match = REQUIREMENT_PIN_PATTERN.exec(requirement);
 
     if (match?.[1] === undefined || match[2] === undefined) {
+      continue;
+    }
+
+    if (alternate) {
+      result.skipped.push({ name: normalizePypiName(match[1]), reason: 'alternate-registry' });
       continue;
     }
 
@@ -1262,18 +1454,52 @@ function unquoteGoToken(token: string): string {
   return token.replace(/^"(.*)"$/, '$1').replace(/^`(.*)`$/, '$1');
 }
 
-/**
- * `go.mod` require directives, block and single-line forms. A module named on
- * the left of a `replace` directive (any version, or the exact version given)
- * is skipped: the build uses the replacement, not the registry release.
- */
-async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
-  const result = createLockfileResult();
-  const requires: { path: string; version: string; indirect: boolean }[] = [];
-  const replaced: { path: string; version: string | undefined }[] = [];
+interface GoRequirement {
+  path: string;
+  version: string;
+  indirect: boolean;
+}
+
+interface GoReplacement {
+  path: string;
+  /** Absent: every version of the path is replaced. */
+  version: string | undefined;
+}
+
+/** What one `go.mod` or `go.work` says: they share one syntax of directives and `(` blocks. */
+interface GoFile {
+  module: string | undefined;
+  requires: GoRequirement[];
+  replaced: GoReplacement[];
+  uses: string[];
+}
+
+function parseGoFile(text: string): GoFile {
+  const file: GoFile = { module: undefined, requires: [], replaced: [], uses: [] };
   let block: string | undefined;
 
-  for (const rawLine of context.text.split(/\r?\n/)) {
+  const handle = (directive: string, body: string, comment: string): void => {
+    const [first, second] = body.split(/\s+/).map(unquoteGoToken);
+
+    if (directive === 'module' && first) {
+      file.module = first;
+    } else if (directive === 'use' && first) {
+      file.uses.push(first);
+    } else if (directive === 'require' && first && second) {
+      file.requires.push({
+        path: first,
+        version: second,
+        indirect: /(?:^|;)\s*indirect\b/.test(comment.trim()),
+      });
+    } else if (directive === 'replace') {
+      const [path, version] = (body.split('=>')[0] ?? '').trim().split(/\s+/).map(unquoteGoToken);
+      if (path) {
+        file.replaced.push({ path, version });
+      }
+    }
+  };
+
+  for (const rawLine of text.split(/\r?\n/)) {
     const commentIndex = rawLine.indexOf('//');
     const comment = commentIndex >= 0 ? rawLine.slice(commentIndex + 2) : '';
     const line = (commentIndex >= 0 ? rawLine.slice(0, commentIndex) : rawLine).trim();
@@ -1285,10 +1511,9 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
     if (block !== undefined) {
       if (line === ')') {
         block = undefined;
-        continue;
+      } else {
+        handle(block, line, comment);
       }
-
-      handleGoDirective(block, line, comment);
       continue;
     }
 
@@ -1302,32 +1527,126 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
     const directiveMatch = /^(\w+)\s+(.+)$/.exec(line);
 
     if (directiveMatch?.[1] !== undefined && directiveMatch[2] !== undefined) {
-      handleGoDirective(directiveMatch[1], directiveMatch[2], comment);
+      handle(directiveMatch[1], directiveMatch[2], comment);
     }
   }
 
-  function handleGoDirective(directive: string, body: string, comment: string): void {
-    if (directive === 'require') {
-      const [path, version] = body.split(/\s+/).map(unquoteGoToken);
+  return file;
+}
 
-      if (path && version) {
-        requires.push({ path, version, indirect: /(?:^|;)\s*indirect\b/.test(comment.trim()) });
-      }
-    } else if (directive === 'replace') {
-      const [left] = body.split('=>');
-      const [path, version] = (left ?? '').trim().split(/\s+/).map(unquoteGoToken);
+const GO_VERSION_PATTERN = /^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 
-      if (path) {
-        replaced.push({ path, version });
-      }
+/** Semantic version order for Go module versions; undefined when either is not one. */
+function compareGoVersions(a: string, b: string): number | undefined {
+  const left = GO_VERSION_PATTERN.exec(a);
+  const right = GO_VERSION_PATTERN.exec(b);
+
+  if (left === null || right === null) {
+    return undefined;
+  }
+
+  for (const index of [1, 2, 3]) {
+    const difference = Number(left[index]) - Number(right[index]);
+    if (difference !== 0) {
+      return difference;
     }
   }
 
-  for (const requirement of requires) {
+  const [leftPre, rightPre] = [left[4], right[4]];
+  if (leftPre === undefined || rightPre === undefined) {
+    return leftPre === rightPre ? 0 : leftPre === undefined ? 1 : -1;
+  }
+
+  const leftParts = leftPre.split('.');
+  const rightParts = rightPre.split('.');
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index++) {
+    const [x, y] = [leftParts[index], rightParts[index]];
+    if (x === undefined || y === undefined) {
+      return x === undefined ? -1 : 1;
+    }
+    const numeric = /^\d+$/.test(x) && /^\d+$/.test(y);
+    const difference = numeric ? Number(x) - Number(y) : compareStringsByCodeUnit(x, y);
+    if (difference !== 0) {
+      return numeric ? difference : /^\d+$/.test(x) ? -1 : /^\d+$/.test(y) ? 1 : difference;
+    }
+  }
+  return 0;
+}
+
+/**
+ * The workspace a module belongs to: the nearest `go.work` at or above its
+ * directory (inside the project) that `use`s it, with the go.mod of every
+ * module it uses. Go stops at the nearest go.work, and so does this.
+ */
+async function readGoWorkspace(
+  context: LockfileContext
+): Promise<{ modules: GoFile[]; replaced: GoReplacement[] } | undefined> {
+  for (let directory = context.directory; ; directory = dirname(directory)) {
+    const text = await readTextIfExists(join(directory, 'go.work'));
+
+    if (text !== undefined) {
+      const work = parseGoFile(text);
+      const used = work.uses.map((use) => resolve(directory, ...use.split('/')));
+
+      if (!used.includes(context.directory)) {
+        return undefined;
+      }
+
+      const modules: GoFile[] = [];
+      for (const moduleDirectory of used) {
+        const moduleText = await readTextIfExists(join(moduleDirectory, 'go.mod'));
+        if (moduleText !== undefined) {
+          modules.push(parseGoFile(moduleText));
+        }
+      }
+      return { modules, replaced: work.replaced };
+    }
+
+    if (directory === context.projectRoot || dirname(directory) === directory) {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * `go.mod` require directives, block and single-line forms. Inside a
+ * `go.work` workspace, each requirement resolves the way the toolchain's
+ * minimal version selection does: to the highest version any module of the
+ * workspace requires (direct or indirect), so a lower direct requirement
+ * never wins. When two versions cannot be ordered, the module keeps its own,
+ * and the lookup reports the conflict. A module named on the left of a
+ * `replace` directive in the go.mod, or in the workspace's go.work or any of
+ * its modules (any version, or the exact version selected), is skipped: the
+ * build uses the replacement, not the registry release. A requirement on
+ * another module of the workspace is the workspace's own code.
+ */
+async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
+  const result = createLockfileResult();
+  const own = parseGoFile(context.text);
+  const workspace = await readGoWorkspace(context);
+  const modules = workspace?.modules ?? [own];
+  const replaced = [...(workspace?.replaced ?? []), ...modules.flatMap((file) => file.replaced)];
+  const workspaceModules = new Set(
+    workspace === undefined ? [] : modules.flatMap((file) => (file.module ? [file.module] : []))
+  );
+
+  for (const requirement of own.requires) {
+    if (workspaceModules.has(requirement.path)) {
+      result.skipped.push({ name: requirement.path, reason: 'workspace' });
+      continue;
+    }
+
+    let version = requirement.version;
+    for (const other of modules.flatMap((file) => file.requires)) {
+      if (other.path === requirement.path && (compareGoVersions(other.version, version) ?? 0) > 0) {
+        version = other.version;
+      }
+    }
+
     const isReplaced = replaced.some(
       (entry) =>
         entry.path === requirement.path &&
-        (entry.version === undefined || entry.version === requirement.version)
+        (entry.version === undefined || entry.version === version)
     );
 
     if (isReplaced) {
@@ -1339,7 +1658,7 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
     result.dependencies.push({
       ecosystem: 'go',
       name: requirement.path,
-      version: requirement.version,
+      version,
       direct: !requirement.indirect,
       dev: false,
       lockfile: context.lockfile,
@@ -1349,7 +1668,6 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
 
   return result;
 }
-
 // ============================================================================
 // pub (Dart, Flutter)
 // ============================================================================

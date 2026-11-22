@@ -37,6 +37,13 @@ export const HOOK_LIMITS = {
   networkMs: 1_000,
   /** Kept at the end of the deadline for the block check, rendering, and the write. */
   reserveMs: 150,
+  /**
+   * Largest lockfile the hook parses. Parsing is synchronous, so no deadline
+   * can stop it: measured cold, YAML parses at 35 to 72 ms per MiB, TOML at
+   * 16 to 24, JSON at 2 to 11, so a lockfile at this cap costs at most about
+   * 300 ms. A larger one is left to `status`, which reads up to 64 MiB.
+   */
+  maxLockfileBytes: 4 * 1024 * 1024,
   /** Characters of injected text. */
   maxChars: 2_000,
   /** Wall-clock time between background warm-ups of one project. */
@@ -368,6 +375,7 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
         ignoreInvalidCutoff: (problem) => ignoredCutoffs.push(problem),
         offline: false,
         budgetMs: HOOK_LIMITS.networkMs,
+        maxLockfileBytes: HOOK_LIMITS.maxLockfileBytes,
         signal: AbortSignal.timeout(Math.max(0, Math.floor(left() - HOOK_LIMITS.reserveMs))),
         ...(payload.model === undefined ? {} : { model: { id: payload.model, source: 'payload' } }),
         ...(io.registryEndpoints === undefined ? {} : { endpoints: io.registryEndpoints }),

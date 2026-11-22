@@ -250,7 +250,7 @@ const ZOD_PINNED = {
 };
 
 const REBUILD_ZOD = [
-  'Pinned docs packs that need a rebuild:',
+  'Pinned docs packs to fix:',
   "- zod: docs are for 4.0.0 but the lockfile resolves 4.1.0. Fix: set packs.zod.version in llm-docs.json to 4.1.0 (or remove it to follow the lockfile), then run 'llm-docs sync zod'",
 ].join('\n');
 const PINNED_HEADING =
@@ -261,9 +261,9 @@ const DEPENDENCIES_FOOTER =
   'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.';
 const ALL_DEPENDENCIES = [
   DEPENDENCIES_HEADING,
-  '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
-  '- hono 4.13.16 (npm, released 2026-09-02, after cutoff)',
-  '- zod 4.1.0 (npm, released 2026-06-25, near cutoff)',
+  '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
+  '- `hono` 4.13.16 (npm, released 2026-09-02, after cutoff)',
+  '- `zod` 4.1.0 (npm, released 2026-06-25, near cutoff)',
   DEPENDENCIES_FOOTER,
 ].join('\n');
 const BLOCK_HEADER = [
@@ -311,7 +311,9 @@ describe('which project and model the hook reads', () => {
       names.map((name) => project({ lock: npmLock({ [name]: '1.0.0' }) }))
     );
     const named = async (options: RunOptions): Promise<string> =>
-      (injected(await runHook({ cache, ...options })).split('\n')[1] ?? '').split(' ')[1] ?? '';
+      (
+        (injected(await runHook({ cache, ...options })).split('\n')[1] ?? '').split(' ')[1] ?? ''
+      ).replace(/`/g, '');
     const roots = { workspace_roots: [fromRoots], ...OPUS };
 
     expect(
@@ -388,7 +390,7 @@ describe('which project and model the hook reads', () => {
         '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
         '',
         'Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): direct dependencies released after or close to that cutoff with no pinned docs, newest first:',
-        '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+        '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
         DEPENDENCIES_FOOTER,
       ].join('\n')
     );
@@ -400,9 +402,9 @@ describe('which project and model the hook reads', () => {
     expect(injected(await runHook({ payload: { cwd: root, model: 'some-unknown-model' } }))).toBe(
       [
         'Recently released dependencies (your training data may predate them), released in the last 180 days with no pinned docs, newest first:',
-        '- next 16.1.0 (npm, released 2026-10-21)',
-        '- hono 4.13.16 (npm, released 2026-09-02)',
-        '- zod 4.1.0 (npm, released 2026-06-25)',
+        '- `next` 16.1.0 (npm, released 2026-10-21)',
+        '- `hono` 4.13.16 (npm, released 2026-09-02)',
+        '- `zod` 4.1.0 (npm, released 2026-06-25)',
         DEPENDENCIES_FOOTER,
       ].join('\n')
     );
@@ -418,8 +420,8 @@ describe('what the hook says', () => {
 
     expect(injected(await runHook({ payload: { cwd: root, ...OPUS } }))).toBe(
       [
-        'Pinned docs packs that need a rebuild:',
-        '- later: configured but never built. Fix: `llm-docs sync later`',
+        'Pinned docs packs to fix:',
+        '- later: not built or invalid. Fix: `llm-docs sync later`',
       ].join('\n')
     );
   });
@@ -517,7 +519,7 @@ describe('what the hook says', () => {
         '- Zod 4.0.0 (released 2026-05-01, near cutoff): `agent-docs/zod/index.md`',
         '',
         DEPENDENCIES_HEADING,
-        '- next 16.1.0 (npm, released 2026-10-21, after cutoff)',
+        '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
         DEPENDENCIES_FOOTER,
         '',
         `${BLOCK_HEADER}- Hono 4.13.16: \`agent-docs/hono/index.md\``,
@@ -546,7 +548,7 @@ describe('what the hook says', () => {
     const cut = injected(await runHook({ payload: { cwd: overflowing, ...OPUS } }));
     const lines = cut.split('\n');
     expect(cut.length).toBeLessThanOrEqual(HOOK_LIMITS.maxChars);
-    expect(lines[0]).toBe('Pinned docs packs that need a rebuild:');
+    expect(lines[0]).toBe('Pinned docs packs to fix:');
     expect(lines.at(-1)).toMatch(/^- and \d+ more \(run `llm-docs status`\)$/);
     expect(cut).not.toContain(PINNED_HEADING);
     expect(cut).not.toContain(DEPENDENCIES_HEADING);
@@ -573,15 +575,15 @@ describe('what the hook says', () => {
       return text.split('\n').slice(rebuilds + 2);
     };
 
-    expect(await pinnedRow(26)).toEqual([
+    expect(await pinnedRow(29)).toEqual([
       PINNED_HEADING,
       '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/upgrade.md` first, then `agent-docs/hono/index.md`',
     ]);
-    expect(await pinnedRow(27)).toEqual([
+    expect(await pinnedRow(30)).toEqual([
       PINNED_HEADING,
       '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
     ]);
-    expect(await pinnedRow(28)).toEqual([PINNED_HEADING, '- and 1 more (run `llm-docs status`)']);
+    expect(await pinnedRow(31)).toEqual([PINNED_HEADING, '- and 1 more (run `llm-docs status`)']);
   });
 });
 
@@ -764,6 +766,26 @@ describe('background warm-up', () => {
     expect((await runHook(at(5))).spawned).toEqual([]);
     expect((await runHook(at(7))).spawned).toEqual([root]);
     expect((await readdir(join(cache, 'hook-warm'))).length).toBe(1);
+  });
+
+  it('leaves a lockfile over its size cap to the warm-up and says nothing false about packs bound through it', async () => {
+    const root = await project({ packs: { hono: HONO, zod: ZOD_PINNED }, build: ['hono', 'zod'] });
+    const lock = await readFile(join(root, 'package-lock.json'), 'utf-8');
+    await writeFile(
+      join(root, 'package-lock.json'),
+      `${lock}${' '.repeat(HOOK_LIMITS.maxLockfileBytes)}`
+    );
+
+    const run = await runHook({ payload: { cwd: root, ...OPUS } });
+    const text = injected(run);
+    // zod's stale version lives in the unread lockfile: no row claims anything about it.
+    expect(text).not.toContain('Pinned docs packs to fix:');
+    expect(text).not.toContain('zod: ');
+    expect(text.split('\n').slice(0, 2)).toEqual([
+      PINNED_HEADING,
+      '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+    ]);
+    expect(run.spawned).toEqual([root]);
   });
 });
 

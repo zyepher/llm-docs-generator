@@ -146,9 +146,9 @@ Pack checks, in report order:
 
 | Check | Fails when | Fix |
 |---|---|---|
-| `manifest-schema` | `manifest.json` is missing, is not JSON, is not schema version 3, or belongs to another pack id. | Run `llm-docs sync <id>`. For a v2 pack, run `llm-docs migrate` first. |
+| `manifest-schema` | `manifest.json` is missing, is not JSON, is not schema version 3, belongs to another pack id, disagrees with its own recipe (an edited `recipeHash`, `pack.title`, `pack.version`, or `dependency`), or records a path that could leave the pack (absolute, `..`, `.` or empty segments, a backslash, a control character, or outside the directory its kind allows). | Run `llm-docs sync <id>`. For a v2 pack, run `llm-docs migrate` first. |
 | `outputs` | A file the manifest lists is missing, or its hash differs. | A tool-written file was edited. Run `llm-docs sync <id>` to rebuild it, and put your own notes in `guides/`. |
-| `unlisted-files` | A file in the pack is not in the manifest, or the pack holds a symbolic link. Files under `guides/` and `.DS_Store`, `Thumbs.db`, and `desktop.ini` are reported as info only. | Move the file out of the pack, or into `guides/` if it is agent-written text. |
+| `unlisted-files` | A file in the pack is not in the manifest, the pack holds a symbolic link (or the pack directory itself is one), or part of the pack could not be examined (more than 64 directories deep, more than 200,000 entries, or unreadable), named by the directory where the walk stopped. Files under `guides/` and `.DS_Store`, `Thumbs.db`, and `desktop.ini` are reported as info only. | Move the file out of the pack, or into `guides/` if it is agent-written text. |
 | `links` | A relative link in a page, the index, or the combined file does not resolve to a file in the pack, points outside it, or is site-absolute (`/x`). Links with a scheme and links in code are ignored. Under `--strict`, also a fragment that matches no heading on the target page (fragments into `guides/` are not checked). | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
 | `recipe` | The recipe in `llm-docs.json` was edited: resolved at the version the manifest records, it gives another `recipeHash`, or it cannot be resolved. A lockfile that only moved the bound dependency passes here, because `lockfile` reports it. Warns when the config has no such pack (an orphan). | Run `llm-docs sync <id>`. For an orphan, run `llm-docs sync --prune` or add the pack back. |
 | `lockfile` | The pack has a dependency and the lockfiles resolve it to another version, or no lockfile resolves it. When lockfiles disagree, warns if one of them matches the pack's version and fails otherwise. A package the pack `covers` never fails it: it warns only when the lockfiles resolve that package to another major version than the pack's, since the pack may not describe that version. | Run `llm-docs sync <id>`. If the recipe sets `version`, change or remove it first, because an explicit version wins. For a covered package on another major, add a pack for it or drop it from `covers`. |
@@ -172,6 +172,9 @@ Pack states:
 |---|---|---|
 | `ok` | Built, and matches its recipe and lockfile. | None. |
 | `stale-pack` | The lockfile resolves another version (or lockfiles disagree and none matches). | `llm-docs sync <id>`, after editing `version` when the recipe pins one. |
+| `lockfile-conflict` | Lockfiles resolve the bound dependency to different versions, one of them the pack's. | Set `version` to the one the docs describe, or make the lockfiles agree. |
+| `not-in-lockfile` | No lockfile resolves the bound dependency, so nothing checks the pack's version. | Install the dependency, or remove `dependency` from the recipe. |
+| `lockfile-unread` | A lockfile of the dependency's ecosystem was not read (over the 64 MiB lockfile limit), so the pack's version is unknown. | Check the version by hand. |
 | `recipe-changed` | The recipe changed since the last sync. | `llm-docs sync <id>`. |
 | `missing` | Configured but not built, or its manifest cannot be read. | `llm-docs sync <id>`. |
 | `orphan` | Built but no longer in the config. | `llm-docs sync --prune`, or add it back. |

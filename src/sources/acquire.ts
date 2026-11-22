@@ -415,14 +415,32 @@ function describeSelected(selected: SelectedFile): string {
 }
 
 /**
+ * The key under which two pack paths name one file on a case-insensitive,
+ * normalization-insensitive file system. NFKC, then full case folding (upper
+ * then lower case, which applies Unicode's full mappings such as ß to ss and
+ * ſ to s, where toLowerCase alone does not), then NFKC again. It is
+ * deliberately coarser than any one file system: APFS keeps İ and i apart and
+ * so does this key, but NFKC also merges compatibility forms (ﬀ and ff) that
+ * some file systems keep apart. Refusing a pair that would have been fine is
+ * the safe side of that line.
+ */
+function pathCollisionKey(path: string): string {
+  return path.normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC');
+}
+
+/**
  * Output paths must be distinct on case-insensitive file systems (macOS,
  * Windows) and valid on Windows, so a pack checks out identically everywhere.
+ * Directories collide too: `Guide/a.md` and `guide/b.md` would share one
+ * directory under either spelling.
  */
 function assertPortableOutputPaths(files: readonly SelectedFile[]): void {
-  const byFoldedPath = new Map<string, SelectedFile>();
+  const byKey = new Map<string, { path: string; selected: SelectedFile; isFile: boolean }>();
 
   for (const selected of files) {
-    for (const segment of selected.outputPath.split('/')) {
+    const segments = selected.outputPath.split('/');
+
+    for (const segment of segments) {
       const problem = windowsSegmentProblem(segment);
 
       if (problem !== undefined) {
@@ -432,16 +450,20 @@ function assertPortableOutputPaths(files: readonly SelectedFile[]): void {
       }
     }
 
-    const folded = selected.outputPath.normalize('NFC').toLowerCase();
-    const previous = byFoldedPath.get(folded);
+    for (let length = 1; length <= segments.length; length++) {
+      const path = segments.slice(0, length).join('/');
+      const key = pathCollisionKey(path);
+      const previous = byKey.get(key);
+      const isFile = length === segments.length;
 
-    if (previous !== undefined) {
-      throw new ConfigError(
-        `${describeSelected(previous)} and ${describeSelected(selected)} would both be written to ${previous.outputPath} (paths that differ only by case or extension collide); exclude one of them or give a source a different "mount".`
-      );
+      if (previous === undefined) {
+        byKey.set(key, { path, selected, isFile });
+      } else if (previous.path !== path || previous.isFile || isFile) {
+        throw new ConfigError(
+          `${describeSelected(previous.selected)} and ${describeSelected(selected)} would both be written to ${previous.path === path ? path : `${previous.path} and ${path}, one path on a case- or normalization-insensitive file system`} (paths that differ only by case, Unicode form, or extension collide); exclude one of them or give a source a different "mount".`
+        );
+      }
     }
-
-    byFoldedPath.set(folded, selected);
   }
 }
 
