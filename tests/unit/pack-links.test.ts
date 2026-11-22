@@ -248,6 +248,34 @@ describe('createPackLinkRewriter: site paths (spec 4.5 step 3)', () => {
     );
   });
 
+  it('keeps the page extension of an alias key, so it never captures a directory', () => {
+    const aliased = {
+      baseUrl: 'https://docs.example.com',
+      aliases: { '/guide.html': '/guide/introduction' },
+    };
+    expect(rewritten('[a](/guide/intro.md)', 'index.md', { site: aliased })).toBe(
+      '[a](guide/intro.md)'
+    );
+  });
+
+  it('keeps the extension of an alias target that names a passthrough file', () => {
+    const download = {
+      baseUrl: 'https://docs.example.com',
+      aliases: { '/download': '/static/report.html' },
+    };
+    const passthrough: PackFileRef[] = [
+      {
+        sourceIndex: 0,
+        sourcePath: 'static/report.html',
+        outputPath: 'files/static/report.html',
+        localPath: 'docs/static/report.html',
+      },
+    ];
+    expect(rewritten('[a](/download)', 'index.md', { site: download, passthrough })).toBe(
+      '[a](../files/static/report.html)'
+    );
+  });
+
   it('turns an unmatched site-absolute link into baseUrl + path', () => {
     const result = rewriteLocal('[a](/blog/post#top)', 'guide/intro.md', { site });
     expect(result.text).toBe('[a](https://docs.example.com/blog/post#top)');

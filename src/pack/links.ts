@@ -202,13 +202,12 @@ function pickRoute(
 }
 
 /**
- * Normalize an alias map: keys and values are site paths with a leading
- * slash, no trailing slash, and no page extension, so `/guide/latest` also
- * matches a link written `/guide/latest.md`; the longest matching prefix wins.
+ * Normalize an alias map: keys and targets are site paths with a leading
+ * slash and no trailing slash, otherwise kept as written; the longest
+ * matching prefix wins.
  */
 function compileAliases(aliases: Readonly<Record<string, string>>): (path: string) => string {
-  const normalize = (path: string): string =>
-    `/${path.replace(/^\/+|\/+$/g, '').replace(ROUTE_EXTENSION, '')}`;
+  const normalize = (path: string): string => `/${path.replace(/^\/+|\/+$/g, '')}`;
   const entries = Object.entries(aliases)
     .map(([from, to]) => [normalize(from), normalize(to)] as const)
     .sort(([a], [b]) => b.length - a.length || compareStringsByCodeUnit(a, b));
@@ -322,14 +321,17 @@ export function createPackLinkRewriter(context: PackLinkContext): LinkRewriter {
   }
 
   /**
-   * A pack file named by a site path (aliases applied), or undefined. A page is
-   * matched by route, so aliases apply to the path with its page extension
-   * dropped, the same normalization the route lookup makes.
+   * A pack file named by a site path (aliases applied), or undefined. The path
+   * as written is tried first (a passthrough file, then a page), then the path
+   * with its page extension dropped, so an alias key written without an
+   * extension (`/guide/latest`) also matches a link written `/guide/latest.md`.
    */
   const findBySitePath = (sitePath: string, preferIndex: boolean): PackFileRef | undefined => {
+    const written = applyAliases(sitePath);
     const route = sitePath.replace(/\/+$/, '').replace(ROUTE_EXTENSION, '');
     return (
-      siteFiles.get(applyAliases(sitePath)) ??
+      siteFiles.get(written) ??
+      pickRoute(sitePages.get(siteRoute(written)), preferIndex) ??
       pickRoute(sitePages.get(siteRoute(applyAliases(route))), preferIndex)
     );
   };

@@ -491,8 +491,9 @@ inline links, images, reference definitions, autolinks, and the URL attributes i
    page to that page, fragment kept.
 3. Site-absolute (`/x/y`) or absolute URL on `site.baseUrl`'s origin: aliases applied first,
    then matched against the acquired pages' site paths. Aliases match on segment boundaries,
-   with a trailing slash and a `.md`, `.mdx`, `.markdown`, `.html`, `.htm`, or `.rst` extension
-   dropped from both the alias and the path before a page is looked up, so the alias
+   and an alias key or target keeps its extension (only a trailing slash is dropped), so the
+   key `/old.html` never captures `/old/`. The path is looked up as written first, then with
+   a `.md`, `.mdx`, `.markdown`, `.html`, `.htm`, or `.rst` extension dropped, so the alias
    `/guide/latest` also catches `/guide/latest.md`. Site path for an http-acquired page is
    its URL pathname; for a git or local page it is its source path with the extension and a
    trailing `index` removed, relative to the source root. A match rewrites to the relative page
