@@ -1141,6 +1141,41 @@ describe('verifyPacks', () => {
     );
   });
 
+  it("checks a toolchain pack against the project's version files", async () => {
+    const root = await makeProject(
+      {
+        python: {
+          ...PACK,
+          version: '3.14',
+          dependency: { ecosystem: 'toolchain', name: 'python' },
+        },
+      },
+      { ...DOCS, '.python-version': '3.14.2\n' }
+    );
+    await syncPacks(root, undefined);
+    const lockfile = async () =>
+      (await verifyPacks(root, undefined)).results.find((result) => result.check === 'lockfile');
+
+    expect(await lockfile()).toMatchObject({ status: 'pass' });
+
+    await writeFile(join(root, '.python-version'), '3.15.0\n');
+    expect(await lockfile()).toMatchObject({
+      status: 'fail',
+      findings: [
+        {
+          status: 'fail',
+          message:
+            "stale-pack: the project's files state toolchain:python 3.15 (.python-version), the pack is 3.14; set packs.python.version in llm-docs.json to 3.15 (or remove it to follow the project's files), then run 'llm-docs sync python'",
+        },
+      ],
+    });
+
+    await rm(join(root, '.python-version'));
+    expect((await lockfile())?.findings[0]?.message).toBe(
+      'no file in the project states a version of toolchain:python (files that can: .python-version, .tool-versions, Pipfile, pyproject.toml); state the version in one of them, or remove packs.python.dependency from llm-docs.json'
+    );
+  });
+
   it('takes a dependency-bound version from the lockfile and rebuilds when it moves', async () => {
     const pack = { ...PACK, version: undefined, dependency: { ecosystem: 'npm', name: 'demo' } };
     const root = await makeProject(

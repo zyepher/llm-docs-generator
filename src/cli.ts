@@ -45,6 +45,7 @@ import {
 } from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
+import { TOOLCHAINS } from './deps/toolchains.js';
 import { defaultCacheDir } from './deps/registries.js';
 import { formatStatusHuman, gatherProjectStatus } from './deps/status.js';
 import {
@@ -134,6 +135,23 @@ const COMMANDS = [
           'npm:vite',
         ],
         note: "Pin Vite's docs at the version the lockfile resolves, and follow it on every sync",
+      },
+      {
+        argv: [
+          'add',
+          'python',
+          '--git',
+          'https://github.com/python/cpython',
+          '--ref',
+          'v{version}.0',
+          '--path',
+          'Doc/whatsnew',
+          '--path',
+          'Doc/reference',
+          '--dependency',
+          'toolchain:python',
+        ],
+        note: "Pin Python's language reference and \"What's New\" at the version the project's own files state",
       },
       {
         argv: [
@@ -1038,7 +1056,7 @@ const OUTCOME_CODES = {
     'manifest-unreadable': "the pack's manifest.json is unreadable",
     'recipe-edited': 'the recipe in llm-docs.json changed since the last build',
     'lockfile-moved':
-      'llm-docs.json is unchanged, but a lockfile now resolves the bound dependency to another version',
+      'llm-docs.json is unchanged, but a lockfile (or, for a toolchain, a version file) now resolves the bound dependency to another version',
     'files-differ': 'the pack files differ from its manifest (edited, added, or deleted by hand)',
     'sources-changed': 'local source files changed since the last build',
     'upstream-changed': 'refresh: the re-acquired sources differ from the recorded ones',
@@ -1097,6 +1115,7 @@ function capabilities(program: Command): unknown {
       install: CONVERTER_INSTALL_HINTS[tool],
     })),
     ecosystems: ECOSYSTEMS,
+    toolchains: TOOLCHAINS,
     transforms: TRANSFORM_NAMES,
     checks: { pack: PACK_CHECK_NAMES, project: PROJECT_CHECK_NAMES },
     limits: { ...PACK_LIMITS, maxReadFirst: READ_FIRST_MAX, maxCovers: COVERS_MAX },
@@ -1204,7 +1223,7 @@ function buildProgram(): Command {
     add
       .option(
         '--dependency <ecosystem:name>',
-        `Bind the pack to a dependency, such as npm:vite; ecosystems: ${ECOSYSTEMS.join(', ')} (default: none)`
+        `Bind the pack to a dependency, such as npm:vite, or to a language with toolchain:<name> (${TOOLCHAINS.join(', ')}); ecosystems: ${ECOSYSTEMS.join(', ')}`
       )
       .option(
         '--covers <ecosystem:name>',

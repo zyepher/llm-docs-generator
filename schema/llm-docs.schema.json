@@ -90,7 +90,8 @@
                   "cargo",
                   "go",
                   "pub",
-                  "swiftpm"
+                  "swiftpm",
+                  "toolchain"
                 ]
               },
               "name": {
@@ -119,7 +120,8 @@
                     "cargo",
                     "go",
                     "pub",
-                    "swiftpm"
+                    "swiftpm",
+                    "toolchain"
                   ]
                 },
                 "name": {

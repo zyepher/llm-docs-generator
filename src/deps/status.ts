@@ -44,6 +44,7 @@ import {
   type ReleaseInfo,
   type ReleaseQuery,
 } from './registries.js';
+import { TOOLCHAINS, toolchainFileNames } from './toolchains.js';
 import { urlCredentials } from '../utils/url-credentials.js';
 
 export type PackState =
@@ -322,6 +323,7 @@ function packNextStep(
   const id = messageText(pack.id);
   const sync = `llm-docs sync ${id}`;
   const dependency = pack.dependency === null ? 'the dependency' : dependencyLabel(pack.dependency);
+  const toolchain = pack.dependency?.ecosystem === 'toolchain';
 
   switch (state) {
     case 'ok':
@@ -331,14 +333,24 @@ function packNextStep(
     case 'stale-pack':
       if (pack.versionPinned) {
         const to = lookup?.kind === 'found' ? ` to ${messageText(lookup.version)}` : '';
-        return `set packs.${id}.version in ${CONFIG_FILE_NAME}${to} (or remove it to follow the lockfile), then run '${sync}'`;
+        const follow = toolchain ? "the project's files" : 'the lockfile';
+        return `set packs.${id}.version in ${CONFIG_FILE_NAME}${to} (or remove it to follow ${follow}), then run '${sync}'`;
       }
       return sync;
     case 'lockfile-conflict':
+      if (toolchain && pack.versionPinned) {
+        return `make the project's files agree on one version of ${dependency}, or add a pack for each version they state`;
+      }
       return pack.versionPinned
         ? `make the lockfiles agree on one version of ${dependency}, or add a pack for each version they resolve`
         : `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe, then run '${sync}'`;
     case 'not-in-lockfile':
+      if (toolchain) {
+        const files = TOOLCHAINS.flatMap((name) =>
+          name === pack.dependency?.name ? toolchainFileNames(name) : []
+        );
+        return `state its version in one of ${files.join(', ')}, or remove packs.${id}.dependency from ${CONFIG_FILE_NAME}`;
+      }
       return `install ${dependency} so a lockfile resolves it, or remove packs.${id}.dependency from ${CONFIG_FILE_NAME}`;
     case 'other-registry':
       return `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe: ${dependency} comes from another registry, so its version is not taken from the lockfile`;
@@ -347,6 +359,9 @@ function packNextStep(
         lookup?.kind === 'unread'
           ? lookup.lockfiles.map((entry) => `${messageText(entry.lockfile)} ${entry.reason}`)
           : [];
+      if (toolchain) {
+        return `check by hand that the project's files state ${messageText(pack.version ?? 'the pack version')} for ${dependency}: ${unread.join('; ')}`;
+      }
       return `check by hand that the lockfiles resolve ${dependency} to ${messageText(pack.version ?? 'the pack version')}: ${unread.join('; ')}`;
     }
     case 'unusable': {
@@ -362,8 +377,15 @@ function packNextStep(
   }
 }
 
-/** The `discover --package` spec; a SwiftPM package is named by its repository URL. */
+/**
+ * The `discover --package` spec; a SwiftPM package is named by its repository
+ * URL. A toolchain has no package, so the skill says where its docs live.
+ */
 function discoverCommand(dependency: ResolvedDependency): string {
+  if (dependency.ecosystem === 'toolchain') {
+    return `follow the add-docs skill, section "Languages and toolchains" (--dependency toolchain:${messageText(dependency.name)})`;
+  }
+
   const repository = dependency.repositoryUrl;
   const name =
     dependency.ecosystem === 'swiftpm' &&
@@ -592,6 +614,33 @@ function releaseDay(publishedAt: string): string {
 function packStateReason(pack: PackStatus): string | undefined {
   const version = messageText(pack.version ?? 'an unknown version');
   const name = pack.dependency === null ? 'its dependency' : codeSpan(pack.dependency.name);
+
+  if (pack.dependency?.ecosystem === 'toolchain') {
+    switch (pack.state) {
+      case 'stale-pack': {
+        const stated =
+          pack.lockfile?.kind === 'found'
+            ? pack.lockfile.version
+            : pack.lockfile?.kind === 'conflict'
+              ? pack.lockfile.versions.map((entry) => entry.version).join(' / ')
+              : 'unknown';
+        return `docs are for ${version} but the project's files state ${messageText(stated)}`;
+      }
+      case 'lockfile-conflict': {
+        const versions =
+          pack.lockfile?.kind === 'conflict'
+            ? pack.lockfile.versions
+                .map((entry) => `${messageText(entry.version)} in ${codeSpan(entry.lockfile)}`)
+                .join(', ')
+            : 'unknown';
+        return `the project's files state different versions of ${name} (${versions}); docs are for ${version}`;
+      }
+      case 'not-in-lockfile':
+        return `no file in the project states a version of ${name}, so nothing checks that docs for ${version} match what the project uses`;
+      default:
+        break;
+    }
+  }
 
   switch (pack.state) {
     case 'stale-pack': {

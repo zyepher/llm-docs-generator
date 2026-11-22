@@ -426,6 +426,19 @@ describe('what the hook says', () => {
     );
   });
 
+  it('names a language version newer than the cutoff, read from the project version file', async () => {
+    const root = await project({ lock: {}, files: { '.swift-version': '6.4.1\n' } });
+    const cache = await seededCache({ 'toolchain:swift@6.4': '2026-09-14T00:00:00.000Z' });
+
+    expect(injected(await runHook({ cache, payload: { cwd: root, ...OPUS } }))).toBe(
+      [
+        DEPENDENCIES_HEADING,
+        '- `swift` 6.4 (toolchain, released 2026-09-14, after cutoff)',
+        DEPENDENCIES_FOOTER,
+      ].join('\n')
+    );
+  });
+
   it('names a pinned pack newer than the cutoff and where its pages are, alone', async () => {
     const root = await project({
       lock: npmLock({ hono: '4.13.16' }),

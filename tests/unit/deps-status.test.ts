@@ -393,6 +393,121 @@ describe('packs that cover other packages', () => {
   });
 });
 
+describe('toolchain packs and releases', () => {
+  const cutoff: StatusCutoff = { cutoff: '2026-06', label: 'x', source: 'table', assumed: false };
+  const toolchain = (name: string, version: string, lockfile: string): ResolvedDependency =>
+    dep(name, version, { ecosystem: 'toolchain', lockfile });
+
+  it('lists a language released after the cutoff and points to the skill section for its docs', () => {
+    const report = computeStatus(
+      baseInput({
+        dependencies: [toolchain('swift', '6.4', '.swift-version')],
+        releases: releases({ 'toolchain:swift@6.4': '2026-09-14T00:00:00.000Z' }),
+        cutoff,
+      })
+    );
+
+    expect(report.afterCutoff).toEqual([
+      {
+        ecosystem: 'toolchain',
+        name: 'swift',
+        version: '6.4',
+        publishedAt: '2026-09-14T00:00:00.000Z',
+        dev: false,
+        lockfiles: ['.swift-version'],
+        nextStep:
+          'follow the add-docs skill, section "Languages and toolchains" (--dependency toolchain:swift)',
+      },
+    ]);
+  });
+
+  it("says a toolchain pack is stale against the project's files", () => {
+    const python = { ecosystem: 'toolchain', name: 'python' } as const;
+    const report = computeStatus(
+      baseInput({
+        dependencies: [toolchain('python', '3.15', '.python-version')],
+        packs: [
+          pack('python', { version: '3.14', dependency: python }),
+          pack('python-pinned', { version: '3.14', versionPinned: true, dependency: python }),
+        ],
+      })
+    );
+
+    expect(report.packs.map((entry) => [entry.id, entry.state, entry.nextStep])).toEqual([
+      ['python', 'stale-pack', 'llm-docs sync python'],
+      [
+        'python-pinned',
+        'stale-pack',
+        "set packs.python-pinned.version in llm-docs.json to 3.15 (or remove it to follow the project's files), then run 'llm-docs sync python-pinned'",
+      ],
+    ]);
+    expect(formatStatusBrief(report, BRIEF_OPTIONS)).toBe(
+      [
+        'Pinned docs packs to fix:',
+        "- python: docs are for 3.14 but the project's files state 3.15. Fix: `llm-docs sync python`",
+        "- python-pinned: docs are for 3.14 but the project's files state 3.15. Fix: set packs.python-pinned.version in llm-docs.json to 3.15 (or remove it to follow the project's files), then run 'llm-docs sync python-pinned'",
+      ].join('\n')
+    );
+  });
+
+  it('names the version files when no file states the toolchain, or they disagree, or one was not read', () => {
+    const report = computeStatus(
+      baseInput({
+        dependencies: [
+          toolchain('node', '22', 'api/.nvmrc'),
+          toolchain('node', '24', 'web/.nvmrc'),
+        ],
+        packs: [
+          pack('go', { version: '1.27', dependency: { ecosystem: 'toolchain', name: 'go' } }),
+          pack('node', {
+            version: '22',
+            versionPinned: true,
+            dependency: { ecosystem: 'toolchain', name: 'node' },
+          }),
+        ],
+      })
+    );
+
+    expect(report.packs.map((entry) => [entry.id, entry.state, entry.nextStep])).toEqual([
+      [
+        'go',
+        'not-in-lockfile',
+        'state its version in one of go.work, go.mod, .tool-versions, or remove packs.go.dependency from llm-docs.json',
+      ],
+      [
+        'node',
+        'lockfile-conflict',
+        "make the project's files agree on one version of toolchain:node, or add a pack for each version they state",
+      ],
+    ]);
+    expect(formatStatusBrief(report, BRIEF_OPTIONS)).toBe(
+      [
+        'Pinned docs packs to fix:',
+        '- go: no file in the project states a version of `go`, so nothing checks that docs for 1.27 match what the project uses. Fix: state its version in one of go.work, go.mod, .tool-versions, or remove packs.go.dependency from llm-docs.json',
+        "- node: the project's files state different versions of `node` (22 in `api/.nvmrc`, 24 in `web/.nvmrc`); docs are for 22. Fix: make the project's files agree on one version of toolchain:node, or add a pack for each version they state",
+      ].join('\n')
+    );
+
+    const unread = computeStatus(
+      baseInput({
+        unread: [
+          {
+            lockfile: '.nvmrc',
+            ecosystems: ['toolchain'],
+            reason: 'was not read before the time limit',
+          },
+        ],
+        packs: [
+          pack('node', { version: '22', dependency: { ecosystem: 'toolchain', name: 'node' } }),
+        ],
+      })
+    );
+    expect(unread.packs[0]?.nextStep).toBe(
+      "check by hand that the project's files state 22 for toolchain:node: .nvmrc was not read before the time limit"
+    );
+  });
+});
+
 describe('formatStatusBrief', () => {
   const cutoff: StatusCutoff = {
     cutoff: '2026-06',

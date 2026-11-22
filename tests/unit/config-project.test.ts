@@ -328,8 +328,24 @@ describe('llm-docs.json validation', () => {
       },
       'packs.x.covers[1]: is the pack\'s own "dependency"',
     ],
+    [
+      {
+        schemaVersion: 3,
+        packs: { x: { ...localPack, dependency: { ecosystem: 'toolchain', name: 'ruby' } } },
+      },
+      'packs.x.dependency.name: must be one of go, python, rust, swift, dart, flutter, node',
+    ],
   ])('rejects %j', (config, message) => {
     expect(parseError(config)).toContain(message);
+  });
+
+  it('accepts a pack bound to a toolchain', () => {
+    const config = parse({
+      schemaVersion: 3,
+      packs: { python: { ...localPack, dependency: { ecosystem: 'toolchain', name: 'python' } } },
+    });
+
+    expect(config.packs.python?.dependency).toEqual({ ecosystem: 'toolchain', name: 'python' });
   });
 
   it('rejects the project root as packsDir, invalid JSON, and other schema versions', () => {
@@ -550,6 +566,51 @@ describe('resolvePackRecipe', () => {
       },
     });
     expect(explicit.recipe.version).toBe('8.0.0');
+  });
+
+  it('names the version files when a toolchain version cannot be resolved', async () => {
+    const pack = {
+      dependency: { ecosystem: 'toolchain', name: 'python' },
+      sources: [{ type: 'local', path: 'docs' }],
+    };
+    const python = parse({ schemaVersion: 3, packs: { python: pack } });
+
+    await expect(
+      resolvePackRecipe(python, 'python', {
+        resolveDependencyVersion: () => ({ kind: 'missing', searched: [] }),
+      })
+    ).rejects.toThrow(
+      'Pack "python": no file in the project states a version of toolchain:python (files that can: .python-version, .tool-versions, Pipfile, pyproject.toml); set packs.python.version in llm-docs.json, or state the version in one of those files.'
+    );
+    await expect(
+      resolvePackRecipe(python, 'python', {
+        resolveDependencyVersion: () => ({
+          kind: 'conflict',
+          versions: [
+            { version: '3.14', lockfile: 'api/.python-version' },
+            { version: '3.15', lockfile: 'web/.python-version' },
+          ],
+        }),
+      })
+    ).rejects.toThrow(
+      'Pack "python": the project\'s files state different versions of toolchain:python (3.14 in api/.python-version, 3.15 in web/.python-version); set packs.python.version in llm-docs.json to the one these docs describe.'
+    );
+    await expect(
+      resolvePackRecipe(python, 'python', {
+        resolveDependencyVersion: () => ({
+          kind: 'unread',
+          lockfiles: [
+            {
+              lockfile: '.python-version',
+              ecosystems: ['toolchain'],
+              reason: 'was not read before the time limit',
+            },
+          ],
+        }),
+      })
+    ).rejects.toThrow(
+      'Pack "python": the version of toolchain:python is unknown because a file was not read (.python-version was not read before the time limit); set packs.python.version in llm-docs.json.'
+    );
   });
 
   it('hashes canonically: key order in the config never changes the hash', async () => {

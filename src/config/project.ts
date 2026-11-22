@@ -26,6 +26,7 @@ import {
   type DependencyRef,
   type DependencyVersionLookup,
 } from '../deps/lockfiles.js';
+import { TOOLCHAINS, toolchainFileNames } from '../deps/toolchains.js';
 import {
   isSameOrDescendant,
   pathCollisionKey,
@@ -262,7 +263,10 @@ const dependencySchema = z
       context.addIssue({
         code: 'custom',
         path: ['name'],
-        message: `is not a valid ${dependency.ecosystem} package name`,
+        message:
+          dependency.ecosystem === 'toolchain'
+            ? `must be one of ${TOOLCHAINS.join(', ')}`
+            : `is not a valid ${dependency.ecosystem} package name`,
       });
     }
   });
@@ -982,6 +986,35 @@ async function resolvePackVersion(
   const label = `${dependency.ecosystem}:${dependency.name}`;
 
   const lookup = await resolver(dependency);
+
+  if (dependency.ecosystem === 'toolchain') {
+    switch (lookup.kind) {
+      case 'missing': {
+        const files = TOOLCHAINS.flatMap((toolchain) =>
+          toolchain === dependency.name ? toolchainFileNames(toolchain) : []
+        );
+        throw new ConfigError(
+          `Pack "${id}": no file in the project states a version of ${label} (files that can: ${files.join(', ')}); set packs.${id}.version in ${CONFIG_FILE_NAME}, or state the version in one of those files.`
+        );
+      }
+      case 'conflict': {
+        const versions = lookup.versions
+          .map((entry) => `${entry.version} in ${entry.lockfile}`)
+          .join(', ');
+        throw new ConfigError(
+          `Pack "${id}": the project's files state different versions of ${label} (${versions}); set packs.${id}.version in ${CONFIG_FILE_NAME} to the one these docs describe.`
+        );
+      }
+      case 'unread': {
+        const unread = lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`);
+        throw new ConfigError(
+          `Pack "${id}": the version of ${label} is unknown because a file was not read (${unread.join('; ')}); set packs.${id}.version in ${CONFIG_FILE_NAME}.`
+        );
+      }
+      default:
+        break;
+    }
+  }
 
   switch (lookup.kind) {
     case 'found':

@@ -19,6 +19,7 @@ import {
   type LoadedProjectConfig,
 } from '../config/project.js';
 import { majorVersionsDiffer, projectDependencies } from '../deps/lockfiles.js';
+import { TOOLCHAINS, toolchainFileNames } from '../deps/toolchains.js';
 import { isStaleAgentConversion } from '../sources/convert.js';
 import { isSameOrDescendant } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
@@ -525,22 +526,37 @@ async function boundDependencyFindings(context: PackCheckContext): Promise<Check
     context.loaded !== null &&
     Object.hasOwn(context.loaded.config.packs, context.packId) &&
     context.loaded.config.packs[context.packId]?.version !== undefined;
+  const toolchain = dependency.ecosystem === 'toolchain';
 
   switch (lookup.kind) {
-    case 'found':
-      return lookup.version === version
-        ? []
-        : [
-            {
-              status: 'fail',
-              message: `stale-pack: lockfiles resolve ${label} ${lookup.version} (${lookup.lockfiles.join(', ')}), the pack is ${version}; ${
-                pinned
-                  ? `set packs.${context.packId}.version in llm-docs.json to ${lookup.version} (or remove it to follow the lockfile), then ${sync}`
-                  : sync
-              }`,
-            },
-          ];
+    case 'found': {
+      if (lookup.version === version) {
+        return [];
+      }
+      const tail = pinned
+        ? `set packs.${context.packId}.version in llm-docs.json to ${lookup.version} (or remove it to follow ${toolchain ? "the project's files" : 'the lockfile'}), then ${sync}`
+        : sync;
+      return [
+        {
+          status: 'fail',
+          message: toolchain
+            ? `stale-pack: the project's files state ${label} ${lookup.version} (${lookup.lockfiles.join(', ')}), the pack is ${version}; ${tail}`
+            : `stale-pack: lockfiles resolve ${label} ${lookup.version} (${lookup.lockfiles.join(', ')}), the pack is ${version}; ${tail}`,
+        },
+      ];
+    }
     case 'missing':
+      if (toolchain) {
+        const files = TOOLCHAINS.flatMap((name) =>
+          name === dependency.name ? toolchainFileNames(name) : []
+        );
+        return [
+          {
+            status: 'fail',
+            message: `no file in the project states a version of ${label} (files that can: ${files.join(', ')}); state the version in one of them, or remove packs.${context.packId}.dependency from llm-docs.json`,
+          },
+        ];
+      }
       return [
         {
           status: 'fail',
@@ -550,10 +566,13 @@ async function boundDependencyFindings(context: PackCheckContext): Promise<Check
     case 'conflict': {
       const versions = lookup.versions.map((entry) => `${entry.version} in ${entry.lockfile}`);
       const matches = lookup.versions.some((entry) => entry.version === version);
+      const differ = toolchain
+        ? `the project's files state ${label} at different versions`
+        : `lockfiles resolve ${label} to different versions`;
       return [
         {
           status: matches ? 'warn' : 'fail',
-          message: `${matches ? '' : 'stale-pack: '}lockfiles resolve ${label} to different versions (${versions.join(', ')}); the pack is ${version}${matches ? '' : `, so set packs.${context.packId}.version in llm-docs.json to the one these docs describe, then run 'llm-docs sync ${context.packId}'`}`,
+          message: `${matches ? '' : 'stale-pack: '}${differ} (${versions.join(', ')}); the pack is ${version}${matches ? '' : `, so set packs.${context.packId}.version in llm-docs.json to the one these docs describe, then run 'llm-docs sync ${context.packId}'`}`,
         },
       ];
     }
@@ -567,6 +586,14 @@ async function boundDependencyFindings(context: PackCheckContext): Promise<Check
             },
           ];
     case 'unread':
+      if (toolchain) {
+        return [
+          {
+            status: 'fail',
+            message: `${label} could not be checked against the project's files, because ${lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`).join('; ')}; remove packs.${context.packId}.dependency from llm-docs.json or set packs.${context.packId}.version`,
+          },
+        ];
+      }
       return [
         {
           status: 'fail',

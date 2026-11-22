@@ -57,6 +57,10 @@ describe('llm-docs CLI skeleton', () => {
 
     const capabilities: unknown = JSON.parse(result.stdout);
     expect(capabilities).toMatchObject({ name: 'llm-docs', version: '3.0.0' });
+    expect(capabilities).toMatchObject({
+      ecosystems: ['npm', 'pypi', 'cargo', 'go', 'pub', 'swiftpm', 'toolchain'],
+      toolchains: ['go', 'python', 'rust', 'swift', 'dart', 'flutter', 'node'],
+    });
     expect(capabilities).toHaveProperty(
       'commands',
       expect.arrayContaining([
