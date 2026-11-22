@@ -490,6 +490,32 @@ describe('llm-docs v3 CLI', () => {
     ).toContain('Converted by markitdown: Operating voltage: 24 V');
     expect((await runCli(root, ['verify'], env)).code).toBe(0);
 
+    // A converter upgrade alone: refresh reports the reconverted pages in their own group.
+    const upgraded = { ...env, FAKE_MARKITDOWN_VERSION: '0.2.0' };
+    const upgradeCheck = await runCli(root, ['refresh', '--check'], upgraded);
+    expect(upgradeCheck.code).toBe(1);
+    expect(upgradeCheck.stderr).toContain(
+      'manuals: a converter version changed; would rebuild (0 changed, 0 added, 0 removed, 2 unchanged)\n' +
+        '  converter pages/spec.md (markitdown 0.1.9 -> markitdown 0.2.0)\n'
+    );
+    const upgrade = await runCli(root, ['refresh', '--json'], upgraded);
+    expect(upgrade.code, upgrade.stderr).toBe(0);
+    expect(JSON.parse(upgrade.stdout).packs[0]).toMatchObject({
+      status: 'built',
+      reason: 'a converter version changed',
+      refresh: {
+        converters: [
+          {
+            source: '0:spec.pdf',
+            output: 'pages/spec.md',
+            previous: { tool: 'markitdown', version: 'markitdown 0.1.9' },
+            current: { tool: 'markitdown', version: 'markitdown 0.2.0' },
+          },
+        ],
+      },
+    });
+    expect((await runCli(root, ['refresh', '--check'], upgraded)).code).toBe(0);
+
     // An agent conversion: the agent's .md is the page; a changed original is stale.
     await writeFile(join(root, 'notes', 'wiring.pdf.md'), '# Wiring\n\nRed to red.\n');
     const agent = await runCli(

@@ -71,7 +71,7 @@ import {
   type PackManifest,
 } from './manifest.js';
 import { convertMarkdownPage, type PackFileRef } from './markdown.js';
-import { diffRefresh, type RefreshReport } from './refresh.js';
+import { diffRefresh, type ConverterIdentity, type RefreshReport } from './refresh.js';
 import { renderSourcePage } from './render-ir.js';
 import { LOCK_FILE, withPacksLock } from './lock.js';
 import { verifyPackFiles } from './verify.js';
@@ -875,15 +875,39 @@ async function refreshOnePack(
   }
 
   const acquisitions = withPlaceholders(await acquireAll(context, recipe, workRoot, () => true));
+  const selection = await selectPackFiles(recipe, acquisitions);
+  // Resolving a converter only reads its version; nothing is converted here.
+  const converters = new Map<number, ConverterIdentity>();
+  for (const index of new Set(
+    selection.files.flatMap((selected) =>
+      selected.kind === 'convert' ? [selected.sourceIndex] : []
+    )
+  )) {
+    const spec = recipe.sources[index]?.convert;
+    if (spec !== undefined && spec !== null && spec.tool !== 'agent') {
+      const converter = await createDocumentConverter(spec, {
+        projectRoot: context.projectRoot,
+        workDir: join(workRoot, `convert-${index}`),
+      });
+      converters.set(index, { tool: converter.tool, version: converter.version });
+    }
+  }
   const report = diffRefresh(
     existing.manifest,
-    await selectPackFiles(recipe, acquisitions),
-    acquisitions.map((acquisition) => acquisition.origin)
+    selection,
+    acquisitions.map((acquisition) => acquisition.origin),
+    converters
   );
 
   if (!report.changed) {
     return { id, status: 'unchanged', warnings: [], refresh: report };
   }
+
+  const onlyConverters =
+    report.converters.length > 0 &&
+    report.refs.length === 0 &&
+    report.files.every((file) => file.status === 'unchanged');
+  const reason = onlyConverters ? 'a converter version changed' : 'upstream changed';
 
   const packDir = join(context.loaded.packsDir, id);
 
@@ -892,7 +916,7 @@ async function refreshOnePack(
     return {
       id,
       status: 'would-build',
-      reason: 'upstream changed',
+      reason,
       warnings: [],
       refresh: report,
       ...(review === undefined ? {} : { guideReview: review }),
@@ -904,7 +928,7 @@ async function refreshOnePack(
   return {
     id,
     status: 'built',
-    reason: 'upstream changed',
+    reason,
     warnings,
     refresh: report,
     ...(review === undefined ? {} : { guideReview: review }),

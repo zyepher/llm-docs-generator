@@ -812,8 +812,9 @@ export async function reviewGuidesAfterBuild(
 /**
  * Under `refresh --check`, where nothing is built: the stamped citations of
  * guides still on disk whose cited file the refresh reports changed or
- * removed (page level; whether the cited section changed is known only after
- * the rebuild). Undefined when there is nothing to re-review.
+ * removed upstream, or reconverted by a new converter version (page level;
+ * whether the cited section changed is known only after the rebuild).
+ * Undefined when there is nothing to re-review.
  */
 export async function reviewGuidesForRefreshCheck(
   packDir: string,
@@ -829,6 +830,11 @@ export async function reviewGuidesForRefreshCheck(
   for (const file of refresh.files) {
     if (file.status === 'changed' || file.status === 'removed') {
       changed.set(file.output, file.status === 'changed' ? 'page-changed' : 'page-removed');
+    }
+  }
+  for (const conversion of refresh.converters) {
+    if (!changed.has(conversion.output)) {
+      changed.set(conversion.output, 'page-changed');
     }
   }
 

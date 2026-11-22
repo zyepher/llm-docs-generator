@@ -622,10 +622,11 @@ function printRefreshReport(report: SyncReport): void {
 
     const { counts } = refresh;
     const summary = `${counts.changed} changed, ${counts.added} added, ${counts.removed} removed, ${counts.unchanged} unchanged`;
+    const reason = pack.reason ?? 'upstream changed';
     const outcome = {
       unchanged: 'no upstream changes',
-      built: 'upstream changed; rebuilt',
-      'would-build': 'upstream changed; would rebuild',
+      built: `${reason}; rebuilt`,
+      'would-build': `${reason}; would rebuild`,
     }[pack.status];
     say(`${pack.id}: ${outcome} (${summary})`);
 
@@ -639,6 +640,13 @@ function printRefreshReport(report: SyncReport): void {
         say(`  ${file.status.padEnd(8)} ${file.output}`);
       }
     }
+    for (const conversion of refresh.converters) {
+      const label = (converter: { tool: string; version: string | null }): string =>
+        converter.version ?? `${converter.tool} (version unknown)`;
+      say(
+        `  converter ${conversion.output} (${label(conversion.previous)} -> ${label(conversion.current)})`
+      );
+    }
     for (const warning of pack.warnings) {
       say(`  warning: ${warning}`);
     }
@@ -650,7 +658,7 @@ function printRefreshReport(report: SyncReport): void {
   if (report.check) {
     say(
       report.changed
-        ? 'refresh --check: upstream changed.'
+        ? 'refresh --check: upstream or a converter changed; run refresh without --check to rebuild.'
         : 'refresh --check: every pack matches upstream.'
     );
   }
