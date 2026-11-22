@@ -267,6 +267,23 @@ describe('acquireGit', () => {
     expect(await exists(marker)).toBe(false);
   });
 
+  it('takes monorepo release tags that contain "@"', async () => {
+    const repo = await makeRepo();
+    await git(repo.dir, 'tag', 'pkg@1.2.3', repo.v1);
+    await git(repo.dir, 'tag', '-a', '@scope/pkg@1.2.3', '-m', 'scoped release', repo.v2);
+
+    const plain = await acquireGit(gitSource(repo.url, 'pkg@1.2.3'), await context());
+    const scoped = await acquireGit(gitSource(repo.url, '@scope/pkg@1.2.3'), await context());
+
+    expect(plain.origin).toMatchObject({ commit: repo.v1, refKind: 'tag' });
+    expect(scoped.origin).toMatchObject({ commit: repo.v2, refKind: 'tag' });
+    for (const ref of ['@', '-x@1', 'a@{1}', 'a..b@1']) {
+      await expect(acquireGit(gitSource(repo.url, ref), await context())).rejects.toThrow(
+        /is not a valid tag, branch, or 40-hex commit name/
+      );
+    }
+  });
+
   it('names a missing ref, a missing path, and an unsafe ref as config errors', async () => {
     const repo = await makeRepo();
 

@@ -124,9 +124,16 @@ export async function createGitRunner(workDir: string, repo: URL): Promise<GitRu
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
 /** A ref name git accepts and that cannot be mistaken for an option. */
+/**
+ * A ref name safe to hand to git: it can never read as an option (no leading
+ * `-`) and follows git's own ref rules. `@` is allowed anywhere, because
+ * monorepos tag releases as `name@1.2.3` and `@scope/name@1.2.3`; the
+ * `@{` sequence git reserves cannot occur since `{` is not in the alphabet.
+ */
 function assertRefName(ref: string): void {
   if (
-    !/^[A-Za-z0-9_][A-Za-z0-9._/+-]*$/.test(ref) ||
+    !/^[A-Za-z0-9_@][A-Za-z0-9._/+@-]*$/.test(ref) ||
+    ref === '@' ||
     ref.includes('..') ||
     ref.includes('//') ||
     ref.endsWith('/') ||
