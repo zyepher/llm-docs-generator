@@ -1,0 +1,101 @@
+{
+  "schemaVersion": "0.1.0",
+  "generatedAt": "2026-07-19T14:28:35.651Z",
+  "generator": {
+    "name": "llm-docs-generator",
+    "version": "2.0.0",
+    "cliName": "llm-docs"
+  },
+  "mode": "local-source-docs",
+  "source": {
+    "input": "docs",
+    "resolvedPath": "/Users/dev/cloned/vite/docs",
+    "type": "directory",
+    "formatHint": "markdown",
+    "resolvedFormat": "markdown",
+    "fileCount": 42,
+    "aggregateHash": "sha256:00b174693c4da88b4a9b795fbcb8c4e769b8980e385ce3b48ca3b49b1cca6dc0",
+    "label": "v8.1.5",
+    "git": {
+      "remoteUrl": "https://github.com/vitejs/vite.git",
+      "commit": "5e7fe129a4dde4f41934083b25e490059985f4e6",
+      "tags": [
+        "v8.1.5"
+      ],
+      "dirty": false,
+      "sourceRootFromRepo": "docs"
+    },
+    "excluded": [
+      {
+        "path": ".vitepress/buildEnd.config.ts",
+        "glob": ".vitepress/**"
+      },
+      {
+        "path": ".vitepress/config.ts",
+        "glob": ".vitepress/**"
+      },
+      {
+        "path": "_data/acknowledgements.data.ts",
+        "glob": "_data/**"
+      },
+      {
+        "path": "blog/announcing-vite2.md",
+        "glob": "blog/**"
+      },
+      {
+        "path": "public/vite.mp3",
+        "glob": "public/**"
+      }
+    ],
+    "skippedFiles": [
+      {
+        "path": "guide/static-deploy-github-pages.yaml",
+        "reason": "format 'structured-spec' not selected (resolved format 'markdown')"
+      }
+    ]
+  },
+  "sourceFiles": [
+    {
+      "path": "blog.md",
+      "resolvedPath": "/Users/dev/cloned/vite/docs/blog.md",
+      "byteSize": 191,
+      "hash": "sha256:0c6c4debd05c8d99c9b539254e0017fd1c0e772265f0993d4c2e2d59683e95d3",
+      "lineCount": 13,
+      "estimatedTokenCount": 48,
+      "format": "markdown"
+    }
+  ],
+  "output": {
+    "filenamePrefix": "vite-8"
+  },
+  "parser": {
+    "name": "Markdown Parser",
+    "version": "2.0.0",
+    "format": "markdown"
+  },
+  "formatter": {
+    "name": "UniversalFormatter",
+    "version": "2.0.0",
+    "format": "universal-llm-docs"
+  },
+  "generatedOutputs": [
+    {
+      "path": "llm-docs/vite-8-changes-llms.txt",
+      "kind": "llm-docs",
+      "name": "agent-readable docs text",
+      "byteSize": 13999,
+      "hash": "sha256:d6159f1b4c133b90de0a0ca49be1f3b1cea8c12209bede803f3c8afc1ca3c381",
+      "lineCount": 363,
+      "estimatedTokenCount": 3498
+    }
+  ],
+  "warnings": [
+    "Excluded 105 file(s) from generation via --exclude pattern(s): images/**, public/**, .vitepress/**, _data/**, blog/**, team.md, acknowledgements.md, index.md (see source.excluded)."
+  ],
+  "inputProvenance": {
+    "schema": "llm-docs-generator.input-provenance.v1",
+    "manifestMode": "local-source-docs",
+    "artifactRole": "generated-docs",
+    "inputKind": "built-in-local-source-docs"
+  }
+}

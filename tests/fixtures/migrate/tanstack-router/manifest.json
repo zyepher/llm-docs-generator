@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "0.1.0",
+  "generatedAt": "2026-07-19T14:27:04.228Z",
+  "generator": {
+    "name": "llm-docs-generator",
+    "version": "2.0.0",
+    "cliName": "llm-docs"
+  },
+  "mode": "local-source-docs",
+  "source": {
+    "input": "/Users/dev/cloned/router/docs/router",
+    "resolvedPath": "/Users/dev/cloned/router/docs/router",
+    "type": "directory",
+    "formatHint": "markdown",
+    "resolvedFormat": "markdown",
+    "fileCount": 162,
+    "aggregateHash": "sha256:7e528d93603b2139e0cf125646dc6336c3ffd96b7e1926909454d9dd30e2dabe",
+    "label": "@tanstack/react-router 1.170.17 (tag release-2026-07-01-2138)",
+    "git": {
+      "remoteUrl": "https://github.com/TanStack/router.git",
+      "commit": "ecbbd9a8ec1d2433382cd30d13b0764e504e91cf",
+      "tags": [
+        "@tanstack/react-router@1.170.17",
+        "@tanstack/react-start-client@1.168.15",
+        "@tanstack/react-start-rsc@0.1.26",
+        "@tanstack/react-start-server@1.167.21",
+        "@tanstack/react-start@1.168.27",
+        "@tanstack/router-cli@1.167.18",
+        "release-2026-07-01-2138"
+      ],
+      "dirty": false,
+      "sourceRootFromRepo": "docs/router"
+    },
+    "skippedFiles": [
+      {
+        "path": "assets/reading-writing-file-devjokes-1.png",
+        "reason": "unsupported-file-type"
+      }
+    ]
+  },
+  "sourceFiles": [
+    {
+      "path": "api/file-based-routing.md",
+      "resolvedPath": "/Users/dev/cloned/router/docs/router/api/file-based-routing.md",
+      "byteSize": 9619,
+      "hash": "sha256:e02158e9f69951eb1b67101ca3b27b813de70f4ae551d026851dd2f14822a3dd",
+      "lineCount": 271,
+      "estimatedTokenCount": 2393,
+      "format": "markdown"
+    }
+  ],
+  "output": {
+    "filenamePrefix": "tanstack-router"
+  },
+  "parser": {
+    "name": "Markdown Parser",
+    "version": "2.0.0",
+    "format": "markdown"
+  },
+  "formatter": {
+    "name": "UniversalFormatter",
+    "version": "2.0.0",
+    "format": "universal-llm-docs"
+  },
+  "generatedOutputs": [
+    {
+      "path": "llm-docs/tanstack-router-full-llms.txt",
+      "kind": "llm-docs",
+      "name": "agent-readable docs text",
+      "byteSize": 1023094,
+      "hash": "sha256:da1ef915013546fee63af56270fc9867e963ed4bb56cd95119aafee2089a0f14",
+      "lineCount": 33158,
+      "estimatedTokenCount": 255020
+    }
+  ],
+  "warnings": [
+    "Draft-like source file(s) included as authoritative content (not excluded): how-to/drafts/README.md, how-to/drafts/build-search-filtering-systems.draft.md, how-to/drafts/optimize-search-param-performance.draft.md, how-to/drafts/search-params-in-forms.draft.md."
+  ],
+  "inputProvenance": {
+    "schema": "llm-docs-generator.input-provenance.v1",
+    "manifestMode": "local-source-docs",
+    "artifactRole": "generated-docs",
+    "inputKind": "built-in-local-source-docs"
+  }
+}

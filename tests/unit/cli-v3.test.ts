@@ -245,6 +245,7 @@ describe('llm-docs v3 CLI', () => {
       'sync',
       'refresh',
       'verify',
+      'migrate',
       'discover',
       'capabilities',
     ]);
@@ -452,6 +453,92 @@ describe('llm-docs v3 CLI', () => {
     );
     expect((await runCli(root, ['verify'])).code).toBe(0);
     expect((await runCli(root, ['refresh', '--check'])).code).toBe(0);
+  });
+
+  it('migrates a v2 git pack into a recipe that syncs and verifies', async () => {
+    const repo = await makeGitRepo();
+    const root = await makeProject({});
+    const manifest = JSON.parse(
+      await readFile(
+        join(repoRoot, 'tests', 'fixtures', 'migrate', 'vite-8', 'manifest.json'),
+        'utf-8'
+      )
+    );
+    manifest.source.git = {
+      ...manifest.source.git,
+      remoteUrl: repo.url,
+      commit: repo.head,
+      sourceRootFromRepo: 'docs',
+    };
+    const packDir = join(await makeProject({}), 'vite-8');
+    const manifestText = JSON.stringify(manifest, null, 2);
+    await mkdir(packDir);
+    await writeFile(join(packDir, 'manifest.json'), manifestText);
+
+    const migrate = await runCli(root, [
+      'migrate',
+      packDir,
+      '--version',
+      '8.1.5',
+      '--project',
+      root,
+      '--json',
+    ]);
+
+    expect(migrate.code, migrate.stderr).toBe(0);
+    const recipe = {
+      version: '8.1.5',
+      sources: [
+        {
+          type: 'git',
+          repo: repo.url,
+          ref: repo.head,
+          paths: ['docs'],
+          exclude: ['.vitepress/**', '_data/**', 'blog/**', 'public/**'],
+        },
+      ],
+    };
+    expect(JSON.parse(migrate.stdout)).toEqual({
+      id: 'vite-8',
+      recipe,
+      configPath: join(root, 'llm-docs.json'),
+      warnings: [],
+      next: 'llm-docs sync vite-8',
+    });
+    expect(migrate.stderr).toContain('Next: llm-docs sync vite-8');
+    expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs).toEqual({
+      'vite-8': recipe,
+    });
+
+    const sync = await runCli(root, ['sync', 'vite-8']);
+    expect(sync.code, sync.stderr).toBe(0);
+    expect(sync.stderr).toContain('vite-8: built (not built yet)');
+    expect(await readdir(join(root, 'agent-docs', 'vite-8', 'pages', 'guide'))).toEqual([
+      'start.md',
+    ]);
+    const verify = await runCli(root, ['verify']);
+    expect(verify.code, verify.stderr).toBe(0);
+    expect(await readFile(join(packDir, 'manifest.json'), 'utf-8')).toBe(manifestText);
+  });
+
+  it('exits 2 when a v2 pack lost its origin, writing nothing', async () => {
+    const root = await makeProject({});
+    const packDir = join(repoRoot, 'tests', 'fixtures', 'migrate', 'typescript-7');
+    const result = await runCli(root, [
+      'migrate',
+      packDir,
+      '--version',
+      '7.0.0',
+      '--project',
+      root,
+    ]);
+
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe('');
+    expect(result.stderr.trim().split('\n')).toHaveLength(1);
+    expect(result.stderr).toContain('typescript-7 is lost');
+    expect(result.stderr).toContain('/scratchpad/ts7-src');
+    expect(await readdir(root)).toEqual([]);
   });
 
   it('builds http sources from the add flags', async () => {

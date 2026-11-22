@@ -466,6 +466,18 @@ export async function loadProjectConfig(projectRoot: string): Promise<LoadedProj
   return parseProjectConfig(root, text);
 }
 
+/** The project's config, or an empty one when llm-docs.json does not exist yet (`add`, `migrate`). */
+export async function loadOrEmptyConfig(projectRoot: string): Promise<LoadedProjectConfig> {
+  try {
+    return await loadProjectConfig(projectRoot);
+  } catch (error) {
+    if (error instanceof ConfigError && error.message.startsWith(`No ${CONFIG_FILE_NAME}`)) {
+      return parseProjectConfig(projectRoot, JSON.stringify({ schemaVersion: 3, packs: {} }));
+    }
+    throw error;
+  }
+}
+
 /** Validate config text for the project at `projectRoot` (absolute). */
 export function parseProjectConfig(projectRoot: string, text: string): LoadedProjectConfig {
   let raw: unknown;
