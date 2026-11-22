@@ -482,8 +482,11 @@ wins for status; a mismatch is a warning.
 
 Exit codes everywhere: 0 success, 1 a check failed (verify, `--check` modes), 2 usage or config
 error, 3 runtime failure (network, git, converter). Every command accepts `--project <dir>`
-and `--json` (machine output on stdout, human output on stderr, never mixed). Colors only on a
-TTY and never when `NO_COLOR` is set.
+and `--json` (machine output on stdout, human output on stderr, never mixed). Under `--json`, a
+command that runs prints exactly one JSON document on stdout, even when it reports a failed pack
+or check; a command that cannot run prints nothing on stdout and its error on stderr, with the
+exit code naming the class. A hint in a message that names a command carries `--project <dir>`
+when the user passed it. Colors only on a TTY and never when `NO_COLOR` is set.
 
 - `llm-docs init [--packs-dir <dir>]`: create `llm-docs.json` and `packsDir` with its
   `.gitignore`; insert empty managed blocks per 7.1. Idempotent; never overwrites config.
@@ -499,7 +502,10 @@ TTY and never when `NO_COLOR` is set.
   can only be checked once pages are built, and the output says so.
 - `llm-docs sync [ids...] [--check] [--offline] [--prune]`: bring packs in line with config
   and lockfiles. Skips a pack when its manifest's `recipeHash` matches and its outputs verify.
-  `--check`: write nothing, exit 1 if any pack or managed block would change (CI gate).
+  `--check`: write nothing, exit 1 if any pack or managed block would change (CI gate). Each
+  stale pack carries a `reason` code (`not-built`, `manifest-unreadable`, `recipe-edited`,
+  `lockfile-moved`, `files-differ`, `sources-changed`; `refresh` adds `upstream-changed` and
+  `converter-changed`) and a `detail` naming the versions or files involved.
   `--offline`: fail rather than acquire. `--prune`: delete pack directories not in config
   (without it, they are reported). Always updates managed blocks last.
 - `llm-docs refresh [ids...] [--check]`: re-acquire each pack at its recorded recipe and
@@ -512,8 +518,9 @@ TTY and never when `NO_COLOR` is set.
 - `llm-docs discover --url <site> | --package <eco>:<name>[@<version>]`: section 10.
 - `llm-docs hook session-start`: section 7.2. Undocumented in `--help` output except as
   "used by the plugin".
-- `llm-docs capabilities --json`: machine-readable list of commands, options, source types,
-  converters, ecosystems, transforms, and limits, generated from the same tables the code
+- `llm-docs capabilities --json`: machine-readable list of commands (with their options and
+  help examples), checks, exit codes, the status and reason codes `--json` reports carry, source
+  types, converters, ecosystems, transforms, and limits, generated from the same tables the code
   uses (never a hand-maintained list that can drift).
 
 Removed in v3 with a one-line error pointing to the replacement when invoked: `generate`

@@ -5,7 +5,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { Command, CommanderError } from 'commander';
+import { Command, CommanderError, Help, Option } from 'commander';
 
 import packageJson from '../package.json';
 import { syncAgentBlocks, type AgentBlockOutcome, type AgentBlockStatus } from './agent/block.js';
@@ -29,6 +29,7 @@ import {
   saveProjectConfig,
   sourceConfigSchema,
   PACK_ID_PATTERN,
+  READ_FIRST_MAX,
   type PackConfig,
 } from './config/project.js';
 import { migrateV2Pack } from './config/migrate.js';
@@ -45,7 +46,10 @@ import {
   ensurePacksDir,
   previewPack,
   syncPacks,
+  type OrphanStatus,
   type PackSyncResult,
+  type PackSyncStatus,
+  type StaleReason,
   type SyncReport,
 } from './pack/build.js';
 import { stampGuides, type PageChange, type SectionChange } from './pack/guides.js';
@@ -53,6 +57,7 @@ import {
   PACK_CHECK_NAMES,
   PROJECT_CHECK_NAMES,
   verifyPacks,
+  type CheckStatus,
   type VerifyReport,
 } from './pack/verify.js';
 import { supportedSourceTypes } from './sources/acquire.js';
@@ -65,10 +70,18 @@ const EXIT_CHECK_FAILED = 1;
 const EXIT_USAGE = 2;
 const EXIT_RUNTIME = 3;
 
+interface CommandExample {
+  /** The arguments after `llm-docs`, exactly as a shell would pass them. */
+  argv: readonly string[];
+  note: string;
+}
+
 interface CommandEntry {
   name: string;
   summary: string;
   status: 'implemented';
+  /** Shown under `Examples:` in the command's help; a test parses each one. */
+  examples: readonly CommandExample[];
 }
 
 // The single source for `capabilities` and for each command's help text. A
@@ -77,71 +90,181 @@ const COMMANDS = [
   {
     name: 'init',
     summary:
-      'Create llm-docs.json, the packs directory, and empty managed blocks in the agent files (never overwrites config)',
+      'Create llm-docs.json, the packs directory, and empty managed blocks in the agent files. Run it once per repository before the first add; rerunning it never overwrites config.',
     status: 'implemented',
+    examples: [
+      { argv: ['init'], note: 'Set up the repository you are in' },
+      {
+        argv: ['init', '--packs-dir', 'docs/agent-docs'],
+        note: 'Keep the packs somewhere other than agent-docs/',
+      },
+    ],
   },
   {
     name: 'add',
-    summary: 'Write a pack recipe into llm-docs.json, then sync that pack',
+    summary:
+      "Write a pack recipe into llm-docs.json, then build that pack. Use it to pin a library's docs at an exact version; preview with --dry-run first.",
     status: 'implemented',
+    examples: [
+      {
+        argv: ['add', 'mylib', '--local', 'docs/mylib', '--version', '2.1.0', '--dry-run'],
+        note: 'Preview a pack built from a folder in the project, writing nothing',
+      },
+      {
+        argv: [
+          'add',
+          'vite',
+          '--git',
+          'https://github.com/vitejs/vite',
+          '--ref',
+          'v{version}',
+          '--path',
+          'docs',
+          '--dependency',
+          'npm:vite',
+        ],
+        note: "Pin Vite's docs at the version the lockfile resolves, and follow it on every sync",
+      },
+      {
+        argv: ['add', 'mylib', '--local', 'docs/mylib', '--version', '2.1.0', '--json'],
+        note: 'Add and build the pack, printing the recipe and the sync report as JSON',
+      },
+    ],
   },
   {
     name: 'sync',
     summary:
-      'Build or rebuild packs so they match their recipes and lockfiles, then update the managed blocks',
+      'Build or rebuild packs so they match their recipes and the lockfiles, then update the managed blocks. Run it after editing llm-docs.json or a lockfile; in CI, run it with --check.',
     status: 'implemented',
+    examples: [
+      { argv: ['sync'], note: 'Rebuild every stale pack and update the managed blocks' },
+      { argv: ['sync', 'vite'], note: 'Bring one pack up to date' },
+      {
+        argv: ['sync', '--check'],
+        note: 'CI gate: write nothing, exit 1 when a pack or managed block is out of date',
+      },
+      {
+        argv: ['sync', '--check', '--json'],
+        note: 'The same, with a reason code per stale pack on stdout',
+      },
+    ],
   },
   {
     name: 'refresh',
-    summary: 'Re-acquire packs at their recorded recipes and report what changed upstream',
+    summary:
+      'Re-acquire packs at their recorded recipes and report, page by page, what changed upstream. Run it when the docs of a pinned version may have been edited upstream.',
     status: 'implemented',
+    examples: [
+      {
+        argv: ['refresh', '--check'],
+        note: 'Report upstream changes without writing; exit 1 when something changed',
+      },
+      { argv: ['refresh', 'vite'], note: 'Re-acquire one pack and rebuild it if upstream changed' },
+      { argv: ['refresh', '--check', '--json'], note: 'The per-page report as JSON' },
+    ],
   },
   {
     name: 'verify',
     summary:
-      'Check packs against their manifests, recipes, lockfiles, and links, and the managed blocks (read-only, offline)',
+      'Check packs against their manifests, recipes, lockfiles, and links, and check the managed blocks. Read-only and offline; run it in CI, where a failed check exits 1.',
     status: 'implemented',
+    examples: [
+      { argv: ['verify'], note: 'Run every check on every pack' },
+      {
+        argv: ['verify', 'vite', '--strict'],
+        note: 'Also check link anchors and fail on an unknown or proprietary license',
+      },
+      { argv: ['verify', '--strict', '--json'], note: 'CI: every check result as JSON on stdout' },
+    ],
   },
   {
     name: 'status',
     summary:
-      "Show the packs and their lockfile drift, and the direct dependencies released after or near the model's training data cutoff",
+      "Show each pack's lockfile drift and the direct dependencies released after or near the model's training data cutoff. Use it to decide which libraries need a pack.",
     status: 'implemented',
+    examples: [
+      {
+        argv: ['status', '--model', 'claude-opus-5-5'],
+        note: "Compare release dates against that model's training data cutoff",
+      },
+      {
+        argv: ['status', '--cutoff', '2026-06', '--offline', '--json'],
+        note: 'Use a cutoff month and cached release dates only, as JSON',
+      },
+      {
+        argv: ['status', '--brief'],
+        note: 'Print what the session-start hook would tell an agent',
+      },
+    ],
   },
   {
     name: 'guides stamp',
     summary:
-      'Record the hash of every section each guide cites, so verify, refresh, and sync report the guides to re-review when that text changes',
+      'Record the hash of every section each guide cites, so verify, refresh, and sync report the guides to re-review when that text changes. Run it after writing or re-reviewing a guide.',
     status: 'implemented',
+    examples: [
+      { argv: ['guides', 'stamp', 'vite'], note: 'Stamp every guide of the vite pack' },
+      {
+        argv: ['guides', 'stamp', 'vite', 'guides/routing.md', '--json'],
+        note: 'Stamp one guide and print what was recorded as JSON',
+      },
+    ],
   },
   {
     name: 'migrate',
     summary:
-      'Write a recipe into llm-docs.json for a v2 pack, from its manifest (the v2 pack is left as is)',
+      'Write a recipe into llm-docs.json for a v2 pack, from its manifest; the v2 pack is left as is. Run it once per v2 pack, then sync the new pack.',
     status: 'implemented',
+    examples: [
+      {
+        argv: ['migrate', 'old-docs/vite', '--version', '7.1.0'],
+        note: 'Carry a v2 pack over under its directory name',
+      },
+      {
+        argv: ['migrate', 'old-docs/vite', '--id', 'vite7', '--version', '7.1.0', '--json'],
+        note: 'Pick the pack id, and print the recipe and the next command as JSON',
+      },
+    ],
   },
   {
     name: 'discover',
     summary:
-      'Print read-only evidence for writing a recipe as JSON: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments) or a package (--package: registry metadata, matching git tags, Markdown directories, change documents)',
+      'Print read-only evidence for writing a recipe, as JSON on stdout: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments) or a package (--package: registry metadata, matching git tags, Markdown directories, change documents). Run it before add to choose a source.',
     status: 'implemented',
+    examples: [
+      { argv: ['discover', '--package', 'npm:vite'], note: 'Evidence for the latest Vite release' },
+      {
+        argv: ['discover', '--package', 'npm:vite@7.1.0'],
+        note: 'Evidence for one version, with its git tags and docs directories',
+      },
+      { argv: ['discover', '--url', 'https://vite.dev'], note: "The site's llms.txt and sitemap" },
+    ],
   },
   {
     name: 'capabilities',
-    summary: 'Describe the commands, sources, converters, transforms, and limits of this build',
+    summary:
+      'Describe what this build supports: commands, options, examples, checks, outcome and reason codes, exit codes, sources, converters, ecosystems, transforms, and limits. Agents read it with --json.',
     status: 'implemented',
+    examples: [
+      { argv: ['capabilities', '--json'], note: 'Everything above as one JSON document' },
+      { argv: ['capabilities'], note: 'One line per command' },
+    ],
   },
   {
     name: 'hook session-start',
     summary: 'Used by the plugin',
     status: 'implemented',
+    examples: [],
   },
 ] as const satisfies readonly CommandEntry[];
 
 type CommandName = (typeof COMMANDS)[number]['name'];
 
 const REMOVED_COMMANDS: ReadonlyArray<{ name: string; hint: string }> = [
-  { name: 'generate', hint: "Use 'llm-docs add' (see docs/design/v3-spec.md)." },
+  {
+    name: 'generate',
+    hint: "Use 'llm-docs add' instead; 'llm-docs add --help' lists its source flags.",
+  },
   {
     name: 'validate',
     hint: "The Supabase SDK catalog was removed; add the SDK docs as a pack with 'llm-docs add'.",
@@ -150,29 +273,93 @@ const REMOVED_COMMANDS: ReadonlyArray<{ name: string; hint: string }> = [
     name: 'list-sdks',
     hint: "The Supabase SDK catalog was removed; add the SDK docs as a pack with 'llm-docs add'.",
   },
-  { name: 'source-truth', hint: 'Read the code directly; source-truth mode was removed.' },
-  { name: 'verify-docs', hint: 'Read the code directly; source-truth mode was removed.' },
-  { name: 'plugins', hint: 'Use a converter command (convert.tool = "command") instead.' },
-  { name: 'agent', hint: 'Install the llm-docs plugin instead.' },
+  { name: 'source-truth', hint: 'Source-truth mode was removed; read the code directly.' },
+  { name: 'verify-docs', hint: 'Source-truth mode was removed; read the code directly.' },
+  {
+    name: 'plugins',
+    hint: 'Parser plugins were removed; convert documents with a source\'s "convert" in llm-docs.json, such as {"tool": "command", "command": [...]}.',
+  },
+  {
+    name: 'agent',
+    hint: "Install the llm-docs plugin instead ('claude plugin install llm-docs@llm-docs' in Claude Code); it runs 'llm-docs hook session-start' for you.",
+  },
 ];
+
+const EXIT_CODES = {
+  0: 'success',
+  [EXIT_CHECK_FAILED]: 'a check failed (verify, sync --check, refresh --check)',
+  [EXIT_USAGE]: `usage or config error (a flag, an argument, or ${CONFIG_FILE_NAME})`,
+  [EXIT_RUNTIME]: 'runtime failure (network, git, a converter, a held lock)',
+};
+
+const JSON_HELP =
+  'With --json, a command that runs prints exactly one JSON document on stdout, even when it reports a failed pack or check; a command that cannot run prints nothing on stdout and its error on stderr. Human text always goes to stderr.';
+
+const START_HERE_HELP = `Start here:
+  llm-docs init                                 set up the repository
+  llm-docs discover --package <eco>:<name>      evidence for choosing a docs source
+  llm-docs add <id> --git <repo> --ref <ref>    pin a library's docs (see 'llm-docs add --help')
+  llm-docs capabilities --json                  everything this build supports, for programs`;
 
 class UsageError extends Error {}
 
-function summaryOf(name: CommandName): string {
+function commandEntry(name: CommandName): CommandEntry {
   const entry = COMMANDS.find((command) => command.name === name);
   if (entry === undefined) {
     throw new Error(`Command ${name} has no COMMANDS entry`);
   }
-  return entry.summary;
+  return entry;
+}
+
+/** An argument as a POSIX shell (and cmd.exe, for plain Windows paths) reads it back. */
+function shellQuote(value: string): string {
+  const plain = process.platform === 'win32' ? /^[\w@%+=:,./\\-]+$/ : /^[\w@%+=:,./-]+$/;
+  if (plain.test(value)) {
+    return value;
+  }
+  return /["$`!\\]/.test(value) ? `'${value.replaceAll("'", `'\\''`)}'` : `"${value}"`;
+}
+
+/** The command's summary as its description, and its examples after the options in --help. */
+function describeCommand(command: Command, name: CommandName): Command {
+  const { summary, examples } = commandEntry(name);
+  command.description(summary);
+  if (examples.length > 0) {
+    const lines = examples.flatMap((example) => [
+      `  # ${example.note}`,
+      `  llm-docs ${example.argv.map(shellQuote).join(' ')}`,
+    ]);
+    command.addHelpText('after', `\nExamples:\n${lines.join('\n')}`);
+  }
+  return command;
+}
+
+/**
+ * Hints in messages name commands as `llm-docs <command> ...`. When the user
+ * passed --project, each hint for a command that takes it gets it too, so a
+ * hint copied into another directory acts on the same project. Set by the
+ * preAction hook before any action prints.
+ */
+let projectHint: { pattern: RegExp; flag: string } | undefined;
+
+function withProjectHint(text: string): string {
+  return projectHint === undefined
+    ? text
+    : text.replace(projectHint.pattern, `$& ${projectHint.flag}`);
 }
 
 function writeJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  const json = JSON.stringify(
+    value,
+    (_key, entry: unknown) => (typeof entry === 'string' ? withProjectHint(entry) : entry),
+    2
+  );
+  process.stdout.write(`${json}\n`);
 }
 
 /** Human output always goes to stderr, so stdout carries only `--json` output. */
 function say(line: string): void {
-  process.stderr.write(`${line}\n`);
+  process.stderr.write(`${withProjectHint(line)}\n`);
 }
 
 interface ProjectOptions {
@@ -180,10 +367,25 @@ interface ProjectOptions {
   json?: boolean;
 }
 
-function withProjectOptions(command: Command): Command {
+/**
+ * `--project` and `--json`. `discovery` says how the project is found without
+ * --project, for the help text.
+ */
+function withProjectOptions(
+  command: Command,
+  discovery: 'nearest config' | 'create' | 'nearest config or cwd'
+): Command {
+  const defaults = {
+    'nearest config': `the nearest directory, from the current one up, holding ${CONFIG_FILE_NAME}`,
+    create: 'the git top-level directory, else the current directory',
+    'nearest config or cwd': `the nearest directory, from the current one up, holding ${CONFIG_FILE_NAME}, else the current directory`,
+  }[discovery];
   return command
-    .option('--project <dir>', `Project root (the directory holding ${CONFIG_FILE_NAME})`)
-    .option('--json', 'Print machine-readable JSON on stdout (human output stays on stderr)');
+    .option('--project <dir>', `Project root (default: ${defaults})`)
+    .option(
+      '--json',
+      'Print one JSON document on stdout; human text stays on stderr (default: human text only)'
+    );
 }
 
 /** The project for commands that read config: --project, else the nearest ancestor with config. */
@@ -270,7 +472,9 @@ function readUrlsFile(path: string): string[] {
   try {
     text = readFileSync(resolve(path), 'utf-8');
   } catch (error) {
-    throw new UsageError(`Cannot read --urls-file ${path}: ${errorMessage(error)}`);
+    throw new UsageError(
+      `Cannot read --urls-file ${path} (${errorMessage(error)}); pass a readable text file with one https:// URL per line.`
+    );
   }
 
   const urls = text
@@ -279,7 +483,9 @@ function readUrlsFile(path: string): string[] {
     .filter((line) => line !== '');
 
   if (urls.length === 0) {
-    throw new UsageError(`--urls-file ${path} lists no URLs.`);
+    throw new UsageError(
+      `--urls-file ${path} lists no URLs; put one https:// URL per line (# starts a comment).`
+    );
   }
 
   return urls;
@@ -297,13 +503,15 @@ const ADD_SOURCE_FLAGS: ReadonlyArray<{
 }> = [
   {
     flags: '--local <path>',
-    description: 'Take the docs from a project-relative directory or file',
+    description:
+      'Take the docs from a directory or file inside the project (a project-relative path)',
     read: (options) =>
       options.local === undefined ? undefined : { type: 'local', path: options.local },
   },
   {
     flags: '--git <repo>',
-    description: 'Take the docs from a git repository (https://) at --ref, limited to --path',
+    description:
+      'Take the docs from a git repository (an https:// URL) at --ref, limited to --path',
     read: (options) => {
       if (options.git === undefined) {
         return undefined;
@@ -321,14 +529,15 @@ const ADD_SOURCE_FLAGS: ReadonlyArray<{
   },
   {
     flags: '--url <url>',
-    description: 'Fetch exactly this page (repeatable)',
+    description: 'Fetch exactly this https:// page (repeatable)',
     repeatable: true,
     read: (options) =>
       options.url === undefined ? undefined : { type: 'urls', urls: options.url },
   },
   {
     flags: '--urls-file <file>',
-    description: 'Fetch the pages listed in a file, one URL per line (# comments)',
+    description:
+      'Fetch the pages a text file lists, one https:// URL per line (# starts a comment)',
     read: (options) =>
       options.urlsFile === undefined
         ? undefined
@@ -336,7 +545,7 @@ const ADD_SOURCE_FLAGS: ReadonlyArray<{
   },
   {
     flags: '--llms-txt <url>',
-    description: 'Fetch the pages an llms.txt index lists that pass --include',
+    description: 'Fetch the pages an llms.txt index lists that pass --include (an https:// URL)',
     read: (options) => {
       if (options.llmsTxt === undefined) {
         return undefined;
@@ -360,7 +569,7 @@ const ADD_SOURCE_MODIFIERS: ReadonlyArray<{
 }> = [
   {
     flags: '--ref <ref>',
-    description: 'Tag, branch, or 40-hex commit for --git',
+    description: 'Tag, branch, or 40-hex commit for --git; may use {version} (required with --git)',
     key: 'ref',
     needs: 'git',
   },
@@ -374,13 +583,13 @@ const ADD_SOURCE_MODIFIERS: ReadonlyArray<{
   {
     flags: '--include <glob>',
     description:
-      'Glob a page must match: URL paths for --llms-txt, file paths otherwise (repeatable)',
+      'Glob a page must match: URL paths for --llms-txt (required there), file paths otherwise (repeatable; default: every page for --url and --urls-file; Markdown, MDX, reStructuredText, and HTML files for --local and --git)',
     key: 'include',
     repeatable: true,
   },
   {
     flags: '--strip-prefix <prefix>',
-    description: 'URL path prefix removed from --llms-txt page paths',
+    description: 'URL path prefix removed from --llms-txt page paths (default: none)',
     key: 'stripPrefix',
     needs: 'llms-txt',
   },
@@ -426,7 +635,9 @@ function buildPackRecipe(options: AddOptions): PackConfig {
   );
 
   if (fromFlags.length > 1) {
-    throw new UsageError('Pass one source flag per add.');
+    throw new UsageError(
+      'Pass one source flag per add; for a pack with several sources, add it with one, then append the others to packs.<id>.sources in llm-docs.json and run sync.'
+    );
   }
 
   const extra = options.recipe === undefined ? {} : parseRecipeJson(options.recipe);
@@ -439,7 +650,9 @@ function buildPackRecipe(options: AddOptions): PackConfig {
 
   for (const [key, value] of Object.entries(extra)) {
     if (Object.hasOwn(source, key) && source[key] !== value) {
-      throw new UsageError(`--recipe sets "${key}", which a source flag already sets.`);
+      throw new UsageError(
+        `--recipe sets "${key}", which a source flag already sets; set it in one place only.`
+      );
     }
     source[key] = value;
   }
@@ -452,7 +665,7 @@ function buildPackRecipe(options: AddOptions): PackConfig {
 
   if (options.mount !== undefined) {
     if (Object.hasOwn(source, 'mount')) {
-      throw new UsageError('--mount and --recipe both set "mount".');
+      throw new UsageError('--mount and --recipe both set "mount"; set it in one place only.');
     }
     source.mount = options.mount;
   }
@@ -463,13 +676,15 @@ function buildPackRecipe(options: AddOptions): PackConfig {
       modifier.needs !== undefined &&
       source.type !== modifier.needs
     ) {
-      throw new UsageError(`${modifier.flags.split(' ')[0]} only applies to --${modifier.needs}.`);
+      throw new UsageError(
+        `${modifier.flags.split(' ')[0]} only applies to --${modifier.needs}; drop it, or take the docs from --${modifier.needs}.`
+      );
     }
   }
 
   if (options.include !== undefined) {
     if (Object.hasOwn(source, 'include')) {
-      throw new UsageError('--include and --recipe both set "include".');
+      throw new UsageError('--include and --recipe both set "include"; set it in one place only.');
     }
     source.include = options.include;
   }
@@ -581,7 +796,7 @@ function printGuideReview(pack: PackSyncResult): void {
   }
   if (review.basis === 'sections') {
     const guides = review.guides.map((guide) => guide.guide).join(' ');
-    say(`  after re-reviewing them: llm-docs guides stamp ${pack.id} ${guides}`);
+    say(`  after re-reviewing them, run 'llm-docs guides stamp ${pack.id} ${guides}'`);
   }
 }
 
@@ -592,10 +807,10 @@ function printSyncReport(report: SyncReport): void {
         say(`${pack.id}: up to date`);
         break;
       case 'built':
-        say(`${pack.id}: built (${pack.reason ?? 'rebuilt'})`);
+        say(`${pack.id}: built (${pack.detail ?? 'rebuilt'})`);
         break;
       case 'would-build':
-        say(`${pack.id}: would rebuild (${pack.reason ?? 'out of date'})`);
+        say(`${pack.id}: would rebuild (${pack.detail ?? 'out of date'})`);
         break;
       case 'failed':
         say(`${pack.id}: failed: ${pack.error ?? 'unknown error'}`);
@@ -625,9 +840,10 @@ function printSyncReport(report: SyncReport): void {
     );
   }
   if (report.check) {
+    const prune = report.orphans.some((orphan) => orphan.status === 'would-prune');
     say(
       report.changed
-        ? "sync --check: packs or managed blocks are out of date; run 'llm-docs sync'."
+        ? `sync --check: packs or managed blocks are out of date; run 'llm-docs sync${prune ? ' --prune' : ''}'.`
         : 'sync --check: everything is up to date.'
     );
   }
@@ -644,7 +860,7 @@ function printRefreshReport(report: SyncReport): void {
 
     const { counts } = refresh;
     const summary = `${counts.changed} changed, ${counts.added} added, ${counts.removed} removed, ${counts.unchanged} unchanged`;
-    const reason = pack.reason ?? 'upstream changed';
+    const reason = pack.detail ?? 'upstream changed';
     const outcome = {
       unchanged: 'no upstream changes',
       built: `${reason}; rebuilt`,
@@ -678,10 +894,16 @@ function printRefreshReport(report: SyncReport): void {
   printAgentBlocks(report.agentBlocks);
 
   if (report.check) {
+    const changed = report.packs
+      .filter((pack) => pack.status === 'would-build')
+      .map((pack) => ` ${pack.id}`)
+      .join('');
     say(
-      report.changed
-        ? 'refresh --check: upstream or a converter changed; run refresh without --check to rebuild.'
-        : 'refresh --check: every pack matches upstream.'
+      changed !== ''
+        ? `refresh --check: upstream or a converter changed; run 'llm-docs refresh${changed}' to rebuild.`
+        : report.changed
+          ? "refresh --check: every pack matches upstream, but a managed block is out of date; run 'llm-docs sync'."
+          : 'refresh --check: every pack matches upstream.'
     );
   }
 }
@@ -700,7 +922,12 @@ function printVerifyReport(report: VerifyReport): void {
       }
       const scope = entry.packId ?? 'project';
       const path = finding.path === undefined ? '' : ` ${finding.path}:`;
-      say(`${scope} ${entry.check} ${finding.status}:${path} ${finding.message}`);
+      // Messages about a whole file (llm-docs.json, manifest.json) start with its name.
+      const message =
+        finding.path !== undefined && finding.message.startsWith(`${finding.path} `)
+          ? finding.message.slice(finding.path.length + 1)
+          : finding.message;
+      say(`${scope} ${entry.check} ${finding.status}:${path} ${message}`);
     }
   }
 
@@ -715,12 +942,59 @@ function printVerifyReport(report: VerifyReport): void {
 // Program
 // ---------------------------------------------------------------------------
 
+/** The codes `--json` reports carry, with what each means, for `capabilities`. */
+const OUTCOME_CODES = {
+  /** `packs[].status` of sync, add, and refresh. */
+  packStatus: {
+    unchanged: 'the pack already matches its recipe, lockfile, and sources; nothing was written',
+    built: 'the pack was built and swapped into place',
+    'would-build': 'under --check: the pack is stale and would be rebuilt',
+    failed: 'the pack could not be built; see error and exitCode',
+  } satisfies Record<PackSyncStatus, string>,
+  /** `packs[].reason` of sync, add, and refresh, with `detail` saying it in words. */
+  staleReason: {
+    'not-built': 'the pack has never been built',
+    'manifest-unreadable': "the pack's manifest.json is unreadable",
+    'recipe-edited': 'the recipe in llm-docs.json changed since the last build',
+    'lockfile-moved':
+      'llm-docs.json is unchanged, but a lockfile now resolves the bound dependency to another version',
+    'files-differ': 'the pack files differ from its manifest (edited, added, or deleted by hand)',
+    'sources-changed': 'local source files changed since the last build',
+    'upstream-changed': 'refresh: the re-acquired sources differ from the recorded ones',
+    'converter-changed': 'refresh: the sources are unchanged, but a converter version changed',
+  } satisfies Record<StaleReason, string>,
+  /** `orphans[].status` of sync. */
+  orphanStatus: {
+    orphan: `a pack directory with no recipe in ${CONFIG_FILE_NAME}, only reported (sync --prune deletes it)`,
+    pruned: 'deleted by sync --prune',
+    'would-prune': 'under sync --check --prune: would be deleted',
+    kept: 'sync --prune left it in place; see reason',
+  } satisfies Record<OrphanStatus, string>,
+  /** `agentBlocks[].status` of init, sync, add, and refresh. */
+  agentBlockStatus: BLOCK_STATUS_TEXT,
+  /** `results[].status` of verify; a `fail` makes verify exit 1. */
+  checkStatus: {
+    pass: 'the check found nothing',
+    fail: 'the check failed',
+    warn: 'worth a look, but not a failure',
+    info: 'for information only',
+    skipped: 'the check could not run; see reason',
+  } satisfies Record<CheckStatus, string>,
+  /** `changed` of guides stamp. */
+  guidesStampChanged: {
+    true: 'the citations lock was written',
+    false: 'the citations lock already held these stamps; nothing was written',
+  },
+};
+
 function capabilities(program: Command): unknown {
   const supported = new Set(supportedSourceTypes());
 
   return {
     name: CLI_NAME,
     version: packageJson.version,
+    exitCodes: EXIT_CODES,
+    json: JSON_HELP,
     commands: COMMANDS.map((entry) => ({
       ...entry,
       // A name with a space is a subcommand path (`guides stamp`).
@@ -734,6 +1008,7 @@ function capabilities(program: Command): unknown {
           ?.options.map((option) => ({ flags: option.flags, description: option.description })) ??
         [],
     })),
+    outcomes: OUTCOME_CODES,
     sourceTypes: SOURCE_TYPES.map((type) => ({ type, supported: supported.has(type) })),
     converters: CONVERTER_TOOLS.map((tool) => ({
       tool,
@@ -743,7 +1018,7 @@ function capabilities(program: Command): unknown {
     ecosystems: ECOSYSTEMS,
     transforms: TRANSFORM_NAMES,
     checks: { pack: PACK_CHECK_NAMES, project: PROJECT_CHECK_NAMES },
-    limits: PACK_LIMITS,
+    limits: { ...PACK_LIMITS, maxReadFirst: READ_FIRST_MAX },
   };
 }
 
@@ -752,15 +1027,43 @@ function buildProgram(): Command {
 
   // Must precede command() calls: subcommands copy this setting when created.
   program.exitOverride();
+  program.showHelpAfterError('(run the command again with --help for its options and examples)');
   // Program options (-V, --version) only before the command name, so `add --version <v>` is add's.
   program.enablePositionalOptions();
-  program.name(CLI_NAME).description(packageJson.description).version(packageJson.version);
+  program
+    .name(CLI_NAME)
+    .description(packageJson.description)
+    .version(packageJson.version)
+    .addHelpText(
+      'after',
+      `\n${START_HERE_HELP}\n\n${new Help().boxWrap(JSON_HELP, 80)}\n\nExit codes:\n${Object.entries(
+        EXIT_CODES
+      )
+        .map(([code, meaning]) => `  ${code}  ${meaning}`)
+        .join('\n')}`
+    );
+  program.hook('preAction', (_program, actionCommand) => {
+    const project: unknown = actionCommand.opts().project;
+    if (typeof project !== 'string') {
+      return;
+    }
+    const names = program.commands.flatMap((command) =>
+      [command, ...command.commands]
+        .filter((entry) => entry.options.some((option) => option.long === '--project'))
+        .map((entry) => (entry === command ? command.name() : `${command.name()} ${entry.name()}`))
+    );
+    projectHint = {
+      pattern: new RegExp(`\\bllm-docs (?:${names.join('|')})(?![\\w-])(?! --project)`, 'g'),
+      flag: `--project ${shellQuote(resolve(project))}`,
+    };
+  });
 
   withProjectOptions(
-    program
-      .command('init')
-      .description(summaryOf('init'))
-      .option('--packs-dir <dir>', 'Project-relative packs directory (default agent-docs)')
+    describeCommand(program.command('init'), 'init').option(
+      '--packs-dir <dir>',
+      'Project-relative directory for the packs (default: agent-docs)'
+    ),
+    'create'
   ).action(async (options: ProjectOptions & { packsDir?: string }) => {
     const projectRoot = await creatingProjectRoot(options);
     const { created, configPath } = await initProjectConfig(
@@ -790,10 +1093,10 @@ function buildProgram(): Command {
     process.exitCode = worstExitCode(agentBlocks, false);
   });
 
-  const add = program
-    .command('add')
-    .description(summaryOf('add'))
-    .argument('<id>', 'Pack id (lowercase letters, digits, ".", "_", "-")');
+  const add = describeCommand(program.command('add'), 'add').argument(
+    '<id>',
+    'Pack id: up to 64 lowercase letters, digits, ".", "_", "-", starting with a letter or digit'
+  );
 
   for (const flag of [...ADD_SOURCE_FLAGS, ...ADD_SOURCE_MODIFIERS]) {
     if (flag.repeatable === true) {
@@ -802,21 +1105,33 @@ function buildProgram(): Command {
       add.option(flag.flags, flag.description);
     }
   }
-  add.option('--site <baseUrl>', 'The docs website, so links to it resolve to pack pages');
+  add.option(
+    '--site <baseUrl>',
+    'The docs website, so links to it resolve to pack pages (default: none)'
+  );
 
   withProjectOptions(
     add
       .option(
         '--dependency <ecosystem:name>',
-        `Bind the pack to a dependency (${ECOSYSTEMS.join(', ')})`
+        `Bind the pack to a dependency, such as npm:vite; ecosystems: ${ECOSYSTEMS.join(', ')} (default: none)`
       )
-      .option('--version <version>', 'Docs version (required unless --dependency is set)')
-      .option('--mount <dir>', 'Subdirectory under pages/ and files/ for this source')
+      .option(
+        '--version <version>',
+        'Docs version, filled into {version} placeholders (default: the version the lockfile resolves for --dependency; required without it)'
+      )
+      .option(
+        '--mount <dir>',
+        'Subdirectory under pages/ and files/ for this source (default: the pack root)'
+      )
       .option('--title <title>', 'Pack title (default: the id)')
-      .option('--recipe <json>', 'Extra source fields as JSON (include, exclude, passthrough, ...)')
+      .option(
+        '--recipe <json>',
+        'More source fields as a JSON object, such as {"exclude": ["**/blog/**"], "passthrough": ["**/*.csv"]} (default: none)'
+      )
       .option(
         '--convert <tool>',
-        `Convert documents (PDF, DOCX, ...) to pages with ${ADD_CONVERT_TOOLS.join(', ')} (a command converter goes in --recipe)`
+        `Convert documents (PDF, DOCX, ...) to pages with ${ADD_CONVERT_TOOLS.join(', ')}; a command converter goes in --recipe (default: none)`
       )
       .option(
         '--convert-include <glob...>',
@@ -824,14 +1139,20 @@ function buildProgram(): Command {
       )
       .option(
         '--read-first <target>',
-        'A page or passthrough file to read first, such as a migration guide: pages/<path> or files/<path>, optionally #<heading slug> (repeatable, at most 5)',
+        'A page or passthrough file to read first, such as a migration guide: pages/<path> or files/<path>, optionally #<heading slug> (repeatable, at most 5; default: none)',
         collect
       )
-      .option('--replace', 'Overwrite an existing pack with this id')
-      .option('--dry-run', 'Print the recipe and the files it would take, writing nothing')
+      .option('--replace', 'Overwrite an existing pack with this id (default: refuse)')
+      .option(
+        '--dry-run',
+        'Print the recipe and the files it would take, writing nothing (fetches network sources)'
+      ),
+    'create'
   ).action(async (id: string, options: AddOptions) => {
     if (!PACK_ID_PATTERN.test(id)) {
-      throw new UsageError(`Pack id "${id}" must match ${PACK_ID_PATTERN.source}.`);
+      throw new UsageError(
+        `Pack id "${id}" must match ${PACK_ID_PATTERN.source}: lowercase, such as vite or react-router.`
+      );
     }
 
     const projectRoot = await creatingProjectRoot(options);
@@ -862,7 +1183,10 @@ function buildProgram(): Command {
           ...preview,
         });
       }
-      say(JSON.stringify({ [id]: pack }, null, 2));
+      // Under --json the recipe is on stdout already; stderr keeps to prose.
+      if (options.json !== true) {
+        say(JSON.stringify({ [id]: pack }, null, 2));
+      }
       for (const file of preview.files) {
         say(`  ${file.outputPath}  <-  ${file.source}`);
       }
@@ -925,13 +1249,21 @@ function buildProgram(): Command {
   });
 
   withProjectOptions(
-    program
-      .command('sync')
-      .description(summaryOf('sync'))
-      .argument('[ids...]', 'Packs to sync (default: all)')
-      .option('--check', 'Write nothing; exit 1 when any pack would change')
-      .option('--offline', 'Fail rather than acquire network sources')
-      .option('--prune', 'Delete pack directories that are not in the config')
+    describeCommand(program.command('sync'), 'sync')
+      .argument('[ids...]', 'Pack ids to sync (default: every pack in llm-docs.json)')
+      .option(
+        '--check',
+        'Write nothing; exit 1 when a pack or managed block would change (default: write)'
+      )
+      .option(
+        '--offline',
+        'Fail a pack that must fetch network sources to rebuild, instead of fetching (default: fetch)'
+      )
+      .option(
+        '--prune',
+        'Delete pack directories that have no recipe in llm-docs.json (default: only report them)'
+      ),
+    'nearest config'
   ).action(
     async (
       ids: string[],
@@ -954,14 +1286,16 @@ function buildProgram(): Command {
   );
 
   withProjectOptions(
-    program
-      .command('verify')
-      .description(summaryOf('verify'))
-      .argument('[ids...]', 'Packs to verify (default: all, plus orphan pack directories)')
+    describeCommand(program.command('verify'), 'verify')
+      .argument(
+        '[ids...]',
+        'Pack ids to verify (default: every pack, plus pack directories with no recipe)'
+      )
       .option(
         '--strict',
-        'Also check link fragments against heading anchors, and fail on an unknown or proprietary license'
-      )
+        'Also check link fragments against heading anchors, and fail on an unknown or proprietary license (default: warn on the license)'
+      ),
+    'nearest config'
   ).action(async (ids: string[], options: ProjectOptions & { strict?: boolean }) => {
     const projectRoot = await existingProjectRoot(options);
     const report = await verifyPacks(projectRoot, ids, { strict: options.strict === true });
@@ -974,11 +1308,13 @@ function buildProgram(): Command {
   });
 
   withProjectOptions(
-    program
-      .command('refresh')
-      .description(summaryOf('refresh'))
-      .argument('[ids...]', 'Packs to refresh (default: all)')
-      .option('--check', 'Write nothing; exit 1 when anything changed upstream')
+    describeCommand(program.command('refresh'), 'refresh')
+      .argument('[ids...]', 'Pack ids to refresh (default: every pack in llm-docs.json)')
+      .option(
+        '--check',
+        'Write nothing; exit 1 when anything changed upstream (default: rebuild the changed packs)'
+      ),
+    'nearest config'
   ).action(async (ids: string[], options: ProjectOptions & { check?: boolean }) => {
     const projectRoot = await existingProjectRoot(options);
     const report = await syncPacks(projectRoot, ids, {
@@ -994,17 +1330,16 @@ function buildProgram(): Command {
     process.exitCode = syncExitCode(report);
   });
 
-  const guides = program.command('guides').description(summaryOf('guides stamp'));
+  const guides = describeCommand(program.command('guides'), 'guides stamp');
 
   withProjectOptions(
-    guides
-      .command('stamp')
-      .description(summaryOf('guides stamp'))
+    describeCommand(guides.command('stamp'), 'guides stamp')
       .argument('<id>', 'Pack whose guides to stamp')
       .argument(
         '[guides...]',
-        'Guides to stamp (default: every guide), as guides/x.md, x.md, or a path to the file'
-      )
+        'Guides to stamp, as guides/x.md, x.md, or a path to the file (default: every guide of the pack)'
+      ),
+    'nearest config'
   ).action(async (id: string, guidePaths: string[], options: ProjectOptions) => {
     const loaded = await loadProjectConfig(await existingProjectRoot(options));
     const result = await stampGuides(loaded, id, guidePaths, process.cwd());
@@ -1027,16 +1362,26 @@ function buildProgram(): Command {
   });
 
   withProjectOptions(
-    program
-      .command('status')
-      .description(summaryOf('status'))
+    describeCommand(program.command('status'), 'status')
       .option(
         '--model <id>',
-        'Model id or Claude Code alias whose training data cutoff release dates are compared against'
+        'Model id or Claude Code alias, such as claude-opus-5-5 or opus, whose training data cutoff release dates are compared against (default: none)'
       )
-      .option('--cutoff <YYYY-MM>', 'Training data cutoff month (overrides --model)')
-      .option('--offline', 'Use cached release dates only, with no network requests')
-      .option('--brief', 'Print only the text the session-start hook would inject, on stdout')
+      .option(
+        '--cutoff <YYYY-MM>',
+        `Training data cutoff month; overrides --model (default: model.cutoff in ${CONFIG_FILE_NAME}, else LLM_DOCS_MODEL_CUTOFF, else the --model table entry)`
+      )
+      .option(
+        '--offline',
+        'Use cached release dates only, with no network requests (default: look up missing dates)'
+      )
+      .addOption(
+        new Option(
+          '--brief',
+          'Print only the text the session-start hook would inject, on stdout (not with --json)'
+        ).conflicts('json')
+      ),
+    'nearest config or cwd'
   ).action(
     async (
       options: ProjectOptions & {
@@ -1072,18 +1417,17 @@ function buildProgram(): Command {
       if (options.json === true) {
         writeJson(status.report);
       }
-      process.stderr.write(formatStatusHuman(status.report));
+      process.stderr.write(withProjectHint(formatStatusHuman(status.report)));
       for (const warning of status.warnings) {
         say(`warning: ${warning}`);
       }
     }
   );
 
-  program
-    .command('hook')
-    .description(summaryOf('hook session-start'))
-    .command('session-start')
-    .description(summaryOf('hook session-start'))
+  describeCommand(
+    describeCommand(program.command('hook'), 'hook session-start').command('session-start'),
+    'hook session-start'
+  )
     .allowUnknownOption()
     .allowExcessArguments()
     .action(async () => {
@@ -1094,12 +1438,14 @@ function buildProgram(): Command {
     });
 
   withProjectOptions(
-    program
-      .command('migrate')
-      .description(summaryOf('migrate'))
+    describeCommand(program.command('migrate'), 'migrate')
       .argument('<v2-pack-dir>', 'Directory of a v2 pack (the one holding its manifest.json)')
       .option('--id <id>', 'Pack id (default: the v2 pack directory name)')
-      .option('--version <version>', 'Docs version the pack describes (v2 manifests record none)')
+      .option(
+        '--version <version>',
+        'Docs version the pack describes (required: v2 manifests record none)'
+      ),
+    'create'
   ).action(async (packDir: string, options: ProjectOptions & { id?: string; version?: string }) => {
     const outcome = await migrateV2Pack(resolve(packDir), {
       projectRoot: await creatingProjectRoot(options),
@@ -1126,22 +1472,20 @@ function buildProgram(): Command {
     for (const warning of outcome.warnings) {
       say(`  warning: ${warning}`);
     }
-    say(`Next: ${next}`);
+    say(`Next: run '${next}'.`);
   });
 
-  program
-    .command('discover')
-    .description(summaryOf('discover'))
-    .option('--url <site>', 'Website to inspect (its llms.txt and sitemap.xml)')
+  describeCommand(program.command('discover'), 'discover')
+    .option('--url <site>', 'Website to inspect: an https:// URL (its llms.txt and sitemap.xml)')
     .option(
       '--package <ecosystem:name[@version]>',
-      `Package to inspect (${ECOSYSTEMS.join(', ')}; swiftpm:<repository url>); default version: the latest`
+      `Package to inspect, such as npm:vite@7.1.0; ecosystems: ${ECOSYSTEMS.join(', ')} (swiftpm:<repository url>) (default version: the latest)`
     )
     .option('--json', 'Accepted for consistency: discover always prints JSON on stdout')
     .action(async (options: { url?: string; package?: string }) => {
       if ((options.url === undefined) === (options.package === undefined)) {
         throw new UsageError(
-          'discover needs exactly one of --url and --package. Usage: llm-docs discover --url <site> | --package <ecosystem>:<name>[@<version>]'
+          "discover needs exactly one of --url <site> and --package <ecosystem>:<name>[@<version>]; for example 'llm-docs discover --package npm:vite'."
         );
       }
 
@@ -1175,12 +1519,13 @@ function buildProgram(): Command {
           `  llms.txt lists ${inspection.llmsTxt.listedUrls} URLs; Markdown at .md: ${markdownPages?.length ?? 0} of ${inspection.llmsTxt.markdownProbes.length} probed pages; version segments: ${segments?.length === 0 ? 'none' : segments?.join(', ')}.`
         );
       }
+      for (const warning of inspection.warnings) {
+        say(`  warning: ${warning}`);
+      }
     });
 
-  program
-    .command('capabilities')
-    .description(summaryOf('capabilities'))
-    .option('--json', 'Print the machine-readable capabilities')
+  describeCommand(program.command('capabilities'), 'capabilities')
+    .option('--json', 'Print every capability as one JSON document (default: one line per command)')
     .action((options: { json?: boolean }) => {
       if (options.json === true) {
         writeJson(capabilities(program));

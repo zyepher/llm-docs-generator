@@ -38,9 +38,9 @@ const REMOVED_COMMANDS: Array<[string, string]> = [
   ['generate', "Use 'llm-docs add'"],
   ['validate', 'Supabase SDK catalog was removed'],
   ['list-sdks', 'Supabase SDK catalog was removed'],
-  ['source-truth', 'source-truth mode was removed'],
-  ['verify-docs', 'source-truth mode was removed'],
-  ['plugins', 'convert.tool = "command"'],
+  ['source-truth', 'Source-truth mode was removed'],
+  ['verify-docs', 'Source-truth mode was removed'],
+  ['plugins', 'Parser plugins were removed'],
   ['agent', 'Install the llm-docs plugin'],
 ];
 

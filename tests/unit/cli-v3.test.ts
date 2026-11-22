@@ -188,7 +188,9 @@ describe('llm-docs v3 CLI', () => {
 
     const stale = await runCli(root, ['sync', '--check']);
     expect(stale.code).toBe(1);
-    expect(stale.stderr).toContain('demo: would rebuild (the pack files differ from the manifest)');
+    expect(stale.stderr).toContain(
+      'demo: would rebuild (the pack files differ from the manifest: pages/index.md)'
+    );
 
     expect((await runCli(root, ['sync'])).code).toBe(0);
     expect((await runCli(root, ['verify'])).code).toBe(0);
@@ -232,17 +234,17 @@ describe('llm-docs v3 CLI', () => {
     await writeFile(join(root, 'docs', 'api.md'), api.replace('Run it.', 'Run it twice.'));
     const sync = await runCli(root, ['sync']);
     expect(sync.code, sync.stderr).toBe(0);
-    expect(sync.stderr).toContain('demo: built (source files changed)\n');
+    expect(sync.stderr).toContain('demo: built (local source files changed)\n');
     expect(sync.stderr).toContain(
       '  guides to re-review (cited sections changed):\n' +
         '    guides/digest.md -> pages/api.md#install (section changed)\n' +
-        '  after re-reviewing them: llm-docs guides stamp demo guides/digest.md\n'
+        "  after re-reviewing them, run 'llm-docs guides stamp demo guides/digest.md'\n"
     );
 
     const stale = await runCli(root, ['verify']);
     expect(stale.code).toBe(1);
     expect(stale.stderr).toContain(
-      "demo citations fail: guides/digest.md: pages/api.md#install: cited section changed since stamping; re-review the guide, then 'llm-docs guides stamp demo guides/digest.md'"
+      "demo citations fail: guides/digest.md: pages/api.md#install: cited section changed since stamping; re-review the guide, then run 'llm-docs guides stamp demo guides/digest.md'"
     );
     expect(stale.stderr).not.toContain('pages/start.md:');
 
@@ -326,7 +328,9 @@ describe('llm-docs v3 CLI', () => {
     await writeFile(join(root, 'package-lock.json'), npmLockfile('demo-lib', '1.1.0'));
     const check = await runCli(root, ['sync', '--check']);
     expect(check.code).toBe(1);
-    expect(check.stderr).toContain('demo: would rebuild (the recipe changed)');
+    expect(check.stderr).toContain(
+      'demo: would rebuild (the lockfile now resolves npm:demo-lib 1.1.0, the pack is 1.0.0)'
+    );
     expect(check.stderr).toContain('AGENTS.md: llm-docs block up to date');
     const stale = await runCli(root, ['verify']);
     expect(stale.code).toBe(1);
@@ -361,6 +365,136 @@ describe('llm-docs v3 CLI', () => {
     expect(disagree.code).toBe(1);
     expect(disagree.stderr).toContain(
       "pinned lockfile fail: stale-pack: lockfiles resolve npm:demo-lib 1.1.0 (package-lock.json), the pack is 1.0.0; set packs.pinned.version in llm-docs.json to 1.1.0 (or remove it to follow the lockfile), then run 'llm-docs sync pinned'"
+    );
+  });
+
+  it('names why each pack is stale, in words and as a reason code', async () => {
+    const root = await makeProject({
+      ...DOCS,
+      'package-lock.json': npmLockfile('demo-lib', '1.2.0'),
+    });
+    expect(
+      (await runCli(root, ['add', 'demo', '--local', 'docs', '--dependency', 'npm:demo-lib'])).code
+    ).toBe(0);
+    const staleness = async (): Promise<{ reason: string; detail: string; line: string }> => {
+      const check = await runCli(root, ['sync', '--check', '--json']);
+      expect(check.code, check.stderr).toBe(1);
+      const [pack] = JSON.parse(check.stdout).packs;
+      return {
+        reason: pack.reason,
+        detail: pack.detail,
+        line: check.stderr.split('\n')[0] ?? '',
+      };
+    };
+
+    await writeFile(join(root, 'package-lock.json'), npmLockfile('demo-lib', '1.3.0'));
+    expect(await staleness()).toEqual({
+      reason: 'lockfile-moved',
+      detail: 'the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0',
+      line: 'demo: would rebuild (the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0)',
+    });
+    const verify = await runCli(root, ['verify']);
+    expect(verify.stderr).toContain(
+      "demo recipe fail: packs.demo in llm-docs.json is unchanged, but the lockfile now resolves npm:demo-lib 1.3.0 and the pack is 1.2.0; run 'llm-docs sync demo'"
+    );
+    expect((await runCli(root, ['sync'])).stderr).toContain(
+      'demo: built (the lockfile now resolves npm:demo-lib 1.3.0, the pack is 1.2.0)'
+    );
+
+    const config = JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8'));
+    config.packs.demo.title = 'Demo library';
+    await writeFile(join(root, 'llm-docs.json'), JSON.stringify(config));
+    expect(await staleness()).toMatchObject({
+      reason: 'recipe-edited',
+      detail: 'packs.demo in llm-docs.json changed',
+    });
+    expect((await runCli(root, ['sync'])).code).toBe(0);
+
+    await writeFile(join(root, 'agent-docs', 'demo', 'pages', 'index.md'), '# Edited\n');
+    expect(await staleness()).toMatchObject({
+      reason: 'files-differ',
+      detail: 'the pack files differ from the manifest: pages/index.md',
+    });
+    expect((await runCli(root, ['sync'])).code).toBe(0);
+
+    await writeFile(join(root, 'docs', 'index.md'), '# Home, revised\n');
+    expect(await staleness()).toMatchObject({
+      reason: 'sources-changed',
+      detail: 'local source files changed',
+    });
+
+    await rm(join(root, 'agent-docs', 'demo'), { recursive: true });
+    expect(await staleness()).toMatchObject({ reason: 'not-built', detail: 'not built yet' });
+
+    const reasons = JSON.parse((await runCli(root, ['capabilities', '--json'])).stdout).outcomes
+      .staleReason;
+    expect(Object.keys(reasons).sort()).toEqual([
+      'converter-changed',
+      'files-differ',
+      'lockfile-moved',
+      'manifest-unreadable',
+      'not-built',
+      'recipe-edited',
+      'sources-changed',
+      'upstream-changed',
+    ]);
+  });
+
+  it('warns about an unknown license when it builds and in verify, not on an up-to-date sync', async () => {
+    const root = await makeProject(DOCS);
+    const warning = 'License unknown: no license file was found in the sources';
+    const add = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0']);
+    expect(add.stderr).toContain(warning);
+    const skip = await runCli(root, ['sync']);
+    expect(skip.stderr).toContain('demo: up to date');
+    expect(skip.stderr).not.toContain('License unknown');
+    expect((await runCli(root, ['verify'])).stderr).toContain(
+      'demo license warn: license unknown: no license file was detected; set packs.demo.license in llm-docs.json'
+    );
+  });
+
+  it('puts --project into every hint when it was given, quoted for the shell', async () => {
+    const parent = await makeProject({});
+    const root = join(parent, 'my project');
+    await mkdir(join(root, 'docs'), { recursive: true });
+    await writeFile(join(root, 'docs', 'index.md'), '# Home\n');
+    const flag = `--project "${root}"`;
+    const add = await runCli(parent, [
+      'add',
+      'demo',
+      '--local',
+      'docs',
+      '--version',
+      '1.0.0',
+      '--project',
+      root,
+    ]);
+    expect(add.code, add.stderr).toBe(0);
+    await writeFile(join(root, 'agent-docs', 'demo', 'pages', 'index.md'), '# Edited\n');
+
+    const fromElsewhere = await runCli(parent, ['verify', '--project', root, '--json']);
+    expect(fromElsewhere.code).toBe(1);
+    expect(fromElsewhere.stderr).toContain(`run 'llm-docs sync ${flag} demo' to restore it`);
+    const finding = JSON.parse(fromElsewhere.stdout).results.find(
+      (entry: { check: string }) => entry.check === 'outputs'
+    ).findings[0];
+    expect(finding.message).toContain(`'llm-docs sync ${flag} demo'`);
+    const check = await runCli(parent, ['sync', '--check', '--project', root]);
+    expect(check.stderr).toContain(`run 'llm-docs sync ${flag}'.`);
+
+    const inside = await runCli(root, ['verify']);
+    expect(inside.stderr).toContain("run 'llm-docs sync demo' to restore it");
+    expect(inside.stderr).not.toContain('--project');
+  });
+
+  it('reports a config-schema problem with the file named once', async () => {
+    const root = await makeProject({
+      'llm-docs.json': '{"schemaVersion": 3, "packsDir": "/abs", "packs": {}}',
+    });
+    const verify = await runCli(root, ['verify']);
+    expect(verify.code).toBe(1);
+    expect(verify.stderr).toContain(
+      'project config-schema fail: llm-docs.json: packsDir: must be project-relative, not absolute\n'
     );
   });
 
@@ -407,7 +541,7 @@ describe('llm-docs v3 CLI', () => {
     await writeFile(join(root, 'docs', 'index.md'), '# Home, edited\n');
     const broken = await runCli(root, ['sync']);
     expect(broken.code).toBe(2);
-    expect(broken.stderr).toContain('demo: built (source files changed)');
+    expect(broken.stderr).toContain('demo: built (local source files changed)');
     expect(broken.stderr).toContain(
       "AGENTS.md: failed: mismatched llm-docs markers (a BEGIN marker on line 3 without an END); fix or remove them by hand, then run 'llm-docs sync'."
     );
@@ -536,7 +670,7 @@ describe('llm-docs v3 CLI', () => {
     );
     // Strict checks fragments too; the only problem is the undeclared license of the fixture.
     expect((await runCli(root, ['verify', '--strict'], env)).stderr).toBe(
-      'hono license fail: license unknown: no license file was detected; set "license" in the recipe once you know the terms\n' +
+      'hono license fail: license unknown: no license file was detected; set packs.hono.license in llm-docs.json (an SPDX id, or "proprietary") once you know the terms\n' +
         'verify: 1 problem found.\n'
     );
 
@@ -822,7 +956,7 @@ describe('llm-docs v3 CLI', () => {
 
     await writeFile(join(root, 'docs', 'spec.pdf'), 'Operating voltage: 24 V\n');
     const resync = await runCli(root, ['sync'], env);
-    expect(resync.stderr).toContain('manuals: built (source files changed)');
+    expect(resync.stderr).toContain('manuals: built (local source files changed)');
     expect(
       await readFile(join(root, 'agent-docs', 'manuals', 'pages', 'spec.md'), 'utf-8')
     ).toContain('Converted by markitdown: Operating voltage: 24 V');
@@ -840,7 +974,8 @@ describe('llm-docs v3 CLI', () => {
     expect(upgrade.code, upgrade.stderr).toBe(0);
     expect(JSON.parse(upgrade.stdout).packs[0]).toMatchObject({
       status: 'built',
-      reason: 'a converter version changed',
+      reason: 'converter-changed',
+      detail: 'a converter version changed',
       refresh: {
         converters: [
           {
@@ -950,7 +1085,7 @@ describe('llm-docs v3 CLI', () => {
       expect(result.code).toBe(2);
       expect(result.stdout).toBe('');
       expect(result.stderr).toContain(
-        'discover needs exactly one of --url and --package. Usage: llm-docs discover --url <site> | --package <ecosystem>:<name>[@<version>]'
+        "discover needs exactly one of --url <site> and --package <ecosystem>:<name>[@<version>]; for example 'llm-docs discover --package npm:vite'."
       );
     }
 
@@ -1101,9 +1236,9 @@ describe('llm-docs v3 CLI', () => {
       recipe,
       configPath: join(root, 'llm-docs.json'),
       warnings: [],
-      next: 'llm-docs sync vite-8',
+      next: `llm-docs sync --project ${root} vite-8`,
     });
-    expect(migrate.stderr).toContain('Next: llm-docs sync vite-8');
+    expect(migrate.stderr).toContain(`Next: run 'llm-docs sync --project ${root} vite-8'.`);
     expect(JSON.parse(await readFile(join(root, 'llm-docs.json'), 'utf-8')).packs).toEqual({
       'vite-8': recipe,
     });
@@ -1184,6 +1319,183 @@ describe('llm-docs v3 CLI', () => {
     ]);
     expect(misplaced.code).toBe(2);
     expect(misplaced.stderr).toContain('--ref only applies to --git');
+  });
+});
+
+/** Exactly one JSON document on stdout, and no JSON object on stderr. */
+function expectJsonDocument(result: CliResult): unknown {
+  expect(result.stdout.endsWith('}\n'), result.stderr).toBe(true);
+  expect(result.stderr).not.toMatch(/^\{/m);
+  return JSON.parse(result.stdout);
+}
+
+/** A command that cannot run: nothing on stdout, the error on stderr, the class in the exit code. */
+function expectJsonFailure(result: CliResult, code: number): void {
+  expect(result.code, result.stderr).toBe(code);
+  expect(result.stdout).toBe('');
+  expect(result.stderr.trim()).not.toBe('');
+}
+
+describe('--json: one document on stdout when the command runs, nothing when it cannot', () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await makeProject({ ...DOCS, 'v2/old/manifest.json': '{"schemaVersion": "2"}' });
+    const add = await runCli(root, ['add', 'demo', '--local', 'docs', '--version', '1.0.0']);
+    expect(add.code, add.stderr).toBe(0);
+    await mkdir(join(root, 'agent-docs', 'demo', 'guides'));
+    await writeFile(
+      join(root, 'agent-docs', 'demo', 'guides', 'g.md'),
+      '# G\n\nSee [home](../pages/index.md).\n'
+    );
+  });
+
+  it('init', async () => {
+    const fresh = await makeProject({});
+    expectJsonFailure(await runCli(fresh, ['init', '--packs-dir', '../out', '--json']), 2);
+    expect(expectJsonDocument(await runCli(fresh, ['init', '--json']))).toMatchObject({
+      created: true,
+    });
+  });
+
+  it('add', async () => {
+    const result = await runCli(root, [
+      'add',
+      'other',
+      '--local',
+      'docs',
+      '--version',
+      '1.0.0',
+      '--dry-run',
+      '--json',
+    ]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(expectJsonDocument(result)).toMatchObject({ id: 'other', dryRun: true });
+    expectJsonFailure(await runCli(root, ['add', 'Bad', '--local', 'docs', '--json']), 2);
+  });
+
+  it('sync', async () => {
+    expect(expectJsonDocument(await runCli(root, ['sync', '--check', '--json']))).toMatchObject({
+      check: true,
+    });
+    expectJsonFailure(await runCli(root, ['sync', 'nope', '--json']), 2);
+  });
+
+  it('refresh', async () => {
+    expect(expectJsonDocument(await runCli(root, ['refresh', '--check', '--json']))).toMatchObject({
+      check: true,
+    });
+    expectJsonFailure(await runCli(root, ['refresh', 'nope', '--json']), 2);
+  });
+
+  it('verify', async () => {
+    expect(expectJsonDocument(await runCli(root, ['verify', '--json']))).toHaveProperty('results');
+    expectJsonFailure(await runCli(root, ['verify', 'nope', '--json']), 2);
+  });
+
+  it('status', async () => {
+    const env = { LLM_DOCS_CACHE_DIR: join(root, '.cache') };
+    expect(
+      expectJsonDocument(await runCli(root, ['status', '--offline', '--json'], env))
+    ).toHaveProperty('packs');
+    expectJsonFailure(
+      await runCli(root, ['status', '--offline', '--cutoff', 'June', '--json'], env),
+      2
+    );
+    expectJsonFailure(await runCli(root, ['status', '--brief', '--json'], env), 2);
+  });
+
+  it('guides stamp', async () => {
+    expect(
+      expectJsonDocument(await runCli(root, ['guides', 'stamp', 'demo', '--json']))
+    ).toMatchObject({ guides: [{ path: 'guides/g.md', citations: 1 }] });
+    expectJsonFailure(await runCli(root, ['guides', 'stamp', 'nope', '--json']), 2);
+  });
+
+  it('migrate', async () => {
+    // The success case is covered by the v2 git pack migration above.
+    expectJsonFailure(await runCli(root, ['migrate', 'v2/old', '--version', '1', '--json']), 2);
+  });
+
+  it('discover', async () => {
+    const repo = await makeGitRepo();
+    expect(
+      expectJsonDocument(await runCli(root, ['discover', '--package', `swiftpm:${repo.url}`]))
+    ).toHaveProperty('tags');
+    expectJsonFailure(await runCli(root, ['discover', '--json']), 2);
+  });
+
+  it('capabilities', async () => {
+    expect(expectJsonDocument(await runCli(root, ['capabilities', '--json']))).toHaveProperty(
+      'commands'
+    );
+    expectJsonFailure(await runCli(root, ['capabilities', '--yaml', '--json']), 2);
+  });
+});
+
+describe('help', () => {
+  it('runs every example in the help through the real parser, actions stubbed', async () => {
+    const capabilities = JSON.parse((await runCli(repoRoot, ['capabilities', '--json'])).stdout);
+    const examples = capabilities.commands.flatMap(
+      (command: { name: string; examples: { argv: string[] }[] }) =>
+        command.examples.map((example) => ({ command: command.name, argv: example.argv }))
+    );
+    expect(examples.length).toBeGreaterThan(20);
+
+    // Every action records its command path instead of running, so parsing is all that happens.
+    const script = `
+      import { Command } from 'commander';
+      import { pathToFileURL } from 'node:url';
+      const [cli, list] = process.argv.slice(1);
+      const action = Command.prototype.action;
+      let ran;
+      Command.prototype.action = function () {
+        const path = [];
+        for (let command = this; command.parent; command = command.parent) path.unshift(command.name());
+        return action.call(this, () => { ran = path.join(' '); });
+      };
+      const results = [];
+      for (const [index, argv] of JSON.parse(list).entries()) {
+        ran = undefined;
+        process.exitCode = undefined;
+        process.argv = [process.execPath, cli, ...argv];
+        await import(pathToFileURL(cli).href + '?example=' + index);
+        results.push({ argv, ran: ran ?? null, exitCode: process.exitCode ?? 0 });
+      }
+      process.exitCode = 0;
+      process.stdout.write(JSON.stringify(results));
+    `;
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        script,
+        cliPath,
+        JSON.stringify(examples.map((example: { argv: string[] }) => example.argv)),
+      ],
+      { cwd: repoRoot }
+    );
+    expect(JSON.parse(stdout)).toEqual(
+      examples.map((example: { command: string; argv: string[] }) => ({
+        argv: example.argv,
+        ran: example.command,
+        exitCode: 0,
+      }))
+    );
+  });
+
+  it('shows examples after the options, and the start, JSON, and exit code notes once at the top', async () => {
+    const top = await runCli(repoRoot, ['--help']);
+    expect(top.stdout).toContain('Start here:\n  llm-docs init');
+    expect(top.stdout).toContain('llm-docs capabilities --json');
+    expect(top.stdout).toContain(
+      'With --json, a command that runs prints exactly one JSON document'
+    );
+    expect(top.stdout).toContain('Exit codes:\n  0  success\n  1  a check failed');
+    const sync = await runCli(repoRoot, ['sync', '--help']);
+    expect(sync.stdout).toMatch(/Options:[\s\S]*Examples:\n {2}# [^\n]+\n {2}llm-docs sync\n/);
+    expect(sync.stdout).not.toContain('Exit codes:');
   });
 });
 
