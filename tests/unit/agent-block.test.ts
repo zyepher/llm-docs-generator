@@ -175,7 +175,7 @@ describe('agent file resolution', () => {
       expect(outcomes[0]).toEqual({ path: 'AGENTS.md', status: 'updated' });
       expect(outcomes[1]).toMatchObject({ path: 'CLAUDE.md', status: 'failed', exitCode: 2 });
       expect(outcomes[1]?.error).toMatch(
-        /^CLAUDE\.md is a symbolic link to .*, outside the project/
+        /^CLAUDE\.md resolves through a symbolic link to .*, outside the project/
       );
       expect(await readFile(join(outside, 'CLAUDE.md'), 'utf-8')).toBe('# Elsewhere\n');
     }

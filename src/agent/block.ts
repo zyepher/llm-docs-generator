@@ -137,7 +137,7 @@ async function resolveAgentFiles(loaded: LoadedProjectConfig): Promise<AgentFile
         path,
         kind: 'invalid',
         error: new ConfigError(
-          `${path} is a symbolic link to ${absolutePath}, outside the project; replace the link with a file inside the project, or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}.`
+          `${path} resolves through a symbolic link to ${absolutePath}, outside the project; replace the link with a file inside the project, or leave ${path} out of "agentFiles" in ${CONFIG_FILE_NAME}.`
         ),
       });
       continue;
