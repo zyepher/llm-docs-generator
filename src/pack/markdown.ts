@@ -1461,7 +1461,9 @@ function unwrapMdxComponents(text: string, options: MarkdownSyntaxOptions): MdxU
         ? getMdxDeclarationKind(line.text.trim())
         : null;
 
-    if (declarationKind !== null && (previousRemoved || out.at(-1)?.trim() === '')) {
+    // Nothing emitted yet counts as a block start: blank lines after a removed
+    // declaration are dropped before anything is emitted, which clears previousRemoved.
+    if (declarationKind !== null && (previousRemoved || (out.at(-1)?.trim() ?? '') === '')) {
       const first = delimiterBalance(line.text.trim(), null);
       let balance = first.balance;
       let quote = first.quote;
