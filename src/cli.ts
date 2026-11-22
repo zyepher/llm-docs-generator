@@ -39,6 +39,7 @@ import { migrateV2Pack } from './config/migrate.js';
 import {
   describePackageDiscovery,
   discoverPackage,
+  PACKAGE_ECOSYSTEMS,
   parsePackageSpec,
   parseRepositorySpec,
 } from './core/package-discovery.js';
@@ -1574,7 +1575,7 @@ function buildProgram(): Command {
     .option('--url <site>', 'Website to inspect: an https:// URL (its llms.txt and sitemap.xml)')
     .option(
       '--package <ecosystem:name[@version]>',
-      `Package to inspect, such as npm:vite@7.1.0; ecosystems: ${ECOSYSTEMS.join(', ')} (swiftpm:<repository url>) (default version: the latest)`
+      `Package to inspect, such as npm:vite@7.1.0; ecosystems: ${PACKAGE_ECOSYSTEMS.join(', ')} (swiftpm:<repository url>) (default version: the latest)`
     )
     .option(
       '--repo <url[@version]>',

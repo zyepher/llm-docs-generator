@@ -16,8 +16,9 @@ import {
   parsePnpmLock,
   parseYarnLock,
 } from './lockfiles-npm.js';
+import { isToolchainFile, readToolchainVersions } from './toolchains.js';
 
-export const ECOSYSTEMS = ['npm', 'pypi', 'cargo', 'go', 'pub', 'swiftpm'] as const;
+export const ECOSYSTEMS = ['npm', 'pypi', 'cargo', 'go', 'pub', 'swiftpm', 'toolchain'] as const;
 export type Ecosystem = (typeof ECOSYSTEMS)[number];
 
 export const VERSION_TEXT_MAX = 128;
@@ -44,6 +45,8 @@ const DEPENDENCY_NAME_PATTERNS: Readonly<Record<Ecosystem, RegExp>> = {
   go: /^[a-z0-9._~+-]+(?:\/[a-z0-9._~+-]+)*$/i,
   pub: /^[a-z_][a-z0-9_]*$/,
   swiftpm: /^[a-z0-9_-][a-z0-9._-]*$/i,
+  // Spelled out rather than built from TOOLCHAINS: toolchains.ts imports this module.
+  toolchain: /^(?:go|python|rust|swift|dart|flutter|node)$/,
 };
 
 const DEPENDENCY_NAME_MAX = 214;
@@ -64,7 +67,7 @@ export interface ResolvedDependency {
   /** Declared by the project manifest next to the lockfile (or a workspace member it lists). */
   direct: boolean;
   dev: boolean;
-  /** Project-relative POSIX path. */
+  /** Project-relative POSIX path; for a toolchain, the version file it came from. */
   lockfile: string;
   repositoryUrl?: string;
 }
@@ -225,9 +228,11 @@ function lockfileParserFor(fileName: string): LockfileParser | undefined {
 
 /**
  * Find every supported lockfile under `projectRoot` (bounded walk, symlinks
- * never followed) and return the dependencies they resolve. Parsers only read
- * files; no project code runs. A lockfile that fails to parse becomes a
- * warning, never a thrown error, so one broken file cannot hide the rest.
+ * never followed) and return the dependencies they resolve, plus the
+ * project's language and toolchain versions from its version files (each
+ * entry naming the version file it came from). Parsers only read files; no
+ * project code runs. A lockfile that fails to parse becomes a warning, never
+ * a thrown error, so one broken file cannot hide the rest.
  */
 export async function scanDependencies(
   projectRoot: string,
@@ -242,6 +247,7 @@ export async function scanDependencies(
   const maxLockfileBytes = options.maxLockfileBytes ?? DEFAULT_MAX_LOCKFILE_BYTES;
   const tooDeep: string[] = [];
   const unread: UnreadLockfile[] = [];
+  const toolchainFiles: string[] = [];
 
   for await (const event of walkBoundedDirectoryTree({
     root,
@@ -299,6 +305,11 @@ export async function scanDependencies(
 
     if (parser) {
       found.push({ lockfile: relativePath, parser });
+    }
+
+    // go.mod and pubspec.lock are lockfiles and version files at once.
+    if (isToolchainFile(fileName)) {
+      toolchainFiles.push(relativePath);
     }
   }
 
@@ -380,6 +391,14 @@ export async function scanDependencies(
       }
     }
   }
+
+  const toolchains = await readToolchainVersions(root, toolchainFiles, {
+    maxBytes: maxLockfileBytes,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  dependencies.push(...toolchains.dependencies);
+  unread.push(...toolchains.unread);
+  warnings.push(...toolchains.warnings);
 
   const skippedWarning = formatSkippedWarning(skipped);
 

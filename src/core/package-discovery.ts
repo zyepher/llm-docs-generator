@@ -46,9 +46,14 @@ const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/;
 const REPOSITORY_VERSION_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9.+_@/-]{0,127}$/;
 const NAME_PATTERN = /^@?[A-Za-z0-9][A-Za-z0-9._~/-]*$/;
 
+/** The ecosystems `discover --package` takes: a language's docs are not a registry package. */
+export const PACKAGE_ECOSYSTEMS: readonly Exclude<Ecosystem, 'toolchain'>[] = ECOSYSTEMS.filter(
+  (ecosystem): ecosystem is Exclude<Ecosystem, 'toolchain'> => ecosystem !== 'toolchain'
+);
+
 export interface PackageSpec {
   /** Null for a plain repository named with `discover --repo`. */
-  ecosystem: Ecosystem | null;
+  ecosystem: Exclude<Ecosystem, 'toolchain'> | null;
   /** The registry name; for swiftpm and a plain repository, the repository URL. */
   name: string;
   /** For a plain repository, a version or a tag name. */
@@ -143,12 +148,19 @@ export interface PackageDiscovery {
 /** Parse `<ecosystem>:<name>[@<version>]`; swiftpm names are https:// or file:// URLs. */
 export function parsePackageSpec(value: string): PackageSpec {
   const separator = value.indexOf(':');
-  const ecosystem = ECOSYSTEMS.find((entry) => entry === value.slice(0, separator));
+
+  if (separator > 0 && value.slice(0, separator) === 'toolchain') {
+    throw new ConfigError(
+      "--package does not take a toolchain: a language's docs are not a registry package. Find its docs repository (the add-docs skill lists where to look) and run 'llm-docs discover --repo <url>@<version or tag>'."
+    );
+  }
+
+  const ecosystem = PACKAGE_ECOSYSTEMS.find((entry) => entry === value.slice(0, separator));
   const rest = value.slice(separator + 1);
 
   if (separator <= 0 || ecosystem === undefined || rest === '') {
     throw new ConfigError(
-      `--package must be <ecosystem>:<name>[@<version>] with an ecosystem of ${ECOSYSTEMS.join(', ')}; got "${value}".`
+      `--package must be <ecosystem>:<name>[@<version>] with an ecosystem of ${PACKAGE_ECOSYSTEMS.join(', ')}; got "${value}".`
     );
   }
 

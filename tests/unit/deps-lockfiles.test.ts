@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import {
   type DependencyScan,
   type ResolvedDependency,
 } from '../../src/deps/lockfiles.js';
+import { readToolchainVersions } from '../../src/deps/toolchains.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'deps');
 const tempDirs: string[] = [];
@@ -24,11 +25,14 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-/** One compact line per dependency so expectations read like the lockfile. */
+/**
+ * One compact line per dependency so expectations read like the lockfile. A
+ * language version a manifest or version file states is marked `toolchain:`.
+ */
 function summarize(scan: DependencyScan): string[] {
   return scan.dependencies.map(
     (dependency) =>
-      `${dependency.name}@${dependency.version} ${dependency.direct ? 'direct' : 'transitive'}${dependency.dev ? ' dev' : ''}`
+      `${dependency.ecosystem === 'toolchain' ? 'toolchain:' : ''}${dependency.name}@${dependency.version} ${dependency.direct ? 'direct' : 'transitive'}${dependency.dev ? ' dev' : ''}`
   );
 }
 
@@ -400,8 +404,13 @@ describe('Python lockfiles', () => {
       'redis@5.2.0 direct',
       'ruff@0.7.2 direct dev',
       'starlette@0.41.2 transitive',
+      'toolchain:python@3.12 direct',
     ]);
-    expect(scan.dependencies.every((dependency) => dependency.ecosystem === 'pypi')).toBe(true);
+    expect(
+      scan.dependencies.every(
+        (dependency) => dependency.ecosystem === 'pypi' || dependency.ecosystem === 'toolchain'
+      )
+    ).toBe(true);
     expect(scan.warnings).toEqual([
       'Skipped 1 non-registry dependency (git): uv.lock: internal-sdk (git).',
     ]);
@@ -416,6 +425,7 @@ describe('Python lockfiles', () => {
       'django@5.1.2 direct',
       'pytest@8.3.3 direct dev',
       'requests@2.32.3 direct',
+      'toolchain:python@3.11 direct',
     ]);
     expect(scan.warnings).toEqual([
       'Skipped 1 non-registry dependency (git): poetry.lock: my-fork (git).',
@@ -442,6 +452,7 @@ describe('Python lockfiles', () => {
       'flask-login@0.6.3 direct',
       'pytest@8.3.3 direct dev',
       'requests@2.32.3 direct',
+      'toolchain:python@3.12 direct',
     ]);
     expect(scan.warnings).toEqual([
       'Skipped 2 non-registry dependencies (git, path): Pipfile.lock: local-pkg (path); Pipfile.lock: some-git-tool (git).',
@@ -526,6 +537,7 @@ describe('Cargo, Go, pub, and SwiftPM', () => {
       'golang.org/x/sync@v0.8.0 transitive',
       'golang.org/x/text@v0.0.0-20240909161429-701f63a606c0 transitive',
       'gopkg.in/yaml.v3@v3.0.1 transitive',
+      'toolchain:go@1.23 direct',
     ]);
     expect(
       scan.dependencies.find((dependency) => dependency.name === 'github.com/go-chi/chi/v5')
@@ -558,6 +570,11 @@ describe('Cargo, Go, pub, and SwiftPM', () => {
       'github.com/google/uuid@v1.6.0-rc.1 direct',
       'github.com/google/uuid@v1.6.0-rc.1 transitive',
       'golang.org/x/sync@v0.7.0 direct',
+      // go.work and each go.mod state go 1.22.
+      'toolchain:go@1.22 direct',
+      'toolchain:go@1.22 direct',
+      'toolchain:go@1.22 direct',
+      'toolchain:go@1.22 direct',
     ]);
     expect(workspace.warnings).toEqual([
       'Skipped 1 non-registry dependency (workspace): m1/go.mod: example.com/m2 (workspace).',
@@ -591,6 +608,8 @@ describe('Cargo, Go, pub, and SwiftPM', () => {
       'async@2.11.0 transitive',
       'flutter_lints@5.0.0 direct dev',
       'http@1.2.2 direct',
+      'toolchain:dart@3.5 direct',
+      'toolchain:flutter@3.24 direct',
     ]);
     expect(scan.warnings).toEqual([
       'Skipped 3 non-registry dependencies (alternate-registry, git, path): pubspec.lock: internal_ui (path); pubspec.lock: private_pkg (alternate-registry); pubspec.lock: riverpod (git).',
@@ -604,6 +623,7 @@ describe('Cargo, Go, pub, and SwiftPM', () => {
       'swift-argument-parser@1.5.0 direct',
       'swift-custom-dump@1.3.3 transitive',
       'swift-snapshot-testing@1.17.5 direct',
+      'toolchain:swift@5.9 direct',
     ]);
     expect(scan.dependencies[0]?.repositoryUrl).toBe(
       'https://github.com/apple/swift-argument-parser.git'
@@ -833,6 +853,122 @@ describe('scanDependencies walking', () => {
       otherRegistry: [],
       warnings: [],
     });
+  });
+});
+
+describe('toolchain versions in a scan', () => {
+  it('reads the language versions the project states, a pin over a minimum, next to its lockfiles', async () => {
+    const root = await makeProject({
+      '.python-version': '3.15.2\n',
+      'pyproject.toml': '[project]\nname = "app"\nrequires-python = ">=3.12"\n',
+      'go.mod':
+        'module example.com/app\n\ngo 1.26.0\n\ntoolchain go1.27.4\n\nrequire github.com/google/uuid v1.6.0\n',
+    });
+    const scan = await scanDependencies(root);
+
+    expect(scan.lockfiles).toEqual(['go.mod']);
+    expect(scan.warnings).toEqual([]);
+    expect(
+      scan.dependencies.map(
+        (dependency) =>
+          `${dependency.ecosystem}:${dependency.name}@${dependency.version} ${dependency.lockfile}`
+      )
+    ).toEqual([
+      'go:github.com/google/uuid@v1.6.0 go.mod',
+      'toolchain:go@1.27 go.mod',
+      'toolchain:python@3.15 .python-version',
+    ]);
+    expect(findDependencyVersion(scan, { ecosystem: 'toolchain', name: 'python' })).toEqual({
+      kind: 'found',
+      version: '3.15',
+      lockfiles: ['.python-version'],
+    });
+    expect(findDependencyVersion(scan, { ecosystem: 'toolchain', name: 'go' })).toEqual({
+      kind: 'found',
+      version: '1.27',
+      lockfiles: ['go.mod'],
+    });
+    expect(findDependencyVersion(scan, { ecosystem: 'toolchain', name: 'node' })).toEqual({
+      kind: 'missing',
+      searched: [],
+    });
+  });
+
+  it('leaves a version file over the size cap unread, and a toolchain lookup says so', async () => {
+    const root = await makeProject({
+      '.nvmrc': '# the version CI installs\n22.11.0\n',
+      'requirements.txt': 'flask==3.0.3\n',
+    });
+    const scan = await scanDependencies(root, { maxLockfileBytes: 20 });
+
+    expect(summarize(scan)).toEqual(['flask@3.0.3 direct']);
+    expect(scan.warnings).toEqual([
+      expect.stringMatching(
+        /^\.nvmrc: skipped, it is \d+ bytes, over the 20-byte limit for a version file\.$/
+      ),
+    ]);
+    expect(findDependencyVersion(scan, { ecosystem: 'toolchain', name: 'node' })).toEqual({
+      kind: 'unread',
+      lockfiles: [
+        {
+          lockfile: '.nvmrc',
+          ecosystems: ['toolchain'],
+          reason: expect.stringMatching(
+            /^is \d+ bytes, over the 20-byte limit for a version file$/
+          ),
+        },
+      ],
+    });
+    expect(findDependencyVersion(scan, { ecosystem: 'pypi', name: 'flask' }).kind).toBe('found');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked version file and leaves it unread',
+    async () => {
+      const root = await makeProject({ 'real-nvmrc': '22.11.0\n' });
+      await symlink(join(root, 'real-nvmrc'), join(root, '.nvmrc'));
+      const read = await readToolchainVersions(root, ['.nvmrc'], { maxBytes: 1024 });
+
+      expect(read.dependencies).toEqual([]);
+      expect(read.unread).toEqual([
+        {
+          lockfile: '.nvmrc',
+          ecosystems: ['toolchain'],
+          reason: expect.stringMatching(
+            /^could not be read: .* is a symbolic link, not a regular file$/
+          ),
+        },
+      ]);
+      expect(read.warnings).toEqual([
+        expect.stringMatching(
+          /^\.nvmrc: could not be read: .* is a symbolic link, not a regular file\.$/
+        ),
+      ]);
+      expect(
+        findDependencyVersion(
+          { dependencies: [], lockfiles: [], unread: read.unread, otherRegistry: [] },
+          { ecosystem: 'toolchain', name: 'node' }
+        ).kind
+      ).toBe('unread');
+    }
+  );
+
+  it('reads at most 200 version files, shallowest first, and says how many it left', async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 201 }, (_, index) => [
+        `apps/app${String(index).padStart(3, '0')}/.nvmrc`,
+        '22\n',
+      ])
+    );
+    const scan = await scanDependencies(await makeProject({ ...files, '.nvmrc': '22\n' }));
+    const lookup = findDependencyVersion(scan, { ecosystem: 'toolchain', name: 'node' });
+
+    expect(scan.warnings).toEqual([
+      'Toolchain version scan read the first 200 of 202 files that can state a version; the rest were not read.',
+    ]);
+    expect(lookup.kind === 'found' ? lookup.lockfiles : []).toHaveLength(200);
+    expect(lookup.kind === 'found' ? lookup.lockfiles : []).toContain('.nvmrc');
+    expect(lookup.kind === 'found' ? lookup.lockfiles : []).not.toContain('apps/app199/.nvmrc');
   });
 });
 

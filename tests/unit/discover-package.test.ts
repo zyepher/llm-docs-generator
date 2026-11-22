@@ -232,6 +232,13 @@ describe('parsePackageSpec', () => {
     expect(() => parsePackageSpec(value)).toThrow(ConfigError);
     expect(() => parsePackageSpec(value)).toThrow(message);
   });
+
+  it('refuses a toolchain and points to discover --repo', () => {
+    expect(() => parsePackageSpec('toolchain:python@3.15')).toThrow(ConfigError);
+    expect(() => parsePackageSpec('toolchain:python@3.15')).toThrow(
+      "--package does not take a toolchain: a language's docs are not a registry package. Find its docs repository (the add-docs skill lists where to look) and run 'llm-docs discover --repo <url>@<version or tag>'."
+    );
+  });
 });
 
 describe('parseRepositorySpec', () => {

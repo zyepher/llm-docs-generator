@@ -468,6 +468,10 @@ const LOOKUPS: Readonly<
   go: lookupGo,
   pub: lookupPub,
   swiftpm: lookupSwiftpm,
+  toolchain: async (query) => ({
+    source: 'unsupported',
+    versions: new Map([[query.version, null]]),
+  }),
 };
 
 /** pub.dev returns all versions per request, so its unit of work is the package. */
@@ -628,8 +632,11 @@ export async function lookupReleaseDates(
 // Package metadata (discover --package)
 // ============================================================================
 
-/** Ecosystems with a registry; a SwiftPM package is identified by its repository URL. */
-export type RegistryEcosystem = Exclude<Ecosystem, 'swiftpm'>;
+/**
+ * Ecosystems with a registry; a SwiftPM package is identified by its
+ * repository URL, and a toolchain has no package metadata.
+ */
+export type RegistryEcosystem = Exclude<Ecosystem, 'swiftpm' | 'toolchain'>;
 
 export interface PackageMetadataQuery {
   ecosystem: RegistryEcosystem;
