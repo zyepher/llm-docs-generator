@@ -835,7 +835,9 @@ writes files.
   `llms.txt` (for example `2026-07-28`, `v8`), so the planner can write a filter.
 - `--package <eco>:<name>[@<version>]`: registry metadata (repository URL and directory,
   homepage, documentation URL, license, the version's publish date), the git tags matching the
-  version (via `git ls-remote`), and, when a tag matches, the top documentation-looking
+  version (via `git ls-remote`) with each tag commit's committer date and a warning when it is
+  more than 14 days from the publish date (the tag may name another package's release; the tag
+  is still reported), and, when a tag matches, the top documentation-looking
   directories at that tag (blobless shallow fetch and `git ls-tree`, ranked by Markdown file
   count). Ecosystems: npm, pypi, cargo, pub, go (swiftpm: repository URL is the identity).
   From the same tree, `changeDocuments`: files whose name or a directory on their path names a
