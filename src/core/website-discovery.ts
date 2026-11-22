@@ -109,11 +109,26 @@ export interface WebsiteVersionSegment {
   urls: number;
 }
 
+/**
+ * A leading path prefix of listed same-origin URLs, the form an `--include`
+ * glob starts with: the path through the first version segment of the URL's
+ * directories (`/specification/2026-07-28`), else its first directory
+ * (`/seps`), else `/` for a page at the root.
+ */
+export interface WebsitePathPrefix {
+  prefix: string;
+  urls: number;
+}
+
 export interface WebsiteLlmsTxtEvidence {
   url: string;
   /** Distinct http(s) URLs the llms.txt lists (all of them, not capped like candidates). */
   listedUrls: number;
   versionSegments: WebsiteVersionSegment[];
+  /** By URL count, then path; at most PATH_PREFIX_LIMIT. */
+  pathPrefixes: WebsitePathPrefix[];
+  /** Prefixes past PATH_PREFIX_LIMIT, which are not listed. */
+  morePathPrefixes: number;
   markdownProbes: WebsiteMarkdownProbe[];
 }
 
@@ -347,6 +362,37 @@ function versionSegments(urls: readonly string[]): WebsiteVersionSegment[] {
     .sort((a, b) => b.urls - a.urls || compareStringsByCodeUnit(a.segment, b.segment));
 }
 
+const PATH_PREFIX_LIMIT = 40;
+
+function pathPrefixes(
+  urls: readonly string[],
+  origin: string
+): { pathPrefixes: WebsitePathPrefix[]; morePathPrefixes: number } {
+  const counts = new Map<string, number>();
+
+  for (const value of urls) {
+    const url = new URL(value);
+    if (url.origin !== origin) {
+      continue;
+    }
+    const directories = url.pathname
+      .split('/')
+      .filter((segment) => segment !== '')
+      .slice(0, -1);
+    const version = directories.findIndex((segment) => VERSION_SEGMENT.test(segment));
+    const prefix = `/${directories.slice(0, version === -1 ? 1 : version + 1).join('/')}`;
+    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+  }
+
+  const sorted = [...counts]
+    .map(([prefix, count]) => ({ prefix, urls: count }))
+    .sort((a, b) => b.urls - a.urls || compareStringsByCodeUnit(a.prefix, b.prefix));
+  return {
+    pathPrefixes: sorted.slice(0, PATH_PREFIX_LIMIT),
+    morePathPrefixes: Math.max(0, sorted.length - PATH_PREFIX_LIMIT),
+  };
+}
+
 function markdownProbeUrl(pageUrl: string): string {
   const url = new URL(pageUrl);
   if (!/\.md$/i.test(url.pathname)) {
@@ -357,8 +403,8 @@ function markdownProbeUrl(pageUrl: string): string {
 
 /**
  * The llms.txt evidence: how many URLs it lists, their version-looking path
- * segments, and whether the first three same-origin pages (sorted) serve
- * Markdown at their `.md` URL.
+ * segments, the leading path prefixes of the same-origin ones, and whether the
+ * first three same-origin pages (sorted) serve Markdown at their `.md` URL.
  */
 async function inspectLlmsTxt(options: {
   client: HttpClient;
@@ -410,7 +456,13 @@ async function inspectLlmsTxt(options: {
     }
   }
 
-  return { url, listedUrls: urls.length, versionSegments: versionSegments(urls), markdownProbes };
+  return {
+    url,
+    listedUrls: urls.length,
+    versionSegments: versionSegments(urls),
+    ...pathPrefixes(urls, origin),
+    markdownProbes,
+  };
 }
 
 function normalizeWebsiteUrl(input: string, allowPrivateNetwork: boolean): string {

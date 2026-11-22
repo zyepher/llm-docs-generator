@@ -1596,8 +1596,18 @@ function buildProgram(): Command {
           `${inspection.candidates.length} candidate URLs, ${inspection.warnings.length} warnings.`
       );
       if (inspection.llmsTxt !== null) {
+        const { pathPrefixes, morePathPrefixes } = inspection.llmsTxt;
+        const shown = pathPrefixes.slice(0, 6);
+        const rest = pathPrefixes.length - shown.length + morePathPrefixes;
         say(
           `  llms.txt lists ${inspection.llmsTxt.listedUrls} URLs; Markdown at .md: ${markdownPages?.length ?? 0} of ${inspection.llmsTxt.markdownProbes.length} probed pages; version segments: ${segments?.length === 0 ? 'none' : segments?.join(', ')}.`
+        );
+        say(
+          `  path prefixes for --include: ${
+            shown.length === 0
+              ? 'none on this origin'
+              : `${shown.map((entry) => `${entry.prefix} (${entry.urls})`).join(', ')}${rest > 0 ? `, and ${rest} more` : ''}`
+          }.`
         );
       }
       for (const warning of inspection.warnings) {

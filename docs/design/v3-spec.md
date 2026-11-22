@@ -1193,7 +1193,12 @@ writes files.
   raw Markdown when `.md` is appended (probing at most 3 listed same-origin pages, in sorted
   order, judged by a 2xx status with a Markdown or plain-text content type) and the
   version-looking path segments found in `llms.txt` (for example `2026-07-28`, `v8`), so the
-  planner can write a filter.
+  planner can write a filter. `llmsTxt.pathPrefixes` lists the distinct leading path prefixes of
+  the same-origin URLs `llms.txt` lists, with counts: each URL's directories up to and including
+  the first version segment among them, else its first directory, else `/` for a page at the
+  root (`/specification/2026-07-28`, `/seps`), sorted by count then path, at most 40 with
+  `morePathPrefixes` counting the rest. They are the prefixes an `--include` glob starts with;
+  the stderr summary prints the top six.
 - `--package <eco>:<name>[@<version>]`: registry metadata (repository URL and directory,
   homepage, documentation URL, license, the version's publish date), the git tags matching the
   version (via `git ls-remote`) with each tag commit's committer date and a warning when it is

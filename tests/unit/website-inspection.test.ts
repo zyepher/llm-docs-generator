@@ -351,6 +351,8 @@ describe('inspectWebsite', () => {
               `- [Old](${origin}/docs/v7/alpha)`,
               `- [Spec](${origin}/spec/2026-07-28/schema.md)`,
               `- [Again](${origin}/spec/2026-07-28/basic.md)`,
+              `- [Intro](${origin}/intro.md)`,
+              `- [Proposal](${origin}/seps/1-proposal.md)`,
               '- [Release](https://elsewhere.example/1.2/notes)',
             ].join('\n')
           );
@@ -374,13 +376,22 @@ describe('inspectWebsite', () => {
 
     expect(inspection.llmsTxt).toEqual({
       url: `${baseUrl}/llms.txt`,
-      listedUrls: 7,
+      listedUrls: 9,
       versionSegments: [
         { segment: 'v8', urls: 3 },
         { segment: '2026-07-28', urls: 2 },
         { segment: '1.2', urls: 1 },
         { segment: 'v7', urls: 1 },
       ],
+      // Same-origin only, each cut after its version segment when it has one.
+      pathPrefixes: [
+        { prefix: '/docs/v8', urls: 3 },
+        { prefix: '/spec/2026-07-28', urls: 2 },
+        { prefix: '/', urls: 1 },
+        { prefix: '/docs/v7', urls: 1 },
+        { prefix: '/seps', urls: 1 },
+      ],
+      morePathPrefixes: 0,
       markdownProbes: [
         {
           pageUrl: `${baseUrl}/docs/v7/alpha`,
@@ -416,6 +427,36 @@ describe('inspectWebsite', () => {
     // Never more than three probes, and never a listed page on another origin.
     expect(requests.filter((path) => path.endsWith('.md'))).toHaveLength(3);
     expect(requests).not.toContain('/docs/v8/zeta.md');
+  });
+
+  it('lists at most forty path prefixes and counts the rest', async () => {
+    const { baseUrl } = await startTestServer((request, response) => {
+      const origin = `http://${request.headers.host ?? ''}`;
+      if (request.url === '/llms.txt') {
+        const lines = Array.from(
+          { length: 42 },
+          (_, index) => `- [P${index}](${origin}/s${String(index).padStart(2, '0')}/page.md)`
+        );
+        writeHttpResponse(
+          response,
+          200,
+          'text/plain',
+          [...lines, `- [Q](${origin}/s41/q.md)`].join('\n')
+        );
+        return;
+      }
+      writeHttpResponse(response, 404, 'text/plain', 'not found');
+    });
+
+    allowPrivateNetwork();
+    const evidence = (await inspectWebsite({ url: `${baseUrl}/` })).llmsTxt;
+    expect(evidence?.pathPrefixes).toHaveLength(40);
+    expect(evidence?.pathPrefixes.slice(0, 2)).toEqual([
+      { prefix: '/s41', urls: 2 },
+      { prefix: '/s00', urls: 1 },
+    ]);
+    expect(evidence?.pathPrefixes.at(-1)).toEqual({ prefix: '/s38', urls: 1 });
+    expect(evidence?.morePathPrefixes).toBe(2);
   });
 
   it('reports no llms.txt evidence when the site serves none', async () => {

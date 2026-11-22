@@ -19,6 +19,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1256,6 +1257,59 @@ describe('llm-docs v3 CLI', () => {
       '--package <ecosystem:name[@version]>',
       '--json',
     ]);
+  });
+
+  it('discovers a website: the path prefixes to write in --include, in the JSON and the summary', async () => {
+    const pages = [
+      ...Array.from({ length: 3 }, (_, index) => `/specification/2026-07-28/basic/p${index}.md`),
+      ...Array.from({ length: 2 }, (_, index) => `/seps/${index}-sep.md`),
+      '/docs/2026-07-28/intro.md',
+      '/registry/about.md',
+      '/registry/publish.md',
+      '/a/x.md',
+      '/b/x.md',
+      '/examples.md',
+    ];
+    const server = createServer((request, response) => {
+      const origin = `http://${request.headers.host ?? ''}`;
+      if (request.url === '/llms.txt') {
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end(pages.map((path) => `- [Page](${origin}${path})`).join('\n'));
+        return;
+      }
+      response.writeHead(404, { 'content-type': 'text/plain' });
+      response.end('not found');
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        throw new Error('the test server has no port');
+      }
+      const result = await runCli(
+        await makeProject({}),
+        ['discover', '--url', `http://127.0.0.1:${address.port}/`],
+        { LLM_DOCS_ALLOW_PRIVATE_NETWORK: '1' }
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).llmsTxt).toMatchObject({
+        pathPrefixes: [
+          { prefix: '/specification/2026-07-28', urls: 3 },
+          { prefix: '/registry', urls: 2 },
+          { prefix: '/seps', urls: 2 },
+          { prefix: '/', urls: 1 },
+          { prefix: '/a', urls: 1 },
+          { prefix: '/b', urls: 1 },
+          { prefix: '/docs/2026-07-28', urls: 1 },
+        ],
+        morePathPrefixes: 0,
+      });
+      expect(result.stderr).toContain(
+        '  path prefixes for --include: /specification/2026-07-28 (3), /registry (2), /seps (2), / (1), /a (1), /b (1), and 1 more.\n'
+      );
+    } finally {
+      await new Promise((done) => server.close(done));
+    }
   });
 
   it('adds a git pack, syncs and verifies it, and reports upstream changes with refresh', async () => {
