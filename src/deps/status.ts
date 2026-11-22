@@ -48,6 +48,7 @@ export type PackState =
   | 'stale-pack'
   | 'lockfile-conflict'
   | 'not-in-lockfile'
+  | 'other-registry'
   | 'lockfile-unread'
   | 'recipe-changed'
   | 'sources-changed'
@@ -186,6 +187,8 @@ export interface ComputeStatusInput {
   recentDays?: number;
   /** Lockfiles the scan found but did not read; a pack bound through one is `lockfile-unread`. */
   unread?: UnreadLockfile[];
+  /** Dependencies installed from another registry; a pack bound to one is `other-registry`. */
+  otherRegistry?: DependencyScan['otherRegistry'];
 }
 
 const DEFAULT_RECENT_DAYS = 180;
@@ -236,6 +239,11 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
         : 'stale-pack';
     case 'missing':
       return 'not-in-lockfile';
+    case 'other-registry':
+      if (!pack.versionPinned) {
+        return 'other-registry';
+      }
+      break;
     case 'unread':
       return 'lockfile-unread';
     case undefined:
@@ -329,6 +337,8 @@ function packNextStep(
         : `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe, then run '${sync}'`;
     case 'not-in-lockfile':
       return `install ${dependency} so a lockfile resolves it, or remove packs.${id}.dependency from ${CONFIG_FILE_NAME}`;
+    case 'other-registry':
+      return `set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe: ${dependency} comes from another registry, so its version is not taken from the lockfile`;
     case 'lockfile-unread': {
       const unread =
         lookup?.kind === 'unread'
@@ -376,7 +386,7 @@ function packReleaseQuery(pack: PackStatusInput): ReleaseQuery | undefined {
 
 /** The versions the lockfiles resolve for a dependency, each with the lockfiles that say so. */
 function resolvedVersions(
-  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread'>,
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread' | 'otherRegistry'>,
   dependency: DependencyRef
 ): { version: string; lockfiles: string[] }[] {
   const lookup = findDependencyVersion(scan, dependency);
@@ -385,6 +395,7 @@ function resolvedVersions(
     case 'found':
       return [{ version: lookup.version, lockfiles: lookup.lockfiles }];
     case 'missing':
+    case 'other-registry':
     case 'unread':
       return [];
     case 'conflict': {
@@ -406,7 +417,12 @@ function resolvedVersions(
  */
 export function computeStatus(input: ComputeStatusInput): StatusReport {
   const lockfiles = [...new Set(input.dependencies.map((dependency) => dependency.lockfile))];
-  const scan = { dependencies: input.dependencies, lockfiles, unread: input.unread ?? [] };
+  const scan = {
+    dependencies: input.dependencies,
+    lockfiles,
+    unread: input.unread ?? [],
+    otherRegistry: input.otherRegistry ?? [],
+  };
   const recentDays = input.recentDays ?? DEFAULT_RECENT_DAYS;
   const end = input.cutoff === undefined ? undefined : cutoffEnd(input.cutoff.cutoff);
 
@@ -592,6 +608,8 @@ function packStateReason(pack: PackStatus): string | undefined {
     }
     case 'not-in-lockfile':
       return `no lockfile resolves ${name}, so nothing checks that docs for ${version} match what the project uses`;
+    case 'other-registry':
+      return `${name} is installed from another registry, so the lockfile cannot pin which version its docs describe`;
     case 'missing':
       return 'not built or invalid';
     case 'recipe-changed':
@@ -838,6 +856,8 @@ function lockfileSummary(pack: PackStatus): string {
         .join(', ');
     case 'missing':
       return 'not in any lockfile';
+    case 'other-registry':
+      return 'other registry';
     case 'unread':
       return 'lockfile not read';
     default:
@@ -1197,7 +1217,12 @@ export async function gatherProjectStatus(
     }
   }
   for (const input of packInputs) {
-    if (input.indexPath === null) {
+    // A private package's release date says nothing about a public one of the same name.
+    if (
+      input.indexPath === null ||
+      (input.dependency !== null &&
+        findDependencyVersion(scan, input.dependency).kind === 'other-registry')
+    ) {
       continue;
     }
     const own = packReleaseQuery(input);
@@ -1243,6 +1268,7 @@ export async function gatherProjectStatus(
     packs: packInputs,
     now: options.now,
     unread: scan.unread,
+    otherRegistry: scan.otherRegistry,
   });
 
   return {

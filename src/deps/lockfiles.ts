@@ -80,6 +80,13 @@ export interface DependencyScan {
    * their ecosystem says so instead of answering from the others.
    */
   unread: UnreadLockfile[];
+  /**
+   * Dependencies a lockfile installs from a registry other than the
+   * ecosystem's public one. They are left out of `dependencies`, so no
+   * release date is ever looked up for them, but a lookup by name says
+   * `other-registry` instead of `missing`.
+   */
+  otherRegistry: { ecosystem: Ecosystem; name: string; lockfile: string }[];
   warnings: string[];
 }
 
@@ -101,6 +108,7 @@ export type DependencyVersionLookup =
   | { kind: 'found'; version: string; lockfiles: string[] }
   | { kind: 'conflict'; versions: { version: string; lockfile: string }[] }
   | { kind: 'missing'; searched: string[] }
+  | { kind: 'other-registry'; lockfiles: string[] }
   | { kind: 'unread'; lockfiles: UnreadLockfile[] };
 
 /** The lockfile size a command reads; a larger one is skipped with a warning. */
@@ -383,6 +391,12 @@ export async function scanDependencies(
     dependencies: mergeDependencies(dependencies),
     lockfiles: found.map((entry) => entry.lockfile),
     unread,
+    otherRegistry: skipped.flatMap(({ lockfile, name, reason }) => {
+      const ecosystem = lockfileEcosystem(lockfile);
+      return reason === 'alternate-registry' && ecosystem !== undefined
+        ? [{ ecosystem, name, lockfile }]
+        : [];
+    }),
     warnings: [...new Set(warnings)].sort(compareStringsByCodeUnit),
   };
 }
@@ -419,10 +433,12 @@ export function projectDependencies(
  * any exist, so a transitive copy at another version (common in npm trees)
  * does not turn a clear answer into a conflict. A lockfile of its ecosystem
  * that was never read makes the answer unknown (`unread`), since it could
- * resolve the dependency to anything.
+ * resolve the dependency to anything. A dependency the lockfiles install only
+ * from another registry is `other-registry`: found, but not the public
+ * package of that name.
  */
 export function findDependencyVersion(
-  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread'>,
+  scan: Pick<DependencyScan, 'dependencies' | 'lockfiles' | 'unread' | 'otherRegistry'>,
   ref: DependencyRef
 ): DependencyVersionLookup {
   const unread = scan.unread.filter((entry) => entry.ecosystems.includes(ref.ecosystem));
@@ -444,6 +460,17 @@ export function findDependencyVersion(
   const relevant = direct.length > 0 && ref.ecosystem !== 'go' ? direct : matches;
 
   if (relevant.length === 0) {
+    const elsewhere = scan.otherRegistry.filter(
+      (entry) =>
+        entry.ecosystem === ref.ecosystem &&
+        normalizeDependencyName(entry.ecosystem, entry.name) === wanted
+    );
+    if (elsewhere.length > 0) {
+      return {
+        kind: 'other-registry',
+        lockfiles: uniqueSorted(elsewhere.map((entry) => entry.lockfile)),
+      };
+    }
     return {
       kind: 'missing',
       searched: scan.lockfiles.filter((lockfile) => lockfileEcosystem(lockfile) === ref.ecosystem),

@@ -1813,6 +1813,80 @@ describe('status and sync --check', () => {
   });
 });
 
+describe('a pack bound to a dependency from another registry', () => {
+  it('has its own state and next step, and no release date from the public registry', async () => {
+    const lock = {
+      name: 'app',
+      lockfileVersion: 3,
+      packages: {
+        '': { name: 'app', dependencies: { '@corp/ui': '^2.0.0' } },
+        'node_modules/@corp/ui': {
+          version: '2.0.0',
+          resolved: 'https://npm.corp.example/@corp/ui/-/ui-2.0.0.tgz',
+        },
+      },
+    };
+    const root = await makeProject({
+      ...DOCS,
+      'package.json': '{"name":"app","dependencies":{"@corp/ui":"^2.0.0"}}\n',
+      'package-lock.json': JSON.stringify(lock),
+    });
+    const cache = await makeProject({
+      'release-dates.json': JSON.stringify({
+        schemaVersion: 1,
+        entries: {
+          'npm:@corp/ui@2.0.0': {
+            publishedAt: '2026-10-01T00:00:00.000Z',
+            source: 'npm',
+            fetchedAt: '2026-11-01T00:00:00.000Z',
+          },
+        },
+      }),
+    });
+    const env = {
+      HOME: await makeProject({}),
+      LLM_DOCS_CACHE_DIR: cache,
+      CLAUDE_PROJECT_DIR: '',
+      ANTHROPIC_MODEL: '',
+    };
+
+    const unpinned = await runCli(
+      root,
+      ['add', 'ui', '--local', 'docs', '--dependency', 'npm:@corp/ui'],
+      env
+    );
+    expect(unpinned.code).toBe(2);
+    expect(unpinned.stderr).toContain(
+      `Pack "ui": package-lock.json installs npm:@corp/ui from a registry other than the public one, so its version is not taken from the lockfile (the public package of that name is another package); set packs.ui.version in llm-docs.json to the version these docs describe.`
+    );
+
+    const pinned = await runCli(
+      root,
+      ['add', 'ui', '--local', 'docs', '--dependency', 'npm:@corp/ui', '--version', '2.0.0'],
+      env
+    );
+    expect(pinned.code, pinned.stderr).toBe(0);
+    const status = async () =>
+      JSON.parse((await runCli(root, ['status', '--offline', '--json'], env)).stdout).packs[0];
+    expect(await status()).toMatchObject({
+      state: 'ok',
+      lockfile: { kind: 'other-registry', lockfiles: ['package-lock.json'] },
+      publishedAt: null,
+    });
+
+    const configPath = join(root, 'llm-docs.json');
+    const config = JSON.parse(await readFile(configPath, 'utf-8'));
+    delete config.packs.ui.version;
+    await writeFile(configPath, JSON.stringify(config));
+    expect(await status()).toMatchObject({
+      state: 'other-registry',
+      publishedAt: null,
+      nextStep:
+        'set packs.ui.version in llm-docs.json to the version these docs describe: npm:@corp/ui comes from another registry, so its version is not taken from the lockfile',
+    });
+  });
+});
+
 describe('a symbolic link planted in a pack', () => {
   // Each link points at a copy of what it replaces, outside the project, so a
   // command that followed it would find a pack that looks valid.

@@ -532,6 +532,15 @@ async function boundDependencyFindings(context: PackCheckContext): Promise<Check
         },
       ];
     }
+    case 'other-registry':
+      return pinned
+        ? []
+        : [
+            {
+              status: 'fail',
+              message: `${label} is installed from a registry other than the public one (${lookup.lockfiles.join(', ')}), so the lockfile cannot pin these docs; set packs.${context.packId}.version in llm-docs.json to the version these docs describe`,
+            },
+          ];
     case 'unread':
       return [
         {

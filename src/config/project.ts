@@ -936,6 +936,10 @@ async function resolvePackVersion(
         `Pack "${id}": lockfiles resolve ${label} to different versions (${versions}); set packs.${id}.version in ${CONFIG_FILE_NAME} to the one these docs describe.`
       );
     }
+    case 'other-registry':
+      throw new ConfigError(
+        `Pack "${id}": ${lookup.lockfiles.join(', ')} install${lookup.lockfiles.length === 1 ? 's' : ''} ${label} from a registry other than the public one, so its version is not taken from the lockfile (the public package of that name is another package); set packs.${id}.version in ${CONFIG_FILE_NAME} to the version these docs describe.`
+      );
     case 'unread': {
       const unread = lookup.lockfiles.map((entry) => `${entry.lockfile} ${entry.reason}`);
       throw new ConfigError(

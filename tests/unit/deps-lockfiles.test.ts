@@ -207,6 +207,14 @@ describe('npm lockfiles', () => {
     expect(scan.warnings).toEqual([
       'Skipped 4 non-registry dependencies (alternate-registry): berry/yarn.lock: zod (alternate-registry); bun/bun.lock: @corp/ui (alternate-registry); npm/package-lock.json: @corp/ui (alternate-registry); pnpm/pnpm-lock.yaml: @corp/ui (alternate-registry).',
     ]);
+    expect(findDependencyVersion(scan, { ecosystem: 'npm', name: '@corp/ui' })).toEqual({
+      kind: 'other-registry',
+      lockfiles: ['bun/bun.lock', 'npm/package-lock.json', 'pnpm/pnpm-lock.yaml'],
+    });
+    expect(findDependencyVersion(scan, { ecosystem: 'npm', name: 'zod' })).toMatchObject({
+      kind: 'found',
+      version: '4.0.0',
+    });
   });
 
   it('skips Python packages from another index, and keeps those with no recorded source', async () => {
@@ -822,6 +830,7 @@ describe('scanDependencies walking', () => {
       dependencies: [],
       lockfiles: [],
       unread: [],
+      otherRegistry: [],
       warnings: [],
     });
   });
@@ -841,6 +850,7 @@ describe('findDependencyVersion', () => {
   it('finds one version across lockfiles', () => {
     const scan = {
       unread: [],
+      otherRegistry: [],
       dependencies: [
         dependency({}),
         dependency({ lockfile: 'apps/web/pnpm-lock.yaml' }),
@@ -859,6 +869,7 @@ describe('findDependencyVersion', () => {
   it('falls back to transitive entries when nothing declares the dependency', () => {
     const scan = {
       unread: [],
+      otherRegistry: [],
       dependencies: [dependency({ direct: false, version: '5.4.0' })],
       lockfiles: ['package-lock.json'],
     };
@@ -873,6 +884,7 @@ describe('findDependencyVersion', () => {
   it('reports conflicting direct versions with their lockfiles', () => {
     const scan = {
       unread: [],
+      otherRegistry: [],
       dependencies: [
         dependency({}),
         dependency({ version: '5.4.0', lockfile: 'legacy/package-lock.json' }),
@@ -892,6 +904,7 @@ describe('findDependencyVersion', () => {
   it('reports the lockfiles of the ecosystem that were searched when missing', () => {
     const scan = {
       unread: [],
+      otherRegistry: [],
       dependencies: [dependency({})],
       lockfiles: ['package-lock.json', 'requirements.txt', 'uv.lock'],
     };
@@ -905,6 +918,7 @@ describe('findDependencyVersion', () => {
   it('matches PyPI names after PEP 503 normalization', () => {
     const scan = {
       unread: [],
+      otherRegistry: [],
       dependencies: [
         dependency({
           ecosystem: 'pypi',
