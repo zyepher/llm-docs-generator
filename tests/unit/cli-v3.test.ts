@@ -380,6 +380,73 @@ describe('llm-docs v3 CLI', () => {
     }
   });
 
+  it('discovers a package: JSON on stdout, the summary on stderr, usage errors exit 2', async () => {
+    const repo = await makeGitRepo();
+    await execFileAsync('git', ['tag', 'v1.0.0'], { cwd: fileURLToPath(repo.url) });
+    const root = await makeProject({});
+    const spec = `swiftpm:${repo.url}@1.0.0`;
+
+    for (const args of [
+      ['discover', '--package', spec, '--json'],
+      ['discover', '--package', spec],
+    ]) {
+      const result = await runCli(root, args);
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        package: { ecosystem: 'swiftpm', name: repo.url, version: '1.0.0' },
+        tags: { status: 'matched', matches: [{ tag: 'v1.0.0', form: 'v-prefixed' }] },
+        docDirectories: {
+          status: 'listed',
+          tag: 'v1.0.0',
+          commit: repo.head,
+          directories: [
+            { path: 'docs', markdownFiles: 2 },
+            { path: 'docs/guide', markdownFiles: 1 },
+          ],
+        },
+      });
+      expect(result.stderr).toContain(`${spec} (requested)`);
+      expect(result.stderr).toContain('Markdown at v1.0.0: 2 files; docs (2)');
+      expect(result.stderr).not.toContain('{');
+    }
+
+    for (const args of [
+      ['discover'],
+      ['discover', '--url', 'https://example.com', '--package', 'npm:hono'],
+    ]) {
+      const result = await runCli(root, args);
+      expect(result.code).toBe(2);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain(
+        'discover needs exactly one of --url and --package. Usage: llm-docs discover --url <site> | --package <ecosystem>:<name>[@<version>]'
+      );
+    }
+
+    const malformed = await runCli(root, ['discover', '--package', 'maven:junit']);
+    expect(malformed.code).toBe(2);
+    expect(malformed.stderr).toContain('--package must be <ecosystem>:<name>[@<version>]');
+
+    const removedFlag = await runCli(root, [
+      'discover',
+      '--url',
+      'https://example.com',
+      '--allow-private-hosts',
+    ]);
+    expect(removedFlag.code).toBe(2);
+    expect(removedFlag.stderr).toContain("unknown option '--allow-private-hosts'");
+
+    const capabilities = JSON.parse((await runCli(root, ['capabilities', '--json'])).stdout);
+    const discover = capabilities.commands.find(
+      (command: { name: string }) => command.name === 'discover'
+    );
+    expect(discover.summary).toMatch(/--url: .*--package: /);
+    expect(discover.options.map((option: { flags: string }) => option.flags)).toEqual([
+      '--url <site>',
+      '--package <ecosystem:name[@version]>',
+      '--json',
+    ]);
+  });
+
   it('adds a git pack, syncs and verifies it, and reports upstream changes with refresh', async () => {
     const repo = await makeGitRepo();
     const root = await makeProject({});

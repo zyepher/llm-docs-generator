@@ -27,6 +27,11 @@ import {
   type LoadedProjectConfig,
   type PackConfig,
 } from './config/project.js';
+import {
+  describePackageDiscovery,
+  discoverPackage,
+  parsePackageSpec,
+} from './core/package-discovery.js';
 import { inspectWebsite } from './core/website-discovery.js';
 import { ECOSYSTEMS, type Ecosystem } from './deps/lockfiles.js';
 import { ensurePacksDir, previewPack, syncPacks, type SyncReport } from './pack/build.js';
@@ -81,7 +86,8 @@ const COMMANDS = [
   },
   {
     name: 'discover',
-    summary: 'Print read-only evidence about a docs website (llms.txt, sitemap) as JSON',
+    summary:
+      'Print read-only evidence for writing a recipe as JSON: a docs website (--url: llms.txt, sitemap, Markdown probe, version segments) or a package (--package: registry metadata, matching git tags, Markdown directories)',
     status: 'implemented',
   },
   {
@@ -831,26 +837,47 @@ function buildProgram(): Command {
   program
     .command('discover')
     .description(summaryOf('discover'))
-    .requiredOption('--url <site>', 'Website to inspect (its llms.txt and sitemap.xml)')
+    .option('--url <site>', 'Website to inspect (its llms.txt and sitemap.xml)')
     .option(
-      '--allow-private-hosts',
-      'Allow private, loopback, and link-local addresses (refused by default as an SSRF guard)'
+      '--package <ecosystem:name[@version]>',
+      `Package to inspect (${ECOSYSTEMS.join(', ')}; swiftpm:<repository url>); default version: the latest`
     )
-    .option('--json', 'Print only the JSON evidence, without the stderr summary')
-    .action(async (options: { url: string; allowPrivateHosts?: boolean; json?: boolean }) => {
-      const inspection = await inspectWebsite({
-        url: options.url,
-        allowPrivateHosts: options.allowPrivateHosts === true,
-      }).catch((error: unknown) => {
-        // inspectWebsite only throws for invalid input; fetch failures are
-        // recorded as warnings in the evidence instead.
-        throw new UsageError(errorMessage(error));
-      });
+    .option('--json', 'Accepted for consistency: discover always prints JSON on stdout')
+    .action(async (options: { url?: string; package?: string }) => {
+      if ((options.url === undefined) === (options.package === undefined)) {
+        throw new UsageError(
+          'discover needs exactly one of --url and --package. Usage: llm-docs discover --url <site> | --package <ecosystem>:<name>[@<version>]'
+        );
+      }
+
+      if (options.package !== undefined) {
+        const discovery = await discoverPackage(parsePackageSpec(options.package));
+        writeJson(discovery);
+        for (const line of describePackageDiscovery(discovery)) {
+          say(line);
+        }
+        return;
+      }
+
+      const inspection = await inspectWebsite({ url: options.url ?? '' }).catch(
+        (error: unknown) => {
+          // inspectWebsite only throws for invalid input; fetch failures are
+          // recorded as warnings in the evidence instead.
+          throw new UsageError(errorMessage(error));
+        }
+      );
       writeJson(inspection);
-      if (options.json !== true) {
+      const markdownPages = inspection.llmsTxt?.markdownProbes.filter((probe) => probe.markdown);
+      const segments = inspection.llmsTxt?.versionSegments
+        .slice(0, 5)
+        .map((entry) => `${entry.segment} (${entry.urls})`);
+      say(
+        `Inspected ${inspection.inspectedResources.length} resources at ${inspection.website.origin}: ` +
+          `${inspection.candidates.length} candidate URLs, ${inspection.warnings.length} warnings.`
+      );
+      if (inspection.llmsTxt !== null) {
         say(
-          `Inspected ${inspection.inspectedResources.length} resources at ${inspection.website.origin}: ` +
-            `${inspection.candidates.length} candidate URLs, ${inspection.warnings.length} warnings.`
+          `  llms.txt lists ${inspection.llmsTxt.listedUrls} URLs; Markdown at .md: ${markdownPages?.length ?? 0} of ${inspection.llmsTxt.markdownProbes.length} probed pages; version segments: ${segments?.length === 0 ? 'none' : segments?.join(', ')}.`
         );
       }
     });

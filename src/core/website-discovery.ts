@@ -37,12 +37,6 @@ export interface DiscoverWebsiteOptions {
   timeoutMs?: number;
   maxBytesPerResponse?: number;
   maxCandidates?: number;
-  /**
-   * Allow private, loopback, and link-local addresses (and plain http to
-   * loopback). Default: LLM_DOCS_ALLOW_PRIVATE_NETWORK=1. The shared client
-   * vets every resolved address and pins the connection (spec 4.1).
-   */
-  allowPrivateHosts?: boolean;
   /** Resolver override for tests. */
   resolver?: HostResolver;
 }
@@ -66,7 +60,8 @@ export interface WebsiteResourceFreshnessMetadata {
 export interface WebsiteCrawlPolicy {
   inspectedResourceUrls: string[];
   sameOriginWellKnownResources: string[];
-  linkedCandidateFetches: false;
+  /** The only listed pages fetched: at most 3 llms.txt entries, as Markdown probes. */
+  markdownProbeUrls: string[];
   renderedJavaScript: false;
   timeoutMs: number;
   maxBytesPerResponse: number;
@@ -95,6 +90,32 @@ export interface WebsiteDiscoveryCandidate {
   sourceResources: WebsiteCandidateSourceResource[];
 }
 
+/** Whether a listed page answers with Markdown when `.md` is appended to its path. */
+export interface WebsiteMarkdownProbe {
+  pageUrl: string;
+  /** The page URL with `.md` appended (or as listed, when it already ends in `.md`). */
+  probeUrl: string;
+  status: number | null;
+  contentType: string | null;
+  /** A 2xx answer with a Markdown or plain-text content type. */
+  markdown: boolean;
+  error: string | null;
+}
+
+/** A version-looking path segment (`2026-07-28`, `v8`, `8.x`, `1.2`) and how many listed URLs contain it. */
+export interface WebsiteVersionSegment {
+  segment: string;
+  urls: number;
+}
+
+export interface WebsiteLlmsTxtEvidence {
+  url: string;
+  /** Distinct http(s) URLs the llms.txt lists (all of them, not capped like candidates). */
+  listedUrls: number;
+  versionSegments: WebsiteVersionSegment[];
+  markdownProbes: WebsiteMarkdownProbe[];
+}
+
 export interface WebsiteDiscoveryInspection {
   website: {
     input: string;
@@ -104,6 +125,8 @@ export interface WebsiteDiscoveryInspection {
   inspectedResources: WebsiteInspectedResource[];
   crawlPolicy: WebsiteCrawlPolicy;
   candidates: WebsiteDiscoveryCandidate[];
+  /** Null when no llms.txt was served. */
+  llmsTxt: WebsiteLlmsTxtEvidence | null;
   warnings: string[];
 }
 
@@ -141,8 +164,7 @@ type CandidateFilter = (normalizedUrl: string) => boolean;
 export async function inspectWebsite(
   options: DiscoverWebsiteOptions
 ): Promise<WebsiteDiscoveryInspection> {
-  const allowPrivateNetwork =
-    options.allowPrivateHosts === true || process.env[ALLOW_PRIVATE_NETWORK_ENV] === '1';
+  const allowPrivateNetwork = process.env[ALLOW_PRIVATE_NETWORK_ENV] === '1';
   const normalizedUrl = normalizeWebsiteUrl(options.url, allowPrivateNetwork);
   const websiteUrl = new URL(normalizedUrl);
   const timeoutMs = resolvePositiveSafeInteger(
@@ -169,6 +191,7 @@ export async function inspectWebsite(
     limitReached: false,
   };
   const inspectedResources: WebsiteInspectedResource[] = [];
+  let llmsTxt: WebsiteLlmsTxtEvidence | null = null;
 
   const client = createHttpClient(
     options.resolver === undefined
@@ -227,6 +250,17 @@ export async function inspectWebsite(
           state: candidateState,
           warnings,
         });
+
+        if (plannedResource.sourceRole === 'llms-txt') {
+          llmsTxt = await inspectLlmsTxt({
+            client,
+            url: plannedResource.url,
+            text: fetched.text,
+            origin: websiteUrl.origin,
+            timeoutMs,
+            maxBytesPerResponse,
+          });
+        }
       }
     }
   } finally {
@@ -247,7 +281,7 @@ export async function inspectWebsite(
       sameOriginWellKnownResources: resourcePlan
         .filter((resource) => resource.sourceRole !== 'explicit-url')
         .map((resource) => resource.url),
-      linkedCandidateFetches: false,
+      markdownProbeUrls: llmsTxt?.markdownProbes.map((probe) => probe.probeUrl) ?? [],
       renderedJavaScript: false,
       timeoutMs,
       maxBytesPerResponse,
@@ -255,8 +289,127 @@ export async function inspectWebsite(
       candidateLimitReached: candidateState.limitReached,
     },
     candidates,
+    llmsTxt,
     warnings,
   };
+}
+
+const MARKDOWN_PROBE_LIMIT = 3;
+const MARKDOWN_CONTENT_TYPES = new Set(['text/markdown', 'text/x-markdown', 'text/plain']);
+/** A page extension stripped before judging the last segment (`/v8.md` is the segment `v8`). */
+const PAGE_EXTENSION = /\.(?:md|mdx|html?|txt)$/i;
+const VERSION_SEGMENT =
+  /^(?:\d{4}-\d{2}-\d{2}|v\d+(?:\.(?:\d+|x)){0,2}|\d+(?:\.(?:\d+|x)){1,2})(?:-[0-9A-Za-z.]+)?$/i;
+
+/** Every distinct http(s) URL an llms.txt lists, sorted, without fragments or credentials. */
+function listedLlmsTxtUrls(text: string, base: string): string[] {
+  const urls = new Set<string>();
+  const raw = [
+    ...extractMarkdownLinkUrls(text),
+    ...[...text.matchAll(/https?:\/\/[^\s<>"']+/gi)].map((match) => trimBareUrl(match[0])),
+  ];
+
+  for (const value of raw) {
+    try {
+      const url = new URL(value.trim(), base);
+      if (url.protocol === 'http:' || url.protocol === 'https:') {
+        url.hash = '';
+        url.username = '';
+        url.password = '';
+        urls.add(url.href);
+      }
+    } catch {
+      // Malformed entries are already reported as candidate warnings.
+    }
+  }
+
+  return [...urls].sort(compareStringsByCodeUnit);
+}
+
+function versionSegments(urls: readonly string[]): WebsiteVersionSegment[] {
+  const counts = new Map<string, number>();
+
+  for (const url of urls) {
+    const found = new Set(
+      new URL(url).pathname
+        .split('/')
+        .map((segment) => segment.replace(PAGE_EXTENSION, ''))
+        .filter((segment) => VERSION_SEGMENT.test(segment))
+    );
+    for (const segment of found) {
+      counts.set(segment, (counts.get(segment) ?? 0) + 1);
+    }
+  }
+
+  return [...counts]
+    .map(([segment, count]) => ({ segment, urls: count }))
+    .sort((a, b) => b.urls - a.urls || compareStringsByCodeUnit(a.segment, b.segment));
+}
+
+function markdownProbeUrl(pageUrl: string): string {
+  const url = new URL(pageUrl);
+  if (!/\.md$/i.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}.md`;
+  }
+  return url.href;
+}
+
+/**
+ * The llms.txt evidence: how many URLs it lists, their version-looking path
+ * segments, and whether the first three same-origin pages (sorted) serve
+ * Markdown at their `.md` URL.
+ */
+async function inspectLlmsTxt(options: {
+  client: HttpClient;
+  url: string;
+  text: string;
+  origin: string;
+  timeoutMs: number;
+  maxBytesPerResponse: number;
+}): Promise<WebsiteLlmsTxtEvidence> {
+  const { client, url, text, origin, timeoutMs, maxBytesPerResponse } = options;
+  const urls = listedLlmsTxtUrls(text, url);
+  const pages = urls
+    .filter((page) => new URL(page).origin === origin)
+    .slice(0, MARKDOWN_PROBE_LIMIT);
+  const markdownProbes: WebsiteMarkdownProbe[] = [];
+
+  for (const pageUrl of pages) {
+    const probeUrl = markdownProbeUrl(pageUrl);
+    try {
+      const response = await client.get(probeUrl, {
+        maxBytes: maxBytesPerResponse,
+        truncate: true,
+        acceptErrorStatus: true,
+        timeoutMs,
+        accept: 'text/markdown,text/plain;q=0.9,*/*;q=0.1',
+      });
+      const contentType = normalizeContentType(response.contentType ?? null);
+      markdownProbes.push({
+        pageUrl,
+        probeUrl,
+        status: response.status,
+        contentType,
+        markdown:
+          response.status >= 200 &&
+          response.status < 300 &&
+          contentType !== null &&
+          MARKDOWN_CONTENT_TYPES.has(contentType),
+        error: null,
+      });
+    } catch (error) {
+      markdownProbes.push({
+        pageUrl,
+        probeUrl,
+        status: null,
+        contentType: null,
+        markdown: false,
+        error: errorMessage(error),
+      });
+    }
+  }
+
+  return { url, listedUrls: urls.length, versionSegments: versionSegments(urls), markdownProbes };
 }
 
 function normalizeWebsiteUrl(input: string, allowPrivateNetwork: boolean): string {
