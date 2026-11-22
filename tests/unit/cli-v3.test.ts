@@ -870,7 +870,9 @@ describe('llm-docs v3 CLI', () => {
       }),
     });
     // Isolated from the session running the suite: no inherited model, project, or settings.
+    // The hook checks the pack's local source as sync does, so it needs the temp-source opt-in.
     const env = {
+      LLM_DOCS_ALLOW_TEMP_SOURCES: '1',
       LLM_DOCS_CACHE_DIR: cache,
       HOME: await makeProject({}),
       CLAUDECODE: '1',
@@ -1722,6 +1724,88 @@ describe('fixed-name files llm-docs reads and rewrites', () => {
     expect(linked.stderr).toBe(
       `llm-docs: ${configPath} has 2 hard links, so replacing it would leave the other links holding the old text; make it a single file (copy it, delete the original, and rename the copy), then run the command again.\n`
     );
+  });
+});
+
+describe('status and sync --check', () => {
+  it('agree on every stale reason that needs no network', async () => {
+    const root = await makeProject({
+      ...DOCS,
+      'package.json': '{"name":"app","dependencies":{"x":"^1.0.0"}}\n',
+      'package-lock.json': npmLockfile('x', '1.0.0'),
+    });
+    const env = {
+      HOME: await makeProject({}),
+      LLM_DOCS_CACHE_DIR: await makeProject({}),
+      CLAUDE_PROJECT_DIR: '',
+      ANTHROPIC_MODEL: '',
+    };
+    const add = await runCli(
+      root,
+      ['add', 'demo', '--local', 'docs', '--dependency', 'npm:x'],
+      env
+    );
+    expect(add.code, add.stderr).toBe(0);
+    const pack = join(root, 'agent-docs', 'demo');
+    const configPath = join(root, 'llm-docs.json');
+    const append = async (path: string, text: string) =>
+      writeFile(path, `${await readFile(path, 'utf-8')}${text}`);
+
+    const scenarios: [string, () => Promise<void>, string, string][] = [
+      ['nothing changed', async () => undefined, 'unchanged', 'ok'],
+      [
+        'a local source file changed',
+        () => append(join(root, 'docs', 'index.md'), '\nMore.\n'),
+        'sources-changed',
+        'sources-changed',
+      ],
+      [
+        'a pack page was edited',
+        () => append(join(pack, 'pages', 'index.md'), '\nEdited.\n'),
+        'files-differ',
+        'pack-changed',
+      ],
+      [
+        'the manifest is not JSON',
+        () => writeFile(join(pack, 'manifest.json'), '{'),
+        'manifest-unreadable',
+        'missing',
+      ],
+      [
+        'the recipe was edited',
+        async () => {
+          const config = JSON.parse(await readFile(configPath, 'utf-8'));
+          config.packs.demo.title = 'Renamed';
+          await writeFile(configPath, JSON.stringify(config));
+        },
+        'recipe-edited',
+        'recipe-changed',
+      ],
+      [
+        'the lockfile moved',
+        () => writeFile(join(root, 'package-lock.json'), npmLockfile('x', '1.1.0')),
+        'lockfile-moved',
+        'stale-pack',
+      ],
+      ['the pack was deleted', () => rm(pack, { recursive: true }), 'not-built', 'missing'],
+    ];
+
+    for (const [label, change, reason, state] of scenarios) {
+      await change();
+      const check = JSON.parse((await runCli(root, ['sync', '--check', '--json'], env)).stdout);
+      const status = JSON.parse(
+        (await runCli(root, ['status', '--offline', '--json'], env)).stdout
+      );
+      expect(
+        {
+          label,
+          sync: check.packs[0].reason ?? check.packs[0].status,
+          status: status.packs[0].state,
+        },
+        label
+      ).toEqual({ label, sync: reason, status: state });
+      expect((await runCli(root, ['sync'], env)).code, label).toBe(0);
+    }
   });
 });
 

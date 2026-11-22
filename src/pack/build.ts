@@ -710,6 +710,52 @@ function withPlaceholders(
   );
 }
 
+/**
+ * The offline half of `sync --check`: acquire the sources that need no
+ * network and decide from them, the recipe, and the pack's own files.
+ */
+async function offlineStaleReason(
+  context: SyncContext,
+  resolved: ResolvedPack,
+  existing: ExistingPack,
+  workRoot: string
+): Promise<{
+  local: (SourceAcquisition | null)[];
+  stale: { reason: StaleReason; detail: string } | undefined;
+}> {
+  const local = await acquireAll(context, resolved.recipe, workRoot, (index) => {
+    const source = resolved.recipe.sources[index];
+    return source !== undefined && !sourceUsesNetwork(source);
+  });
+  return { local, stale: await staleReason(context, resolved, existing, local) };
+}
+
+/**
+ * What `sync --check` decides for one pack without the network: undefined
+ * when it would skip the pack, else why it would rebuild it. Throws what sync
+ * would fail with (a ConfigError for a pack it refuses to touch). `status`
+ * calls this, so the two never disagree on a reason that needs no network.
+ */
+export async function packOfflineStaleness(
+  loaded: LoadedProjectConfig,
+  resolved: ResolvedPack
+): Promise<{ reason: StaleReason; detail: string } | undefined> {
+  assertBuildable(resolved.recipe);
+  const existing = await inspectExistingPack(loaded.packsDir, resolved.id);
+  const context: SyncContext = {
+    loaded,
+    projectRoot: await resolveEffectiveOutputPath(loaded.projectRoot),
+    options: { check: true },
+  };
+  const workRoot = await mkdtemp(join(tmpdir(), 'llm-docs-'));
+
+  try {
+    return (await offlineStaleReason(context, resolved, existing, workRoot)).stale;
+  } finally {
+    await rm(workRoot, { recursive: true, force: true });
+  }
+}
+
 /** Why `existing` is out of date, or undefined when the pack can be skipped. */
 async function staleReason(
   context: SyncContext,
@@ -1290,11 +1336,7 @@ async function syncOnePack(
       return await refreshOnePack(context, resolved, existing, workRoot);
     }
 
-    const local = await acquireAll(context, resolved.recipe, workRoot, (index) => {
-      const source = resolved.recipe.sources[index];
-      return source !== undefined && !sourceUsesNetwork(source);
-    });
-    const stale = await staleReason(context, resolved, existing, local);
+    const { local, stale } = await offlineStaleReason(context, resolved, existing, workRoot);
 
     if (stale === undefined) {
       return { id, status: 'unchanged', warnings: [] };

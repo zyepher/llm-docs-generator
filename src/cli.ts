@@ -186,7 +186,7 @@ const COMMANDS = [
   {
     name: 'status',
     summary:
-      "Show each pack's lockfile drift and the direct dependencies released after or near the model's training data cutoff. Use it to decide which libraries need a pack.",
+      "Show each pack's state (lockfile drift, and anything sync --check would rebuild for without the network) and the direct dependencies released after or near the model's training data cutoff. Use it to decide which libraries need a pack; 'llm-docs refresh --check' is the command that asks upstream whether docs changed.",
     status: 'implemented',
     examples: [
       {

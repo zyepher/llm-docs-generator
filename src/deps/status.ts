@@ -12,7 +12,9 @@ import {
   type DependencyVersionResolver,
   type LoadedProjectConfig,
 } from '../config/project.js';
+import { packOfflineStaleness, type StaleReason } from '../pack/build.js';
 import { readProjectPacks, type ProjectPack } from '../pack/manifest.js';
+import { errorMessage } from '../utils/guards.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import {
   resolveModelCutoff,
@@ -48,8 +50,19 @@ export type PackState =
   | 'not-in-lockfile'
   | 'lockfile-unread'
   | 'recipe-changed'
+  | 'sources-changed'
+  | 'pack-changed'
   | 'missing'
+  | 'unusable'
   | 'orphan';
+
+/**
+ * What `sync --check` decides for a pack without the network
+ * (packOfflineStaleness): why it would rebuild, or the refusal sync would
+ * fail with. Absent when sync would skip the pack, or for an orphan.
+ */
+export type OfflineStaleness =
+  { kind: 'stale'; reason: StaleReason; detail: string } | { kind: 'refused'; message: string };
 
 /**
  * Where a release date falls for the model in use: after its cutoff month,
@@ -79,6 +92,7 @@ export interface PackStatusInput {
   covers: DependencyRef[];
   /** llm-docs.json lists the pack. */
   inConfig: boolean;
+  offline?: OfflineStaleness;
 }
 
 /** A package a pack covers, at a version the lockfiles resolve for it. */
@@ -202,6 +216,10 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
     return 'orphan';
   }
 
+  if (pack.offline?.kind === 'refused') {
+    return 'unusable';
+  }
+
   if (pack.indexPath === null) {
     return 'missing';
   }
@@ -224,7 +242,25 @@ function packState(pack: PackStatusInput, lookup: DependencyVersionLookup | unde
       break;
   }
 
-  return pack.recipeChanged ? 'recipe-changed' : 'ok';
+  if (pack.recipeChanged) {
+    return 'recipe-changed';
+  }
+
+  switch (pack.offline?.kind === 'stale' ? pack.offline.reason : undefined) {
+    case 'not-built':
+    case 'manifest-unreadable':
+      return 'missing';
+    case 'recipe-edited':
+      return 'recipe-changed';
+    case 'lockfile-moved':
+      return 'stale-pack';
+    case 'files-differ':
+      return 'pack-changed';
+    case 'sources-changed':
+      return 'sources-changed';
+    default:
+      return 'ok';
+  }
 }
 
 const MESSAGE_TEXT_CAP = 200;
@@ -300,7 +336,11 @@ function packNextStep(
           : [];
       return `check by hand that the lockfiles resolve ${dependency} to ${messageText(pack.version ?? 'the pack version')}: ${unread.join('; ')}`;
     }
+    case 'unusable':
+      return pack.offline?.kind === 'refused' ? messageText(pack.offline.message) : sync;
     case 'recipe-changed':
+    case 'sources-changed':
+    case 'pack-changed':
     case 'missing':
       return sync;
   }
@@ -556,6 +596,12 @@ function packStateReason(pack: PackStatus): string | undefined {
       return 'not built or invalid';
     case 'recipe-changed':
       return 'its recipe in llm-docs.json changed since the last build';
+    case 'sources-changed':
+      return 'its local source files changed since the last build';
+    case 'pack-changed':
+      return 'its files differ from its manifest, so its pages cannot be trusted';
+    case 'unusable':
+      return 'llm-docs cannot use or rebuild it as it is';
     default:
       return undefined;
   }
@@ -668,6 +714,8 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
         )
         .sort((a, b) => compareStringsByCodeUnit(b.publishedAt, a.publishedAt))[0];
       return pack.state !== 'orphan' &&
+        pack.state !== 'pack-changed' &&
+        pack.state !== 'unusable' &&
         newest !== undefined &&
         pack.indexPath !== null &&
         pack.version !== null
@@ -952,10 +1000,18 @@ export interface GatherStatusOptions {
    */
   ignoreInvalidCutoff?: (problem: string) => void;
   /**
-   * The hook's channel for a Claude Code settings file that is not a regular
-   * file and was skipped. Without it, the skip is one of the warnings.
+   * The hook's channel for what it went on past: a Claude Code settings file
+   * that is not a regular file, or a pack check cut short by
+   * `packCheckBudgetMs`. Without it, each is one of the warnings.
    */
-  skippedSettingsFile?: (problem: string) => void;
+  ignoredProblem?: (problem: string) => void;
+  /**
+   * How long to wait for the per-pack offline checks (packOfflineStaleness),
+   * the hook's bound on hashing pack files and local sources; unbounded when
+   * absent. A pack whose check did not finish is judged by its manifest and
+   * the lockfiles alone.
+   */
+  packCheckBudgetMs?: number;
   env: NodeJS.ProcessEnv;
   homeDir: string;
   cacheDir: string;
@@ -992,18 +1048,29 @@ export interface ProjectStatus {
 async function packStatusInput(
   loaded: LoadedProjectConfig,
   pack: ProjectPack,
-  resolveDependencyVersion: DependencyVersionResolver
+  resolveDependencyVersion: DependencyVersionResolver,
+  check: { signal?: AbortSignal; ignore: (problem: string) => void }
 ): Promise<PackStatusInput> {
   const config = pack.inConfig ? loaded.config.packs[pack.id] : undefined;
   const manifest = pack.manifest.kind === 'ok' ? pack.manifest.manifest : undefined;
   let recipeChanged = false;
 
-  if (config !== undefined && manifest !== undefined) {
+  let offline: OfflineStaleness | undefined;
+
+  if (config !== undefined) {
     try {
       const resolved = await resolvePackRecipe(loaded.config, pack.id, {
         resolveDependencyVersion,
       });
-      recipeChanged = resolved.recipeHash !== manifest.recipeHash;
+      recipeChanged = manifest !== undefined && resolved.recipeHash !== manifest.recipeHash;
+      const checked = await offlineStalenessWithin(loaded, resolved, check.signal);
+      if (checked?.kind === 'unfinished') {
+        check.ignore(
+          `Pack ${pack.id}: the check of its files and local sources did not finish in time, so it is judged by its manifest alone; run 'llm-docs status' for the full check`
+        );
+      } else {
+        offline = checked;
+      }
     } catch (error) {
       // A lockfile that no longer resolves the dependency shows in the LOCKFILE column instead.
       if (!(error instanceof ConfigError)) {
@@ -1025,7 +1092,37 @@ async function packStatusInput(
     ),
     covers: manifest?.recipe.covers ?? config?.covers ?? [],
     inConfig: pack.inConfig,
+    ...(offline === undefined ? {} : { offline }),
   };
+}
+
+/** packOfflineStaleness as status reports it, or `unfinished` once `signal` aborts. */
+async function offlineStalenessWithin(
+  loaded: LoadedProjectConfig,
+  resolved: Awaited<ReturnType<typeof resolvePackRecipe>>,
+  signal: AbortSignal | undefined
+): Promise<OfflineStaleness | { kind: 'unfinished' } | undefined> {
+  const check = packOfflineStaleness(loaded, resolved).then(
+    (stale): OfflineStaleness | undefined =>
+      stale === undefined ? undefined : { kind: 'stale', ...stale },
+    (error: unknown): OfflineStaleness => ({ kind: 'refused', message: errorMessage(error) })
+  );
+  if (signal === undefined) {
+    return check;
+  }
+  if (signal.aborted) {
+    return { kind: 'unfinished' };
+  }
+  let stop: () => void = () => undefined;
+  const aborted = new Promise<{ kind: 'unfinished' }>((settle) => {
+    stop = () => settle({ kind: 'unfinished' });
+    signal.addEventListener('abort', stop, { once: true });
+  });
+  try {
+    return await Promise.race([check, aborted]);
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
 }
 
 /**
@@ -1049,7 +1146,8 @@ export async function gatherProjectStatus(
       ? {}
       : { maxLockfileBytes: options.maxLockfileBytes }),
   });
-  const skippedSettings: string[] = [];
+  const ignored: string[] = [];
+  const ignore = options.ignoredProblem ?? ((problem: string) => ignored.push(problem));
   const model =
     (await resolveModelIdFromEnvironment(
       {
@@ -1058,7 +1156,7 @@ export async function gatherProjectStatus(
         projectRoot,
         homeDir: options.homeDir,
       },
-      options.skippedSettingsFile ?? ((problem) => skippedSettings.push(problem))
+      ignore
     )) ?? null;
   const configCutoff = loaded?.config.model?.cutoff;
   const cutoff =
@@ -1076,11 +1174,20 @@ export async function gatherProjectStatus(
     dependencies.scan(),
     loaded === null ? [] : readProjectPacks(loaded),
   ]);
+  const packCheckSignal =
+    options.packCheckBudgetMs === undefined
+      ? undefined
+      : AbortSignal.timeout(options.packCheckBudgetMs);
   const packInputs =
     loaded === null
       ? []
       : await Promise.all(
-          packs.map((pack) => packStatusInput(loaded, pack, dependencies.resolveVersion))
+          packs.map((pack) =>
+            packStatusInput(loaded, pack, dependencies.resolveVersion, {
+              ...(packCheckSignal === undefined ? {} : { signal: packCheckSignal }),
+              ignore,
+            })
+          )
         );
 
   const queries = new Map<string, ReleaseQuery>();
@@ -1146,7 +1253,7 @@ export async function gatherProjectStatus(
     model,
     cutoff,
     pendingReleaseDates,
-    warnings: [...new Set([...scan.warnings, ...lookup.warnings, ...skippedSettings])].sort(
+    warnings: [...new Set([...scan.warnings, ...lookup.warnings, ...ignored])].sort(
       compareStringsByCodeUnit
     ),
   };

@@ -35,6 +35,12 @@ export const HOOK_LIMITS = {
   stdinMaxBytes: 1024 * 1024,
   /** Network time for release dates missing from the cache. */
   networkMs: 1_000,
+  /**
+   * Checking packs against their manifests and local sources (the offline
+   * half of `sync --check`). Measured warm, about 0.35 ms per page of a
+   * local pack, so this covers packs of roughly a thousand pages.
+   */
+  packCheckMs: 400,
   /** Kept at the end of the deadline for the block check, rendering, and the write. */
   reserveMs: 150,
   /**
@@ -369,12 +375,13 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
     }
 
     const ignoredCutoffs: string[] = [];
-    const skippedSettings: string[] = [];
+    const ignoredProblems: string[] = [];
     const status = await gatherProjectStatus(
       { projectRoot, loaded },
       {
         ignoreInvalidCutoff: (problem) => ignoredCutoffs.push(problem),
-        skippedSettingsFile: (problem) => skippedSettings.push(problem),
+        ignoredProblem: (problem) => ignoredProblems.push(problem),
+        packCheckBudgetMs: HOOK_LIMITS.packCheckMs,
         offline: false,
         budgetMs: HOOK_LIMITS.networkMs,
         maxLockfileBytes: HOOK_LIMITS.maxLockfileBytes,
@@ -389,7 +396,7 @@ export async function runSessionStartHook(io: HookIo): Promise<void> {
     );
     for (const problem of [
       ...ignoredCutoffs.map((problem) => `${problem}; ignored it`),
-      ...skippedSettings,
+      ...ignoredProblems,
     ]) {
       await log(problem);
     }
