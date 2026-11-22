@@ -29,17 +29,25 @@ Your memory of a repository URL, a tag format, or a docs directory may be out of
    - `docDirectories.directories`: the folders that hold Markdown at the matching tag, ranked by file count.
    - `changeDocuments`: changelog, migration, and upgrade files at the matching tag.
    - `registry.metadata.license`: the license the registry declares.
-3. If the docs live on a website, also run `llm-docs discover --url <site>`. It reports whether the site publishes an `llms.txt` index, whether its pages serve raw Markdown when `.md` is appended, and the version-looking path segments (`v8`, `2026-07-28`) its index uses.
+
+   For a repository that publishes no package, such as a protocol specification, run `llm-docs discover --repo <repository url>@<version or tag>` instead. It reports the same `tags`, `docDirectories`, and `changeDocuments`.
+3. If the docs live on a website, also run `llm-docs discover --url <site>`. It reports whether the site publishes an `llms.txt` index, whether its pages serve raw Markdown when `.md` is appended (`llmsTxt.markdownProbes`), the version-looking path segments (`v8`, `2026-07-28`) its index uses, and `llmsTxt.pathPrefixes`: the path prefixes its URLs live under with counts, such as `/specification/2026-07-28 (31)`. Build `--include` globs from those prefixes.
 
 If the evidence points at two equally plausible sources, ask the user. Do not pick the first one.
 
 ## 3. Choose the source
 
-Take the first of these that the evidence supports.
+Decide from the evidence. Usually two sources compete: the repository at the release tag, and the docs website.
 
-1. **The library's own repository at the tag for this version.** Use `--git <repository.url>`, a `--ref` built from the matching tag, and one `--path` per docs folder. Write the ref with the `{version}` placeholder in the tag's form (`v{version}`, `{version}`, or `vite@{version}`), so the recipe follows the lockfile to the next version without an edit. Monorepos often keep every framework's docs side by side, so take only the folder for the framework this project uses.
-2. **An `llms.txt` index, with an explicit filter.** Use `--llms-txt <url>` with at least one `--include` glob over the listed URL paths, and `--strip-prefix` to drop a version segment from the stored paths. Filter on the version segment when the site serves several versions. This source fits only when the site serves raw Markdown and the repository does not hold the docs.
-3. **An explicit list of page URLs.** Use `--url` once per page, or `--urls-file` with one URL per line. Build the list from an index the site publishes or from pages you opened yourself.
+- **The repository at the tag** is best when its docs are plain Markdown the tool converts without warnings and the tag is the release. Use `--git <repository.url>`, a `--ref` built from the matching tag, and one `--path` per docs folder. Write the ref with the `{version}` placeholder in the tag's form (`v{version}`, `{version}`, or `vite@{version}`), so the recipe follows the lockfile to the next version without an edit. Monorepos often keep every framework's docs side by side, so take only the folder for the framework this project uses.
+- **The site's `llms.txt` index** is best when the site serves Markdown at `.md` and its index has version segments to filter on, and either the repository's docs are MDX full of site components (`<Badge>`, `<Icon>`, `<Tooltip>`) that stay in the pages as written, or the site carries pages the tagged tree lacks, such as pages published after the tag. Use `--llms-txt <url>` with at least one `--include` glob built from `pathPrefixes`, such as `--include '/specification/{version}/**'`, and `--strip-prefix` to drop a version segment from the stored paths if you want shorter ones. Pass `--site <origin>` so links between the pages stay inside the pack, and `--alias /specification/latest=/specification/{version}` when pages link to a "latest" path that means this version.
+- **An explicit list of page URLs**, when neither holds the pages as a set. Use `--url` once per page, or `--urls-file` with one URL per line. Build the list from an index the site publishes or from pages you opened yourself.
+
+When you are unsure, dry-run both and compare the number of files each takes against the pages the project needs, and the warnings each prints. A dry run does not convert, so for a repository whose docs are `.mdx`, also open one page at the tag and look for site components. For the Model Context Protocol at `2026-07-28`, the repository holds the docs as MDX and gives 46 pages with component warnings, while the site's `llms.txt` filtered on the version gives 57: the site is the better source there.
+
+To combine sources, such as the site's pages and the repository's schema files, add the pack with one source, then append the other to `packs.<id>.sources` in `llm-docs.json` and run `llm-docs sync <id>`.
+
+A git source stores each file relative to the common root of its `--path` entries, and the output is `pages/<mount>/<stored path>` (or `files/...` for passthrough files). `--path docs` turns `docs/guide/a.md` into `pages/guide/a.md`. A single file loses its directories: `--path schema/2026-07-28/schema.ts` lands at `files/schema.ts`, so add `--mount schema` to get `files/schema/schema.ts`. Write `--include` and `exclude` globs against the stored path, not the repository path.
 
 Never crawl. Do not follow links from page to page to assemble a URL list, and do not take a whole site because you could not decide which pages matter. A pack with the 30 pages the project needs is worth more than one with 3,000.
 
@@ -85,6 +93,8 @@ Read the file list before you go on.
 - The change documents from step 4 are there, and you have their output paths for `--read-first`.
 
 Then run the command without `--dry-run`. `llm-docs add` writes the recipe into `llm-docs.json` and builds the pack in one step. It refuses to overwrite an existing pack id unless you pass `--replace`.
+
+Pass `--title` with the library's name alone, such as `--title 'Model Context Protocol'`. The index and the managed block add the version after the title, so a title that holds the version shows it twice, and the build warns.
 
 ## 6. Set the license
 
