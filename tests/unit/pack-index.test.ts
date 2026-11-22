@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   escapeIndexText,
-  linkPath,
   renderIndexPage,
   type IndexPageInput,
 } from '../../src/pack/index-page.js';
+import { encodeLinkPath } from '../../src/pack/links.js';
+import { findLinkTargets } from '../../src/pack/markdown.js';
 
 const recipe: IndexPageInput['recipe'] = {
   title: 'Vite',
@@ -200,6 +201,25 @@ describe('renderIndexPage', () => {
   it('escapes upstream titles for tables and caps their length', () => {
     expect(escapeIndexText('a|b`c\u0007d\n<e>')).toBe('a\\|bc d \\<e\\>');
     expect(escapeIndexText('x'.repeat(200))).toHaveLength(120);
-    expect(linkPath('pages/a (1)/#b.md')).toBe('pages/a%20(1)/%23b.md');
+    expect(encodeLinkPath('pages/a (1)/#b.md')).toBe('pages/a%20%281%29/%23b.md');
+  });
+
+  it('percent-encodes parentheses in link destinations, so a link never ends early', () => {
+    const text = renderIndexPage(
+      input({
+        pages: [{ path: 'pages/api/call(a).md', title: 'Call', tokens: 1 }],
+        files: [{ path: 'files/data (1).json', bytes: 2 }],
+      })
+    );
+    const targets = findLinkTargets(text)
+      .map((link) => link.target)
+      .filter((target) => target.startsWith('pages/') || target.startsWith('files/'));
+
+    expect(targets).toEqual(['pages/api/call%28a%29.md', 'files/data%20%281%29.json']);
+    expect(targets.every((target) => !/[()]/.test(target))).toBe(true);
+    expect(targets.map(decodeURIComponent)).toEqual([
+      'pages/api/call(a).md',
+      'files/data (1).json',
+    ]);
   });
 });

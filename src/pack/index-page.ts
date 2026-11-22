@@ -7,6 +7,7 @@
  */
 
 import { compareStringsByCodeUnit } from '../utils/sort.js';
+import { encodeLinkPath } from './links.js';
 import type { ManifestOutputEntry, PackManifest } from './manifest.js';
 import { redactUrl } from '../utils/url-credentials.js';
 
@@ -50,11 +51,6 @@ export function escapeIndexText(value: string): string {
     .replace(/\\/g, '\\\\')
     .replace(/\|/g, '\\|')
     .replace(/([[\]<>])/g, '\\$1');
-}
-
-/** A pack-relative path as a link destination: each segment percent-encoded. */
-export function linkPath(path: string): string {
-  return path.split('/').map(encodeURIComponent).join('/');
 }
 
 function githubRepo(repo: string): string | undefined {
@@ -175,8 +171,8 @@ export function renderIndexPage(input: IndexPageInput): string {
           : `${escapeIndexText(entry.title)}: ${escapeIndexText(entry.heading)}`;
       const target =
         entry.fragment === null
-          ? linkPath(entry.path)
-          : `${linkPath(entry.path)}#${entry.fragment}`;
+          ? encodeLinkPath(entry.path)
+          : `${encodeLinkPath(entry.path)}#${entry.fragment}`;
       lines.push(`- [${label}](${target})`);
     }
   }
@@ -189,7 +185,7 @@ export function renderIndexPage(input: IndexPageInput): string {
     for (const page of pages) {
       const label = escapeIndexText(page.path.slice('pages/'.length));
       lines.push(
-        `| [${label}](${linkPath(page.path)}) | ${escapeIndexText(page.title ?? '')} | ${page.tokens ?? 0} |`
+        `| [${label}](${encodeLinkPath(page.path)}) | ${escapeIndexText(page.title ?? '')} | ${page.tokens ?? 0} |`
       );
     }
   }
@@ -202,7 +198,7 @@ export function renderIndexPage(input: IndexPageInput): string {
       'These files are byte-identical copies of the upstream files, kept as they are rather than converted to pages.'
     );
     const fileLine = (file: IndexPageInput['files'][number]): string =>
-      `- [${escapeIndexText(file.path.slice('files/'.length))}](${linkPath(file.path)}) (${file.bytes} bytes)`;
+      `- [${escapeIndexText(file.path.slice('files/'.length))}](${encodeLinkPath(file.path)}) (${file.bytes} bytes)`;
     const groups: [string | null, readonly IndexPageInput['files'][number][]][] =
       input.files.length > UNGROUPED_FILES_MAX
         ? groupByDirectory(input.files)
