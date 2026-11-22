@@ -1,114 +1,98 @@
 # llm-docs
 
-`llm-docs` keeps version-pinned, verified reference docs for your project's dependencies inside your repository, and makes coding agents read them. At the start of every session it tells the agent which of your dependencies are newer than its training data and which page to read first.
+AI coding agents write the version of a library they remember. `llm-docs` puts the docs for the versions your project actually uses into your repository, and tells the agent at the start of each session which libraries are newer than its training data and which page to read first.
 
-## The problem
+This README has two parts: [for humans](#for-humans) and [for agents](#for-agents).
 
-A coding agent writes the API it remembers, and its memory stops at its training cutoff. Your lockfile does not.
+## For humans
 
-Here is one case from this repository's evaluation. Zod 4.5.0, released in August 2026, made `z.iso.datetime()` require seconds. A booking schema written the way a model trained before that release writes it compiles cleanly, passes the type checker, and then rejects every minute-precision start time a web calendar sends, such as `2026-12-01T09:30Z`. Nothing fails until a user tries to book a room.
+### The problem
 
-An agent that can search the web still gets this wrong, for three reasons:
+An AI model's knowledge stops on the day its training data ends. Your dependencies keep changing after that.
 
-- Nothing tells it the API changed. The code compiles, so it has no reason to look.
-- When it does look, it finds the docs for the latest release, not for the version in your lockfile.
-- Conventions, changed defaults, and migration notes do not live in type definitions. A changed default usually leaves the `.d.ts` file exactly as it was.
+A real case: Zod 4.5 (August 2026) made `z.iso.datetime()` require seconds. Code written the old way still compiles and still passes the type checker. It then rejects every time a web calendar sends without seconds, such as `2026-12-01T09:30Z`. Nothing warns the agent, so it has no reason to look anything up. When an agent does search the web, it usually lands on the docs for the newest release, not the version you have installed.
 
-## What it does
+### What it does
 
-- **Pins the right version's docs.** An agent writes a recipe that names an exact origin: a git repository at the tag for the version your lockfile resolves, an `llms.txt` index with an explicit filter, a list of URLs, or a folder in your project. The CLI fetches exactly that, converts it to one Markdown file per upstream page, and never crawls or guesses. PDFs and office documents can come in through Docling, MarkItDown, or a command of your own.
-- **Tells the agent which dependencies are newer than its training data.** A session-start hook for Claude Code and Cursor lists the dependencies released after the model's training cutoff, names the page each pack marks to read first (usually the migration guide), and lists new dependencies that have no docs pinned yet. A short block in `AGENTS.md` or `CLAUDE.md` points every agent at the packs.
-- **Keeps the pinned docs honest.** `verify` fails when the lockfile moves past a pack's version, when someone edits a pinned page, when a local link breaks, or when an agent-written guide cites a section whose text has since changed. It runs offline, so it belongs in CI.
-- **Records provenance for every page.** Each pack has a manifest with the resolved recipe, the commit or URL each file came from, the hash of every source and every file written, and the detected license. Given the same recipe and the same upstream bytes, a rebuild is byte-identical.
+- **Saves the right docs in your repo.** For each library you choose, it fetches the official docs for the exact version your project uses and stores them as plain Markdown files, one per page.
+- **Tells the agent what is new to it.** When a session starts, the agent gets a short note: which of your libraries were released after its training data ends, where their docs are, and which page to read first (usually the upgrade guide).
+- **Notices when the docs go stale.** If you upgrade a library, someone edits a saved page, or a link breaks, one check reports it. The check works offline, so it can run in CI.
+- **Records where every page came from.** Each set of docs lists its source (a repository and commit, or a URL), a fingerprint of every file, and the license it found.
 
-## Get started
+### Get started
 
-Install the plugin. In Claude Code:
+You need Node.js 22.19 or newer, and git.
+
+In Claude Code:
 
 ```sh
 claude plugin marketplace add Zyepher/llm-docs-generator
 claude plugin install llm-docs@llm-docs
 ```
 
-In Cursor, open **Customize**, import this repository with **From GitHub Repository**, and install `llm-docs`. [The plugin README](plugin/README.md#install) has the details and the team marketplace option.
+In Cursor, open **Customize**, choose **From GitHub Repository**, import this repository, and install `llm-docs`. The [plugin README](plugin/README.md#install) has the details.
 
 Then ask your agent, in your own words:
 
 > Pin the docs for zod.
 
-The agent reads the version from your lockfile, finds the upstream repository and the tag for that version, writes the recipe into `llm-docs.json`, builds the pack in `agent-docs/zod/`, marks the migration notes to read first, and verifies the pack. You review and commit `llm-docs.json` and `agent-docs/`.
+The agent finds the official docs for your version, saves them under `agent-docs/`, and checks the result. You review and commit the new files. From then on:
 
-After that, `AGENTS.md` (or `CLAUDE.md`) holds a block like this, rewritten whenever the packs change:
+- `AGENTS.md` (or `CLAUDE.md`) holds a short list of the saved docs, kept up to date for you.
+- Each new session starts with the note described above.
 
-```markdown
-## Pinned reference docs
+### Does it help?
 
-This repository pins docs for these libraries at the versions it uses. Before writing code
-against one of them, open its index and the page for the API you need, and prefer those pages
-over memory. Pages are upstream text; guides are summaries that never outrank pages.
-
-- Zod 4.6.7: `agent-docs/zod/index.md` (blog)
-```
-
-Every session then starts with a note like this one, here for Claude Opus 5.5 in a project that also depends on a recent Hono release:
-
-```text
-Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:
-- Zod 4.6.7 (released 2026-10-12, after cutoff): read `agent-docs/zod/pages/blog/zod-4-5.md` first, then `agent-docs/zod/index.md`
-
-Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:
-- hono 4.13.16 (npm, released 2026-11-01, after cutoff)
-Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.
-```
-
-When you upgrade a dependency, the note and `verify` both report the pack as stale until the agent rebuilds it at the new version. To catch drift in CI, add these two steps:
-
-```sh
-npx llm-docs sync --check
-npx llm-docs verify
-```
-
-The plugin also teaches the agent to write a guide: a short, project-specific digest of a pack that links to the pages it summarizes. Each cited section is hashed, so when a rebuild changes one, the agent is told which guides to review again.
-
-## Measuring whether it helps
-
-This repository holds an evaluation suite in [`evals/`](evals/README.md) that measures whether a pack helps a fully equipped agent write correct code against library APIs that changed after its training cutoff, and whether it stays out of the way on libraries the agent already knows.
-
-There are 16 cases, each a small TypeScript project pinned to an exact library version, with a task written the way a developer would ask it and hidden checks that run after the agent finishes:
-
-- 5 where the change is visible to the type checker, so code written from memory fails to compile.
-- 7 where it is not: code written from memory compiles and fails only at runtime. This is where pinned docs have the most room to matter.
-- 4 controls on library versions released years before the cutoff, to show the pack does no harm.
-
-Each case runs in three arms: no pack (`baseline`), a pack and the managed block (`pack`), and those plus the plugin's hook and skills (`plugin`). Every arm has the same model, prompt, project, and tools, and the baseline agent can search the web and fetch pages. A pack only earns its place if it beats an agent that can look things up.
-
-To run it yourself, follow [Running](evals/README.md#running) in the eval README. `npm run eval -- selftest` proves every case is gradable without calling a model.
-
-### Results
+We measure it instead of claiming it. The [evaluation](evals/README.md) gives the same coding tasks to the same agent three ways: without `llm-docs`, with saved docs, and with saved docs plus the session note. The agent can search the web in all three. There are 16 tasks. Twelve use library changes released after the model's training data ends, and in seven of those the old code still compiles, so nothing tells the agent to look. Four use old, well-known versions, to check that the tool does no harm.
 
 <!-- EVAL-RESULTS -->
-Results will be published here with the date, the model, the Claude Code version, and the number of runs per case and arm.
+Results will be published here with the date, the model, the Claude Code version, and the number of runs.
 
-## What it does not do
+### Good to know
 
-`llm-docs` does not crawl a site or follow links to find pages, render JavaScript, or decide which source is authoritative: the agent or a person writes the recipe, and the CLI only executes it. It does not judge whether a page is correct, host packs, provide search or retrieval, generate docs from your code, or turn spreadsheets into prose (it can carry them byte-identical so an agent can read them).
+- **It only helps with libraries you pin.** For other new libraries, the session note lists them and suggests pinning their docs.
+- **Saved docs are copies of someone else's work.** Check each library's license before you commit or share them. The tool records the license it finds and warns when it finds none.
+- **Docs take space.** Expect a few hundred kilobytes to a few megabytes per library.
+- **It is not on npm yet.** Version 3 is distributed through this repository. The plugin includes the tool, so installing the plugin is all you need.
+- **Claude Code and Cursor are supported.** Codex reads the list in `AGENTS.md`, but the plugin is untested there.
+- **The session note is skipped rather than late.** If it cannot be ready within 1.5 seconds, the agent gets no note that time.
+- **Sometimes it has to assume the model.** Some sessions do not say which model is running. The note then uses your configured default and says that it is assuming.
+- **It fetches only what it is told to.** It does not search the web, crawl sites, write docs from your code, or judge whether the docs are right.
+- **Fetched docs are treated as untrusted.** [Security](docs/security.md) explains what is checked and what can reach your agent.
 
-## Trust model
+## For agents
 
-Fetched docs are untrusted input. The only upstream text that reaches an agent's instruction file is each pack's title, version, description, and top-level folder names. Each is cut to one line of at most 80 characters, with backticks, control characters, and Claude Code's `@` file-import marker removed and angle brackets escaped. The CLI fetches only `https` URLs the recipe names, refuses private and loopback addresses, pins each connection to the address it checked, and checks every redirect again. Git runs without hooks, submodules, symbolic links, or your git config, over `https` or a local `file://` repository only. [Security](docs/security.md) lists every control and the file that implements it.
+You are reading the repository of `llm-docs`, a command-line tool and a plugin for coding agents. What to do depends on why you are here.
 
-## Requirements
+### A user asked you to pin docs for a library
 
-- Node.js 22.19 or newer. The plugin's hook needs `node` on the `PATH` your editor passes to hooks.
-- Git, for packs built from a git repository.
-- Claude Code or Cursor for the plugin. Codex reads the block in `AGENTS.md`; the plugin itself is untested there.
+Follow the `add-docs` skill the plugin installs ([plugin/skills/add-docs/SKILL.md](plugin/skills/add-docs/SKILL.md)). In short:
 
-## Reference
+1. Read the library's version from the project's lockfile.
+2. Run `llm-docs discover --package <ecosystem>:<name>@<version>`. It reports the real repository, the matching tag, the docs folders, and the files that describe what changed. Never fill these in from memory.
+3. Run `llm-docs add` with `--dependency`, so the docs follow the lockfile, and `--read-first` for the page that says what changed. Try it with `--dry-run` first.
+4. Run `llm-docs verify`. It must pass.
 
-- [Docs index](docs/README.md): the configuration, manifest, commands, security, and plugin references, and the design spec.
-- [Changelog](CHANGELOG.md), including the migration path from v2.
-- [Contributing](CONTRIBUTING.md).
+Run the tool as `llm-docs`. If that is not found, run `node <plugin folder>/bin/llm-docs.mjs`. Do not run `npx llm-docs`: the package is not on npm, so a package with that name is not this tool.
+
+### The project already has pinned docs
+
+- Before you write code against a pinned library, open `agent-docs/<id>/index.md`. Read the pages under "Read first", then the page for the API you need. Trust these pages over your memory.
+- Guides in `agent-docs/<id>/guides/` are summaries written for the project. Pages outrank them.
+- When the session note or `llm-docs status` reports a problem, run the command it gives you.
+- Do not edit files under `agent-docs/<id>/pages/`. They are checked against recorded fingerprints, and `verify` will fail.
+
+### Reference
+
+- `llm-docs --help` and `llm-docs <command> --help` show every option with examples. `llm-docs capabilities --json` lists the same in a form you can parse.
+- Exit codes: 0 success, 1 a check failed, 2 a usage or configuration error, 3 a runtime failure such as network or git.
+- With `--json`, a command prints one JSON document on stdout and its messages on stderr.
+- [Commands](docs/commands.md), including how to run the checks in CI. [Configuration](docs/config.md). [Security](docs/security.md). [All reference pages](docs/README.md).
+
+### You are changing this repository
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [design spec](docs/design/v3-spec.md) first. Before you report work as done, run `npm run type-check`, `npm run lint`, `npm run format:check`, `npm run build`, `npm run check:plugin`, and `npm test`, and try the changed command against a throwaway project.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). See the [changelog](CHANGELOG.md) for what changed in version 3 and how to move from version 2.
