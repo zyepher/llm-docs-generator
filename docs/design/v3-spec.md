@@ -365,8 +365,11 @@ files of their fetch plan. Default include for `git` and `local`:
 `swagger:` key in JSON or YAML) when listed by an explicit include. Files that an include
 matched but no handler, converter, or passthrough glob takes are skipped and reported in one
 warning with a count per extension; files no include matched are not reported. Output paths
-are checked for collisions (case-insensitive after Unicode NFC normalization, because macOS
-and Windows file systems are, and again after rendering, for OpenAPI tag pages), for
+are checked for collisions, of whole paths and of every directory on the way (under one key:
+NFKC, then full Unicode case folding, then NFKC, because macOS and Windows file systems are
+case-insensitive and APFS is normalization-insensitive; the key is deliberately coarser than
+any one file system, so it may refuse a pair, such as `ﬀ` and `ff`, that some file system
+keeps apart; and again after rendering, for OpenAPI tag pages), for
 Windows-reserved names, for characters Windows forbids, and for segments ending in a dot or a
 space; each is an error naming the files.
 

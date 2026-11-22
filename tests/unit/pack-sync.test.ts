@@ -547,6 +547,46 @@ describe('syncPacks', () => {
     );
   });
 
+  it('rejects output paths that a case- and normalization-insensitive file system would merge', async () => {
+    const pairs = [
+      ['ſ.md', 's.mdx'],
+      ['Straße.md', 'STRASSE.mdx'],
+      ['µ.md', 'μ.mdx'],
+      ['ς.md', 'σ.mdx'],
+      ['ﬀ.md', 'ff.mdx'],
+    ];
+    for (const [first = '', second = ''] of pairs) {
+      const root = await makeProject(
+        { demo: PACK },
+        { [`docs/${first}`]: '# A\n', [`docs/${second}`]: '# B\n' }
+      );
+      const report = await syncPacks(root, undefined);
+
+      expect(report.packs[0], first).toMatchObject({ status: 'failed', exitCode: 2 });
+      expect(report.packs[0]?.error).toMatch(/would both be written to pages\/.* and pages\//);
+      expect(report.packs[0]?.error).toContain(`0:${first}`);
+      expect(report.packs[0]?.error).toContain(`0:${second}`);
+    }
+
+    const root = await makeProject(
+      {
+        demo: {
+          ...PACK,
+          sources: [
+            { type: 'local', path: 'one' },
+            { type: 'local', path: 'two' },
+          ],
+        },
+      },
+      { 'one/Guide/a.md': '# A\n', 'two/guide/b.md': '# B\n' }
+    );
+    const report = await syncPacks(root, undefined);
+    expect(report.packs[0]).toMatchObject({ status: 'failed', exitCode: 2 });
+    expect(report.packs[0]?.error).toMatch(
+      /0:Guide\/a\.md and 1:guide\/b\.md would both be written to pages\/Guide and pages\/guide, one path/
+    );
+  });
+
   it('rejects Windows-reserved output names', async () => {
     const root = await makeProject({ demo: PACK }, { 'docs/con.md': '# Con\n' });
     expect((await syncPacks(root, undefined)).packs[0]?.error).toMatch(
