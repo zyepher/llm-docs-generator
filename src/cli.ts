@@ -151,7 +151,7 @@ const COMMANDS = [
           '--alias',
           '/specification/latest=/specification/{version}',
           '--license',
-          'Apache-2.0 AND MIT AND CC-BY-4.0',
+          'Apache-2.0 AND MIT',
           '--dry-run',
         ],
         note: 'Preview a protocol revision from a site index, with links to "latest" kept in the pack',
@@ -1578,7 +1578,7 @@ function buildProgram(): Command {
     )
     .option(
       '--repo <url[@version]>',
-      'Repository with no package to inspect, such as a protocol specification: an https:// URL, optionally @<version or tag> (default version: the latest release tag)'
+      'Repository with no package to inspect, such as a protocol specification: an https:// URL, or a file:// URL for a repository on this machine, optionally @<version or tag> (default version: the latest release tag)'
     )
     .option('--json', 'Accepted for consistency: discover always prints JSON on stdout')
     .action(async (options: { url?: string; package?: string; repo?: string }) => {
