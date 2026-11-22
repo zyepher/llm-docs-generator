@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 
@@ -197,28 +197,68 @@ function parseNpmPackagesTree(
   return result;
 }
 
-/** lockfileVersion 1: the nested `dependencies` tree, with package.json for directness. */
+/**
+ * lockfileVersion 1: the nested `dependencies` tree, with package.json for
+ * directness. A workspace member appears as a `file:<member>` entry whose own
+ * `dependencies` are the ones it could not share with the root, so they are
+ * direct when the member declares them, as in lockfile versions 2 and 3.
+ */
 async function parseNpmLegacyTree(
   context: LockfileContext,
   dependencies: Record<string, unknown>
 ): Promise<LockfileResult> {
   const result = createLockfileResult();
   const manifest = await readJsonIfExists(join(context.directory, 'package.json'));
-  const declarations = emptyNpmDeclarations();
+  const root = emptyNpmDeclarations();
+  const members = new Map<string, NpmDeclarations>();
 
   if (manifest === undefined) {
     result.warnings.push(
       'no package.json next to the lockfile, so no dependency is marked direct.'
     );
   } else {
-    addNpmDeclarations(declarations, manifest);
+    addNpmDeclarations(root, manifest);
+    const workspaces = recordValue(manifest).workspaces;
+    const expansion = await expandWorkspacePatterns(
+      context.directory,
+      (Array.isArray(workspaces)
+        ? workspaces
+        : arrayValue(recordValue(workspaces).packages)
+      ).filter(isNonEmptyString)
+    );
+    result.warnings.push(...expansion.warnings);
+    for (const member of expansion.members) {
+      const declarations = emptyNpmDeclarations();
+      addNpmDeclarations(
+        declarations,
+        await readJsonIfExists(join(context.directory, ...member.split('/'), 'package.json'))
+      );
+      members.set(member, declarations);
+    }
   }
 
-  const visit = (tree: Record<string, unknown>, topLevel: boolean): void => {
+  // The root's own entries, plus a member's dependency hoisted to the root.
+  const declaredAtRoot = (name: string): boolean =>
+    root.byName.has(name) ||
+    [...members.values()].some((declarations) => declarations.byName.has(name));
+
+  const visit = (
+    tree: Record<string, unknown>,
+    isDirect: ((name: string) => boolean) | undefined
+  ): void => {
     for (const [name, value] of Object.entries(tree)) {
       const entry = recordValue(value);
       const version = stringValue(entry.version) ?? '';
       const resolved = stringValue(entry.resolved);
+      const member = version.startsWith('file:')
+        ? members.get(posix.normalize(version.slice('file:'.length)).replace(/\/+$/, ''))
+        : undefined;
+
+      if (member !== undefined) {
+        result.skipped.push({ name, reason: 'workspace' });
+        visit(recordValue(entry.dependencies), (child) => member.byName.has(child));
+        continue;
+      }
 
       if (version.startsWith('npm:')) {
         result.skipped.push({ name, reason: 'alias' });
@@ -229,17 +269,17 @@ async function parseNpmLegacyTree(
       } else {
         result.dependencies.push(
           npmDependency(context, name, version, {
-            direct: topLevel && declarations.byName.has(name),
+            direct: isDirect?.(name) ?? false,
             dev: entry.dev === true,
           })
         );
       }
 
-      visit(recordValue(entry.dependencies), false);
+      visit(recordValue(entry.dependencies), undefined);
     }
   };
 
-  visit(dependencies, true);
+  visit(dependencies, declaredAtRoot);
   return result;
 }
 

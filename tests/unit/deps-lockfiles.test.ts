@@ -84,6 +84,55 @@ describe('npm lockfiles', () => {
     ]);
   });
 
+  it('reads a workspace member of a package-lock v1 as direct, so differing members conflict as in v2 and v3', async () => {
+    const root = await makeProject({
+      'package.json': JSON.stringify({
+        name: 'app',
+        workspaces: ['packages/*'],
+        dependencies: { 'is-number': '7.0.0' },
+      }),
+      'packages/a/package.json': JSON.stringify({
+        name: 'a',
+        dependencies: { 'is-number': '^5.0.0', 'is-odd': '^3.0.0' },
+      }),
+      // As `npm install --lockfile-version=1` writes a workspace.
+      'package-lock.json': JSON.stringify({
+        name: 'app',
+        lockfileVersion: 1,
+        requires: true,
+        dependencies: {
+          a: {
+            version: 'file:packages/a',
+            requires: { 'is-number': '^5.0.0', 'is-odd': '^3.0.0' },
+            dependencies: { 'is-number': { version: '5.0.0' } },
+          },
+          'is-number': {
+            version: '7.0.0',
+            resolved: 'https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz',
+          },
+          'is-odd': {
+            version: '3.0.1',
+            resolved: 'https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz',
+          },
+        },
+      }),
+    });
+    const scan = await scanDependencies(root);
+
+    expect(summarize(scan)).toEqual([
+      'is-number@5.0.0 direct',
+      'is-number@7.0.0 direct',
+      'is-odd@3.0.1 direct',
+    ]);
+    expect(findDependencyVersion(scan, { ecosystem: 'npm', name: 'is-number' })).toEqual({
+      kind: 'conflict',
+      versions: [
+        { version: '5.0.0', lockfile: 'package-lock.json' },
+        { version: '7.0.0', lockfile: 'package-lock.json' },
+      ],
+    });
+  });
+
   it('reads npm-shrinkwrap.json (lockfile v2) from its packages map', async () => {
     const scan = await scanFixture('npm-shrinkwrap-v2');
 
