@@ -45,7 +45,6 @@ function input(overrides: Partial<IndexPageInput> = {}): IndexPageInput {
       { path: 'pages/readme.md', title: 'Readme', tokens: 10 },
       { path: 'pages/api/a b.md', title: 'A', tokens: 4 },
     ],
-    guides: [],
     ...overrides,
   };
 }
@@ -62,7 +61,7 @@ describe('renderIndexPage', () => {
         '',
         '## How to read this pack',
         '',
-        'Open the page for the API you need and read it before writing code against it. Search `pages/` for exact symbol names. Pages are upstream text at the pinned version; guides are digests written for this project and never outrank pages.',
+        'Open the page for the API you need and read it before writing code against it. Search `pages/` for exact symbol names. Pages are upstream text at the pinned version. Guides, when this pack has any, are the digests in `guides/` written for this project: they link into the pages and never outrank them.',
         '',
         '## Pages',
         '',
@@ -90,25 +89,18 @@ describe('renderIndexPage', () => {
     expect(renderIndexPage(input({ pages: [...input().pages].reverse() }))).toBe(text);
   });
 
-  it('lists guides and describes local origins and unknown licenses', () => {
+  it('describes local origins and unknown licenses', () => {
     const text = renderIndexPage(
       input({
         origins: [
           { type: 'local', path: 'manuals', hostCommit: '0123456789abcdef', hostDirty: true },
         ],
         license: { declared: null, detected: null, status: 'unknown' },
-        guides: [
-          { path: 'guides/02-b.md', title: 'B' },
-          { path: 'guides/01-a.md', title: 'A [draft]' },
-        ],
       })
     );
 
     expect(text).toContain(
       'from the project folder `manuals` (host repository commit 0123456789ab, with uncommitted changes). License: unknown;'
-    );
-    expect(text).toContain(
-      '## Guides\n\n- [A \\[draft\\]](guides/01-a.md)\n- [B](guides/02-b.md)\n\n## Pages'
     );
   });
 

@@ -1,17 +1,12 @@
 /**
  * The generated, verified `index.md` of a pack (spec 4.8). Deterministic:
- * everything it says comes from the manifest fields and the guide list, in
- * sorted order, with upstream text escaped.
+ * everything it says comes from the manifest fields, in sorted order, with
+ * upstream text escaped. It never enumerates the agent-owned guides, so a
+ * guide change never changes the index, the combined file, or the manifest.
  */
 
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import type { ManifestOutputEntry, PackManifest } from './manifest.js';
-
-export interface IndexGuide {
-  /** Pack-relative POSIX path (`guides/...`). */
-  path: string;
-  title: string;
-}
 
 export type IndexPageInput = Pick<
   PackManifest,
@@ -19,7 +14,6 @@ export type IndexPageInput = Pick<
 > & {
   /** Page outputs (kind `page`) with their titles and token estimates. */
   pages: readonly Pick<ManifestOutputEntry, 'path' | 'title' | 'tokens'>[];
-  guides: readonly IndexGuide[];
 };
 
 const TITLE_CAP = 120;
@@ -120,17 +114,8 @@ export function renderIndexPage(input: IndexPageInput): string {
     '',
     '## How to read this pack',
     '',
-    'Open the page for the API you need and read it before writing code against it. Search `pages/` for exact symbol names. Pages are upstream text at the pinned version; guides are digests written for this project and never outrank pages.',
+    'Open the page for the API you need and read it before writing code against it. Search `pages/` for exact symbol names. Pages are upstream text at the pinned version. Guides, when this pack has any, are the digests in `guides/` written for this project: they link into the pages and never outrank them.',
   ];
-
-  if (input.guides.length > 0) {
-    lines.push('', '## Guides', '');
-    for (const guide of [...input.guides].sort((a, b) =>
-      compareStringsByCodeUnit(a.path, b.path)
-    )) {
-      lines.push(`- [${escapeIndexText(guide.title)}](${linkPath(guide.path)})`);
-    }
-  }
 
   lines.push('', '## Pages');
 

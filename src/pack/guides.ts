@@ -25,10 +25,9 @@ import { canonicalJsonStringify, readJsonFile } from '../utils/json.js';
 import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
-import type { IndexGuide } from './index-page.js';
 import { withPacksLock } from './lock.js';
 import { ManifestError, readPackManifest, type PackManifest } from './manifest.js';
-import { collectHeadings, findLinkTargets, headingSlugs } from './markdown.js';
+import { findLinkTargets, headingSlugs } from './markdown.js';
 import type { RefreshReport } from './refresh.js';
 import type { CheckFinding } from './verify.js';
 
@@ -39,14 +38,8 @@ export const CITATIONS_LOCK_PATH = 'guides/citations.lock.json';
 // Listing
 // ---------------------------------------------------------------------------
 
-function fileStem(path: string): string {
-  const name = posix.basename(path);
-  const dot = name.lastIndexOf('.');
-  return dot > 0 ? name.slice(0, dot) : name;
-}
-
-/** Markdown guides under `<packDir>/guides`, with their first-H1 titles, sorted by path. */
-export async function listGuides(packDir: string): Promise<IndexGuide[]> {
+/** Pack-relative paths of the Markdown guides under `<packDir>/guides`, sorted. */
+export async function listGuides(packDir: string): Promise<string[]> {
   const root = join(packDir, 'guides');
 
   try {
@@ -58,7 +51,7 @@ export async function listGuides(packDir: string): Promise<IndexGuide[]> {
     throw error;
   }
 
-  const guides: IndexGuide[] = [];
+  const guides: string[] = [];
 
   for await (const event of walkBoundedDirectoryTree({
     root,
@@ -71,13 +64,10 @@ export async function listGuides(packDir: string): Promise<IndexGuide[]> {
       continue;
     }
 
-    const path = `guides/${event.relativePath.split(sep).join('/')}`;
-    const text = await readFile(event.absolutePath, 'utf-8');
-    const h1 = collectHeadings(text).find((heading) => heading.level === 1);
-    guides.push({ path, title: h1?.text || fileStem(path) });
+    guides.push(`guides/${event.relativePath.split(sep).join('/')}`);
   }
 
-  return guides.sort((a, b) => compareStringsByCodeUnit(a.path, b.path));
+  return guides.sort(compareStringsByCodeUnit);
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +469,7 @@ export async function stampGuides(
 
     const manifest = await readStampedManifest(packDir, packId);
     const onDisk = await listGuides(packDir);
-    const present = new Set(onDisk.map((guide) => guide.path));
+    const present = new Set(onDisk);
     const previous = await readCitationsLock(packDir);
 
     if (onDisk.length === 0 && previous.kind === 'absent') {
@@ -686,7 +676,7 @@ export async function assessCitations(packDir: string): Promise<CitationsAssessm
 
   return {
     kind: 'assessed',
-    unstamped: onDisk.map((guide) => guide.path).filter((path) => !Object.hasOwn(recorded, path)),
+    unstamped: onDisk.filter((path) => !Object.hasOwn(recorded, path)),
     guides,
   };
 }
@@ -842,7 +832,7 @@ export async function reviewGuidesForRefreshCheck(
     }
   }
 
-  const present = new Set((await listGuides(packDir)).map((guide) => guide.path));
+  const present = new Set(await listGuides(packDir));
   const guides = Object.keys(lock.lock.guides)
     .filter((path) => present.has(path))
     .sort(compareStringsByCodeUnit)

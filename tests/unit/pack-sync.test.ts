@@ -219,21 +219,22 @@ describe('syncPacks', () => {
     );
   });
 
-  it('keeps guides across a rebuild and lists them in the index', async () => {
+  it('never rebuilds for a guide, and keeps guides across a rebuild', async () => {
     const root = await makeProject({ demo: PACK }, DOCS);
     await syncPacks(root, undefined);
+    const built = await snapshot(join(root, 'agent-docs', 'demo'));
     await writeFiles(join(root, 'agent-docs', 'demo'), {
       'guides/01-overview.md': '# Overview digest\n\nSee [start](../pages/guide/start.md).\n',
     });
 
     const report = await syncPacks(root, undefined);
-    expect(report.packs[0]).toMatchObject({ status: 'built', reason: 'the guides changed' });
-
-    const index = await readFile(join(root, 'agent-docs', 'demo', 'index.md'), 'utf-8');
-    expect(index).toContain('## Guides\n\n- [Overview digest](guides/01-overview.md)\n');
-    expect(
-      await readFile(join(root, 'agent-docs', 'demo', 'guides', '01-overview.md'), 'utf-8')
-    ).toContain('Overview digest');
+    expect(report.packs[0]).toMatchObject({ status: 'unchanged' });
+    const after = await snapshot(join(root, 'agent-docs', 'demo'));
+    delete after['guides/01-overview.md'];
+    expect(after).toEqual(built);
+    expect(built['index.md']).toContain(
+      'Guides, when this pack has any, are the digests in `guides/`'
+    );
 
     await setPacks(root, { demo: { ...PACK, title: 'Renamed' } });
     expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({

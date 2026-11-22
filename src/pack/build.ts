@@ -2,8 +2,8 @@
  * `sync` (spec 2.5, 2.6, 5): bring every pack in line with its recipe.
  *
  * Per pack: resolve the recipe; skip when the manifest's recipeHash matches,
- * the pack files verify, the index still lists the current guides, and local
- * sources are unchanged; otherwise acquire, select, convert, and write a
+ * the pack files verify, and local sources are unchanged; otherwise acquire,
+ * select, convert, and write a
  * staging pack, verify it in place, and swap it in atomically, carrying the
  * agent-owned `guides/` across. The whole run holds an advisory lock in the
  * packs directory, and the managed agent-file blocks are updated last.
@@ -50,7 +50,7 @@ import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { renderCombinedPack } from './combined.js';
-import { renderIndexPage, type IndexGuide } from './index-page.js';
+import { renderIndexPage } from './index-page.js';
 import {
   listGuides,
   reviewGuidesAfterBuild,
@@ -298,8 +298,7 @@ async function swapIntoPlace(packsDir: string, id: string, stagingDir: string): 
 
 function renderIndexFor(
   manifest: Omit<PackManifest, 'outputs'>,
-  outputs: readonly ManifestOutputEntry[],
-  guides: readonly IndexGuide[]
+  outputs: readonly ManifestOutputEntry[]
 ): string {
   return renderIndexPage({
     pack: manifest.pack,
@@ -309,7 +308,6 @@ function renderIndexFor(
     license: manifest.license,
     sources: manifest.sources,
     pages: outputs.filter((output) => output.kind === 'page'),
-    guides,
   });
 }
 
@@ -467,13 +465,6 @@ async function staleReason(
 
   if (integrity.some((entry) => entry.status === 'fail')) {
     return 'the pack files differ from the manifest';
-  }
-
-  const index = manifest.outputs.find((output) => output.path === INDEX_FILE);
-  const expectedIndex = renderIndexFor(manifest, manifest.outputs, await listGuides(packDir));
-
-  if (index === undefined || index.sha256 !== sha256Prefixed(expectedIndex)) {
-    return 'the guides changed';
   }
 
   const localIndexes = new Set(
@@ -797,7 +788,7 @@ async function buildPack(
       warnings,
     };
 
-    const indexText = renderIndexFor(manifestWithoutOutputs, outputs, await listGuides(packDir));
+    const indexText = renderIndexFor(manifestWithoutOutputs, outputs);
     await writeStagedFile(stagingDir, INDEX_FILE, (target) =>
       writeTextFileSafely(target, indexText)
     );

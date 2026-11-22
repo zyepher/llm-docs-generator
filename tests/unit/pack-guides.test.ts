@@ -1,6 +1,15 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -106,7 +115,9 @@ async function builtPack(guides: Record<string, string>): Promise<string> {
   tempDirs.push(root);
   await writeFiles(root, DOCS);
   await setRecipe(root);
-  const report = await syncPacks(root, undefined);
+  const report = await syncPacks(root, undefined, {
+    now: () => new Date('2026-11-05T10:00:00.000Z'),
+  });
   expect(report.packs[0]).toMatchObject({ status: 'built' });
   await writeFiles(join(root, 'agent-docs', 'demo', 'guides'), guides);
   return root;
@@ -720,5 +731,154 @@ describe('the re-review list', () => {
         ],
       },
     });
+  });
+});
+
+/** Every file under `dir`, by relative POSIX path. */
+async function snapshot(dir: string): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) {
+      const path = join(entry.parentPath, entry.name);
+      files[
+        path
+          .slice(dir.length + 1)
+          .split(sep)
+          .join('/')
+      ] = await readFile(path, 'utf-8');
+    }
+  }
+  return files;
+}
+
+describe('the citations lock through sync (RATIONALE: citations-lock ownership)', () => {
+  it('stamp, then sync with no change: the skip path, nothing written', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A });
+    await stamp(root);
+    const before = await snapshot(join(root, 'agent-docs'));
+
+    const report = await syncPacks(root, undefined, { offline: true });
+    expect(report.packs[0]).toMatchObject({ status: 'unchanged' });
+    expect(report.packs[0]?.guideReview).toBeUndefined();
+    expect(await snapshot(join(root, 'agent-docs'))).toEqual(before);
+  });
+
+  it('stamp, then a rebuild: the lock moves with guides/ and only changed sections fail', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A, 'c.md': '[u](../pages/guide/api.md#usage)' });
+    await stamp(root);
+    const lock = await readLock(root);
+
+    await setRecipe(root, '2.0.0');
+    await writeFiles(root, { 'docs/guide/api.md': API_PAGE.replace('Some options.', 'None.') });
+    const report = await syncPacks(root, undefined);
+    expect(report.packs[0]).toMatchObject({
+      status: 'built',
+      reason: 'the recipe changed',
+      guideReview: {
+        basis: 'sections',
+        guides: [
+          {
+            guide: 'guides/a.md',
+            citations: [{ target: 'pages/guide/api.md#install', change: 'section-changed' }],
+          },
+        ],
+      },
+    });
+    expect(await readLock(root)).toBe(lock);
+
+    const citations = (await verifyPacks(root, undefined)).results.find(
+      (result) => result.check === 'citations'
+    );
+    expect(citations?.findings.map((finding) => finding.message.split(':')[0])).toEqual([
+      'pages/guide/api.md#install',
+    ]);
+  });
+
+  it('crash recovery puts the lock back with guides/', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A });
+    await stamp(root);
+    const packs = join(root, 'agent-docs');
+    const before = await snapshot(packDir(root));
+
+    // A crash after guides/ moved into the staging pack and the old pack was renamed aside.
+    await mkdir(join(packs, '.staging', 'demo-0123456789ab'), { recursive: true });
+    await writeFile(
+      join(packs, '.staging', 'demo-0123456789ab', 'manifest.json'),
+      await readFile(join(packDir(root), 'manifest.json'))
+    );
+    await rename(
+      join(packDir(root), 'guides'),
+      join(packs, '.staging', 'demo-0123456789ab', 'guides')
+    );
+    await rename(packDir(root), join(packs, '.staging', 'demo-old-abcdef012345'));
+
+    const report = await syncPacks(root, undefined);
+    expect(report.packs[0]?.warnings).toEqual(
+      expect.arrayContaining([
+        'Restored pack "demo" left aside by an interrupted sync.',
+        'Restored the guides of pack "demo" from an interrupted sync.',
+      ])
+    );
+    expect(await snapshot(packDir(root))).toEqual(before);
+    expect((await assessCitations(packDir(root))).kind).toBe('assessed');
+  });
+
+  it('--check modes write nothing, the lock included', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A });
+    await stamp(root);
+    await writeFiles(root, { 'docs/guide/api.md': API_PAGE.replace('Run it.', 'Run.') });
+    const before = await snapshot(join(root, 'agent-docs'));
+
+    expect((await syncPacks(root, undefined, { check: true })).packs[0]?.status).toBe(
+      'would-build'
+    );
+    expect(
+      (await syncPacks(root, undefined, { check: true, refresh: true })).packs[0]?.status
+    ).toBe('would-build');
+    expect(await snapshot(join(root, 'agent-docs'))).toEqual(before);
+  });
+
+  it('sync never reads the lock: a hand-edited lock leaves sync alone and fails verify', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A });
+    await stamp(root);
+    await writeFile(lockFile(root), '{"schemaVersion": 1, "guides": "edited by hand"}');
+
+    expect((await syncPacks(root, undefined)).packs[0]?.status).toBe('unchanged');
+    expect(await readLock(root)).toBe('{"schemaVersion": 1, "guides": "edited by hand"}');
+    expect(
+      (await verifyPacks(root, undefined)).results.find((result) => result.check === 'citations')
+        ?.status
+    ).toBe('fail');
+  });
+
+  it('prune keeps an orphan pack that holds guides, lock and all', async () => {
+    const root = await builtPack({ 'a.md': GUIDE_A });
+    await stamp(root);
+    await writeFile(
+      join(root, 'llm-docs.json'),
+      JSON.stringify({ schemaVersion: 3, agentFiles: [], packs: {} })
+    );
+
+    expect((await syncPacks(root, undefined, { prune: true })).orphans).toEqual([
+      { id: 'demo', status: 'kept', reason: 'it holds guides; move them, then delete the pack' },
+    ]);
+    expect(await pathExists(lockFile(root))).toBe(true);
+  });
+
+  it('the manifest is independent of guides and the lock (spec 2.5)', async () => {
+    const withGuides = await builtPack({ 'a.md': GUIDE_A });
+    await stamp(withGuides);
+    const without = await builtPack({});
+
+    for (const root of [withGuides, without]) {
+      await setRecipe(root, '1.0.1');
+      await syncPacks(root, undefined);
+    }
+
+    const pack = await snapshot(packDir(withGuides));
+    for (const path of Object.keys(pack).filter((name) => name.startsWith('guides/'))) {
+      delete pack[path];
+    }
+    expect(pack).toEqual(await snapshot(packDir(without)));
   });
 });
