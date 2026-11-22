@@ -8,7 +8,7 @@
  * (Phase 5), `agent-block` (Phase 4).
  */
 
-import { lstat, readdir, readFile, stat } from 'node:fs/promises';
+import { lstat, readFile, stat } from 'node:fs/promises';
 import { join, posix, sep } from 'node:path';
 
 import {
@@ -24,12 +24,7 @@ import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
-import {
-  MANIFEST_FILE_NAME,
-  ManifestError,
-  readPackManifest,
-  type PackManifest,
-} from './manifest.js';
+import { MANIFEST_FILE_NAME, readProjectPacks, type PackManifest } from './manifest.js';
 import { findLinkTargets, headingAnchors } from './markdown.js';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'info' | 'skipped';
@@ -545,31 +540,6 @@ export async function verifyPackFiles(
 // Project
 // ---------------------------------------------------------------------------
 
-async function packDirectoriesOnDisk(packsDir: string): Promise<string[]> {
-  try {
-    const entries = await readdir(packsDir, { withFileTypes: true });
-    const ids: string[] = [];
-
-    for (const entry of entries) {
-      if (entry.isDirectory() && !entry.name.startsWith('.')) {
-        try {
-          await lstat(join(packsDir, entry.name, MANIFEST_FILE_NAME));
-          ids.push(entry.name);
-        } catch {
-          // Not a pack: no manifest.
-        }
-      }
-    }
-
-    return ids.sort(compareStringsByCodeUnit);
-  } catch (error) {
-    if (isFileNotFoundError(error)) {
-      return [];
-    }
-    throw error;
-  }
-}
-
 /**
  * Verify the project's packs (all configured packs plus orphan pack
  * directories, or just `ids`). An invalid config fails `config-schema` and
@@ -605,41 +575,25 @@ export async function verifyPacks(
     options.resolveDependencyVersion ??
     projectDependencies(loaded.projectRoot, { skipDirectories: [loaded.packsDirRelative] })
       .resolveVersion;
-  const onDisk = await packDirectoriesOnDisk(loaded.packsDir);
-  const configured = Object.keys(loaded.config.packs);
-  const known = new Set([...configured, ...onDisk]);
+  const packs = await readProjectPacks(loaded);
 
   for (const id of ids ?? []) {
-    if (!known.has(id)) {
+    if (!packs.some((pack) => pack.id === id)) {
       throw new ConfigError(`No pack "${id}" in llm-docs.json or ${loaded.packsDirRelative}/.`);
     }
   }
 
   const selected =
     ids === undefined || ids.length === 0
-      ? [...configured, ...onDisk.filter((id) => !configured.includes(id))]
-      : [...new Set(ids)];
+      ? packs
+      : [...new Set(ids)].flatMap((id) => packs.filter((pack) => pack.id === id));
 
-  for (const packId of selected) {
-    const packDir = join(loaded.packsDir, packId);
-    let manifest: PackManifest;
-
-    try {
-      manifest = await readPackManifest(packDir);
-      if (manifest.pack.id !== packId) {
-        throw new ManifestError(
-          `${MANIFEST_FILE_NAME} belongs to pack "${manifest.pack.id}", not "${packId}"`,
-          'invalid'
-        );
-      }
-    } catch (error) {
-      if (!(error instanceof ManifestError)) {
-        throw error;
-      }
+  for (const { id: packId, dir: packDir, manifest: read } of selected) {
+    if (read.kind !== 'ok') {
       const message =
-        error.reason === 'missing'
-          ? `${error.message}; run 'llm-docs sync ${packId}'`
-          : error.message;
+        read.kind === 'missing'
+          ? `${MANIFEST_FILE_NAME} is missing; run 'llm-docs sync ${packId}'`
+          : read.message;
       results.push(
         result('manifest-schema', packId, [{ status: 'fail', path: MANIFEST_FILE_NAME, message }])
       );
@@ -649,6 +603,7 @@ export async function verifyPacks(
       continue;
     }
 
+    const manifest = read.manifest;
     results.push(result('manifest-schema', packId, []));
     const context: PackCheckContext = {
       packId,

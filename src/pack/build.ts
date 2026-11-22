@@ -12,18 +12,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import {
-  copyFile,
-  lstat,
-  mkdir,
-  mkdtemp,
-  open,
-  readdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-} from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, sep } from 'node:path';
 
@@ -55,9 +44,8 @@ import {
   type ManifestConverter,
 } from '../sources/convert.js';
 import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
-import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
+import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
-import { readJsonFile } from '../utils/json.js';
 import { writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
@@ -80,12 +68,11 @@ import {
 import { collectHeadings, convertMarkdownPage, type PackFileRef } from './markdown.js';
 import { diffRefresh, type RefreshReport } from './refresh.js';
 import { renderSourcePage } from './render-ir.js';
+import { LOCK_FILE, withPacksLock } from './lock.js';
 import { verifyPackFiles } from './verify.js';
 
 const STAGING_DIR = '.staging';
-const LOCK_FILE = '.llm-docs.lock';
 const PACKS_GITIGNORE = `${STAGING_DIR}/\n${LOCK_FILE}\n`;
-const LOCK_STALE_MS = 60 * 60 * 1000;
 const INDEX_FILE = 'index.md';
 
 export type PackSyncStatus = 'unchanged' | 'built' | 'would-build' | 'failed';
@@ -159,11 +146,6 @@ export interface SyncReport {
   afterSync: AfterSyncResult | null;
 }
 
-/** Another sync holds the packs directory lock: a runtime failure (exit 3). */
-export class SyncLockedError extends Error {
-  override name = 'SyncLockedError';
-}
-
 // ---------------------------------------------------------------------------
 // File-system helpers
 // ---------------------------------------------------------------------------
@@ -228,74 +210,6 @@ export async function ensurePacksDir(packsDir: string): Promise<void> {
     const prefix = current === '' || current.endsWith('\n') ? current : `${current}\n`;
     await writeTextFileSafely(gitignore, `${prefix}${missing.join('\n')}\n`);
   }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error instanceof Error && 'code' in error && error.code === 'EPERM';
-  }
-}
-
-async function lockIsStale(path: string): Promise<{ stale: boolean; holder: string }> {
-  let raw: unknown;
-
-  try {
-    raw = await readJsonFile(path);
-  } catch {
-    // Unreadable or half-written: stale once it is old enough not to be mid-write.
-    const age = Date.now() - (await stat(path)).mtimeMs;
-    return { stale: age > 5_000, holder: 'an unknown process' };
-  }
-
-  const pid = isRecord(raw) && typeof raw.pid === 'number' ? raw.pid : undefined;
-  const startedAt = isRecord(raw) && typeof raw.startedAt === 'string' ? raw.startedAt : '';
-  const command = isRecord(raw) && typeof raw.command === 'string' ? raw.command : 'llm-docs';
-  const started = Date.parse(startedAt);
-  const stale =
-    pid === undefined ||
-    !isProcessAlive(pid) ||
-    Number.isNaN(started) ||
-    Date.now() - started > LOCK_STALE_MS;
-
-  return { stale, holder: `'${command}' (pid ${pid ?? '?'}, started ${startedAt || 'unknown'})` };
-}
-
-/** Take the advisory lock with exclusive create; a stale lock is replaced once. */
-async function acquireLock(packsDir: string, command: string): Promise<() => Promise<void>> {
-  const path = join(packsDir, LOCK_FILE);
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await open(path, 'wx');
-      try {
-        await handle.writeFile(
-          `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), command })}\n`
-        );
-      } finally {
-        await handle.close();
-      }
-      return () => rm(path, { force: true });
-    } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) {
-        throw error;
-      }
-
-      const { stale, holder } = await lockIsStale(path);
-
-      if (!stale || attempt > 0) {
-        throw new SyncLockedError(
-          `Another llm-docs run holds ${join(packsDir, LOCK_FILE)}: ${holder}. Wait for it to finish, or delete the lock file if that process is gone.`
-        );
-      }
-
-      await rm(path, { force: true });
-    }
-  }
-
-  throw new SyncLockedError(`Could not take the lock in ${packsDir}.`);
 }
 
 async function manifestPackId(dir: string): Promise<string | undefined> {
@@ -1172,14 +1086,7 @@ export async function syncPacks(
     options.resolveDependencyVersion ??
     projectDependencies(loaded.projectRoot, { skipDirectories: [loaded.packsDirRelative] })
       .resolveVersion;
-  let release: (() => Promise<void>) | undefined;
-
-  if (!check) {
-    await ensurePacksDir(loaded.packsDir);
-    release = await acquireLock(loaded.packsDir, options.command ?? 'llm-docs sync');
-  }
-
-  try {
+  const run = async (): Promise<SyncReport> => {
     const recoveryWarnings = check ? [] : await recoverStaging(loaded.packsDir);
     const packs: PackSyncResult[] = [];
 
@@ -1216,9 +1123,14 @@ export async function syncPacks(
       afterSync?.changed === true;
 
     return { check, changed, packs, orphans, afterSync };
-  } finally {
-    await release?.();
+  };
+
+  if (check) {
+    return run();
   }
+
+  await ensurePacksDir(loaded.packsDir);
+  return withPacksLock(loaded.packsDir, options.command ?? 'llm-docs sync', run);
 }
 
 export interface PackPreview {

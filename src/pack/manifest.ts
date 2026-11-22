@@ -9,12 +9,18 @@
  * link statistics, and the `citations` output kind.
  */
 
+import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { z } from 'zod';
 
 import packageJson from '../../package.json';
-import { resolvedPackRecipeSchema, CONVERTER_TOOLS, TRANSFORM_NAMES } from '../config/project.js';
+import {
+  resolvedPackRecipeSchema,
+  CONVERTER_TOOLS,
+  TRANSFORM_NAMES,
+  type LoadedProjectConfig,
+} from '../config/project.js';
 import { ECOSYSTEMS } from '../deps/lockfiles.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { canonicalJsonStringify, readJsonFile } from '../utils/json.js';
@@ -332,4 +338,82 @@ export async function writePackManifest(packDir: string, manifest: PackManifest)
   }
 
   await writeTextFileSafely(join(packDir, MANIFEST_FILE_NAME), serializePackManifest(manifest));
+}
+
+/** How one pack directory's manifest read, as a value instead of a thrown ManifestError. */
+export type ProjectPackManifest =
+  | { kind: 'ok'; manifest: PackManifest }
+  | { kind: 'missing' }
+  | { kind: 'invalid'; reason: 'invalid' | 'other-version' | 'wrong-id'; message: string };
+
+export interface ProjectPack {
+  id: string;
+  /** Absolute pack directory. */
+  dir: string;
+  /** llm-docs.json lists it. False: an orphan directory that holds a manifest.json. */
+  inConfig: boolean;
+  manifest: ProjectPackManifest;
+}
+
+/**
+ * Every pack of the project: configured packs in llm-docs.json order (the
+ * order the planner wrote, which the managed block keeps), then orphan
+ * directories holding a manifest.json, sorted. Read-only.
+ */
+export async function readProjectPacks(loaded: LoadedProjectConfig): Promise<ProjectPack[]> {
+  const orphans: string[] = [];
+
+  try {
+    for (const entry of await readdir(loaded.packsDir, { withFileTypes: true })) {
+      if (
+        !entry.isDirectory() ||
+        entry.name.startsWith('.') ||
+        Object.hasOwn(loaded.config.packs, entry.name)
+      ) {
+        continue;
+      }
+      try {
+        await lstat(join(loaded.packsDir, entry.name, MANIFEST_FILE_NAME));
+        orphans.push(entry.name);
+      } catch {
+        // Not a pack: no manifest.
+      }
+    }
+  } catch (error) {
+    if (!isFileNotFoundError(error)) {
+      throw error;
+    }
+  }
+
+  const ids = [
+    ...Object.keys(loaded.config.packs).map((id) => ({ id, inConfig: true })),
+    ...orphans.sort(compareStringsByCodeUnit).map((id) => ({ id, inConfig: false })),
+  ];
+
+  return Promise.all(
+    ids.map(async ({ id, inConfig }) => {
+      const dir = join(loaded.packsDir, id);
+      return { id, dir, inConfig, manifest: await readManifestValue(dir, id) };
+    })
+  );
+}
+
+async function readManifestValue(dir: string, id: string): Promise<ProjectPackManifest> {
+  try {
+    const manifest = await readPackManifest(dir);
+    return manifest.pack.id === id
+      ? { kind: 'ok', manifest }
+      : {
+          kind: 'invalid',
+          reason: 'wrong-id',
+          message: `${MANIFEST_FILE_NAME} belongs to pack "${manifest.pack.id}", not "${id}"`,
+        };
+  } catch (error) {
+    if (!(error instanceof ManifestError)) {
+      throw error;
+    }
+    return error.reason === 'missing'
+      ? { kind: 'missing' }
+      : { kind: 'invalid', reason: error.reason, message: error.message };
+  }
 }

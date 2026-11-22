@@ -1,4 +1,5 @@
 import {
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -610,6 +611,28 @@ describe('verifyPacks', () => {
     expect(problems(report)).toEqual([
       'demo recipe warn:  orphan pack: llm-docs.json has no pack "demo" (remove it with \'llm-docs sync --prune\')',
     ]);
+  });
+
+  it('verifies configured packs in config order, then orphan packs sorted', async () => {
+    const root = await makeProject({ zeta: PACK, mid: PACK, alpha: PACK }, DOCS);
+    await syncPacks(root, undefined);
+    await setPacks(root, { zeta: PACK, mid: PACK });
+    await cp(join(root, 'agent-docs', 'mid'), join(root, 'agent-docs', 'beta'), {
+      recursive: true,
+    });
+    await mkdir(join(root, 'agent-docs', 'not-a-pack'));
+
+    const report = await verifyPacks(root, undefined);
+    expect([...new Set(report.results.map((result) => result.packId))]).toEqual([
+      null,
+      'zeta',
+      'mid',
+      'alpha',
+      'beta',
+    ]);
+    expect(problems(report)).toContain(
+      'beta manifest-schema fail: manifest.json manifest.json belongs to pack "mid", not "beta"'
+    );
   });
 
   it("checks the lockfile against the project's own lockfiles", async () => {

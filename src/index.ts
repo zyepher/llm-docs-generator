@@ -47,7 +47,8 @@ export type {
   ResolvePackOptions,
   SourceConfig,
 } from './config/project.js';
-export { SyncLockedError, syncPacks } from './pack/build.js';
+export { syncPacks } from './pack/build.js';
+export { SyncLockedError } from './pack/lock.js';
 export type {
   AfterSyncContext,
   AfterSyncResult,
