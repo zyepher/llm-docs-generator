@@ -80,7 +80,7 @@ A CI runner has no plugin, so the workflow downloads the CLI from the GitHub Rel
 | Step | Command | Fails when |
 |---|---|---|
 | Packs match config and lockfiles | `llm-docs sync --check` | A pack or managed block would change. |
-| Packs are intact | `llm-docs verify` | Any check fails. Add `--strict` to also fail on link fragments and unknown licenses. |
+| Packs are intact | `llm-docs verify` | Any check fails. Add `--strict` to also check link fragments and fail on unknown licenses. |
 | Upstream still matches, on a schedule | `llm-docs refresh --check` | Upstream changed. It needs the network, so keep it out of the per-commit gate. |
 
 ## Verify checks
@@ -92,7 +92,7 @@ Each check reports `pass`, `fail`, or `warn`, one line per problem with the pack
 | `manifest-schema` | `manifest.json` is missing, unreadable, not a regular file, not schema 3, disagrees with its own recipe, or records a path that could leave the pack. | Run `llm-docs sync <id>`. For a v2 pack, run `llm-docs migrate <v2-pack-dir>` first. |
 | `outputs` | A file the manifest lists is missing or its hash differs. | Someone edited a tool-written file. Run `llm-docs sync <id>` to rebuild it. Put your own notes in `guides/` instead. |
 | `unlisted-files` | A file in the pack is not in the manifest, the pack holds a symbolic link, or part of the pack could not be examined. `guides/` and operating system files such as `.DS_Store` are reported as info only. | Move the file out of the pack, or into `guides/` if it is agent-written text. |
-| `links` | A link in a page, the index, or the combined file has a scheme other than `https`, `http`, or `mailto`, or a relative link does not resolve inside the pack. Under `--strict`, also a fragment with no matching heading. | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
+| `links` | A link in a page, the index, or the combined file has a scheme other than `https`, `http`, or `mailto`, or a relative link does not resolve inside the pack. Under `--strict`, also a fragment in the index or combined file with no matching heading. A page's fragment with no matching heading only warns: it is upstream text and its target page exists. | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
 | `recipe` | The recipe in `llm-docs.json` changed since the last sync. Warns when the config has no pack with this id (an orphan). | Run `llm-docs sync <id>`. For an orphan, run `llm-docs sync --prune` or add the pack back to the config. |
 | `lockfile` | The lockfile resolves the bound dependency to another version than the pack's, or no lockfile resolves it. When the lockfiles install it only from another registry, it fails unless the recipe sets `version`. | Run `llm-docs sync <id>`. If the recipe pins `version`, change it first, because an explicit version wins. For a dependency from another registry, set `version`. |
 | `citations` | A guide citation no longer resolves, or a cited section changed since stamping. Warns for an unstamped guide or one edited after stamping. | Re-review the guide with the `write-docs-guide` skill, then run `llm-docs guides stamp <id> <guide>`. |

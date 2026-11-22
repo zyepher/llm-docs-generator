@@ -28,7 +28,7 @@ import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { checkCitations } from './guides.js';
 import { MANIFEST_FILE_NAME, readProjectPacks, type PackManifest } from './manifest.js';
 import { LIVE_SCHEMES, linkScheme, liveSchemeList } from './links.js';
-import { findLinkTargets, headingAnchors } from './markdown.js';
+import { findLinkTargets, fragmentMatchesAnchor, headingAnchors } from './markdown.js';
 import { readRegularFile } from '../utils/safe-write.js';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'info' | 'skipped';
@@ -354,7 +354,8 @@ function decodePath(path: string): string {
 /**
  * Check every relative link in pages, the index, and combined files. Targets
  * with a scheme, protocol-relative URLs, and links in code are ignored;
- * fragments are checked against heading anchors only under `--strict`.
+ * fragments are checked against heading anchors only under `--strict`, where
+ * a page's unmatched fragment is a warning and any other one a failure.
  */
 async function checkLinks(context: PackCheckContext): Promise<CheckOutcome> {
   const findings: CheckFinding[] = [];
@@ -406,11 +407,25 @@ async function checkLinks(context: PackCheckContext): Promise<CheckOutcome> {
       const fail = (message: string): void => {
         findings.push({ status: 'fail', path: output.path, message: `${message}: ${target}` });
       };
+      // A page's links are upstream text the user cannot edit, and its site may
+      // anchor by another rule or on an element that is no heading; the index and
+      // combined file are written by the build, so a miss there is a defect.
+      const unmatchedFragment = (where: string): void => {
+        if (output.kind === 'page') {
+          findings.push({
+            status: 'warn',
+            path: output.path,
+            message: `fragment matches no heading ${where}; the anchor comes from the upstream text and the link target page exists, so the link still opens that page: ${target}`,
+          });
+        } else {
+          fail(`fragment matches no heading ${where}`);
+        }
+      };
 
       if (pathPart === '') {
         if (context.options.strict === true && fragment !== '') {
-          if (!(await anchorsOf(output.path)).has(fragment)) {
-            fail('fragment matches no heading on this page');
+          if (!fragmentMatchesAnchor(fragment, await anchorsOf(output.path))) {
+            unmatchedFragment('on this page');
           }
         }
         continue;
@@ -440,9 +455,9 @@ async function checkLinks(context: PackCheckContext): Promise<CheckOutcome> {
         fragment !== '' &&
         resolved.endsWith('.md') &&
         !resolved.startsWith('guides/') &&
-        !(await anchorsOf(resolved)).has(fragment)
+        !fragmentMatchesAnchor(fragment, await anchorsOf(resolved))
       ) {
-        fail('fragment matches no heading in the target page');
+        unmatchedFragment('in the target page');
       }
     }
   }

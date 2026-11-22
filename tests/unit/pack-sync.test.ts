@@ -920,7 +920,61 @@ describe('verifyPacks', () => {
       problems(await verifyPacks(root, ['demo'], { strict: true })).filter((line) =>
         line.includes('fragment')
       )
-    ).toEqual(['demo links fail: pages/index.md fragment matches no heading on this page: #nope']);
+    ).toEqual([
+      'demo links warn: pages/index.md fragment matches no heading on this page; the anchor comes from the upstream text and the link target page exists, so the link still opens that page: #nope',
+    ]);
+  });
+
+  it('under --strict, matches upstream anchors loosely and only warns for a page fragment that matches nothing', async () => {
+    const root = await makeProject(
+      {
+        demo: {
+          ...PACK,
+          sources: [{ type: 'local', path: 'docs', passthrough: ['schema.json'] }],
+        },
+      },
+      {
+        'docs/index.md': [
+          '# Home',
+          '',
+          '[ref](guide.md#$ref-resolution) [scheme](guide.md#https//) [same](#home)',
+          '[logs](guide.md#getting-logs-from-claude-desktop) [mine](#not-here)',
+          '[file](schema.json#defs)',
+          '',
+        ].join('\n'),
+        'docs/guide.md': [
+          '# Guide',
+          '',
+          '## `$ref` Resolution',
+          '',
+          '## https://',
+          '',
+          '> [accordion] Getting logs from Claude Desktop',
+          '',
+        ].join('\n'),
+        'docs/schema.json': '{}\n',
+      }
+    );
+    expect((await syncPacks(root, undefined)).packs[0]?.status).toBe('built');
+
+    const report = await verifyPacks(root, undefined, { strict: true });
+    expect(report.ok).toBe(true);
+    expect(problems(report)).toEqual([
+      'demo links warn: pages/index.md fragment matches no heading in the target page; the anchor comes from the upstream text and the link target page exists, so the link still opens that page: guide.md#getting-logs-from-claude-desktop',
+      'demo links warn: pages/index.md fragment matches no heading on this page; the anchor comes from the upstream text and the link target page exists, so the link still opens that page: #not-here',
+    ]);
+    expect(problems(await verifyPacks(root, undefined))).toEqual([]);
+
+    // The index is written by the build, so a fragment there that matches nothing fails.
+    const index = join(root, 'agent-docs', 'demo', 'index.md');
+    await writeFile(index, `${await readFile(index, 'utf-8')}\n[x](pages/guide.md#nope)\n`);
+    expect(
+      problems(await verifyPacks(root, undefined, { strict: true })).filter((line) =>
+        line.includes(' links fail')
+      )
+    ).toEqual([
+      'demo links fail: index.md fragment matches no heading in the target page: pages/guide.md#nope',
+    ]);
   });
 
   it('fails recipe when the config changes and warns for an orphan', async () => {

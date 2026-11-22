@@ -1236,6 +1236,26 @@ export function headingAnchors(text: string, options: MarkdownSyntaxOptions = {}
   return anchors;
 }
 
+/** Letters, digits, and marks of an anchor, lowercased: every punctuation and space dropped. */
+function looseAnchorKey(anchor: string): string {
+  return anchor.toLowerCase().replace(/[^\p{L}\p{N}\p{M}]/gu, '');
+}
+
+/**
+ * Whether `fragment` names one of `anchors` (from `headingAnchors`): exactly,
+ * or once both sides drop punctuation and case. Site generators keep other
+ * punctuation than GitHub's rule does (Mintlify writes `#$ref-resolution` for
+ * the heading `` `$ref` Resolution ``, which GitHub slugs `ref-resolution`),
+ * and upstream pages link with their site's anchors.
+ */
+export function fragmentMatchesAnchor(fragment: string, anchors: ReadonlySet<string>): boolean {
+  if (anchors.has(fragment)) {
+    return true;
+  }
+  const key = looseAnchorKey(fragment);
+  return key !== '' && [...anchors].some((anchor) => looseAnchorKey(anchor) === key);
+}
+
 // ---------------------------------------------------------------------------
 // Frontmatter
 // ---------------------------------------------------------------------------
