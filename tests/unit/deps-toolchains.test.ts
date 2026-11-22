@@ -371,6 +371,13 @@ describe('toolchain versions', () => {
     expect(minimumOf('*')).toBeUndefined();
   });
 
+  it('reads a pre-release tag as part of its version, not as a version of its own', () => {
+    expect(minimumOf('>=3.5.0-0 <4.0.0')).toBe('3.5');
+    expect(minimumOf('>=3.5.0-259.0.dev <4.0.0')).toBe('3.5');
+    expect(minimumOf('>=3.13.0rc1')).toBe('3.13');
+    expect(minimumOf('>=1.2.3.4')).toBe('1.2');
+  });
+
   it('finds the feature release a version belongs to', () => {
     expect(toolchainFeatureRelease('3.15')).toEqual({ major: 3, minor: 15 });
     expect(toolchainFeatureRelease('3.15.2')).toEqual({ major: 3, minor: 15 });

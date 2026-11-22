@@ -47,12 +47,17 @@ export function toolchainVersion(text: string): string | undefined {
   return match[2] === undefined ? match[1] : `${match[1]}.${match[2]}`;
 }
 
-/** The lowest version a constraint allows, ignoring its upper bounds and exclusions. */
+/**
+ * The lowest version a constraint allows, ignoring its upper bounds and
+ * exclusions. A number that continues a version (the `0` of `>=3.5.0-0`, the
+ * `1` of `>=3.13.0rc1`) is part of that version's pre-release tag, not a
+ * version of its own.
+ */
 export function minimumOf(constraint: string): string | undefined {
   let lowest: { major: number; minor: number; version: string } | undefined;
 
   for (const match of constraint.matchAll(
-    /(<=|>=|!=|==|~=|<|>|=|\^|~)?\s*v?(\d{1,4}(?:\.\d{1,4}){0,2})/g
+    /(?<![\w.+-])(<=|>=|!=|==|~=|<|>|=|\^|~)?\s*v?(\d{1,4}(?:\.\d{1,4}){0,2})/g
   )) {
     const operator = match[1];
     const version = match[2] === undefined ? undefined : toolchainVersion(match[2]);
