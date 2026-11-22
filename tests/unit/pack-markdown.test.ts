@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import type { TransformName } from '../../src/config/project.js';
@@ -598,5 +600,119 @@ describe('convertMarkdownPage', () => {
 
     expect(result.text).toContain('See [a](a.md).');
     expect(result.links.rewritten).toBe(1);
+  });
+});
+
+describe('convertMarkdownPage dialects', () => {
+  it('flattens a DocC article: layout, tabs, and media become Markdown, directives leave no trace', () => {
+    const source = readFileSync(
+      new URL('../fixtures/docc/SamplePack.docc/GettingStarted.md', import.meta.url),
+      'utf-8'
+    );
+    const result = body(source);
+
+    expect(convert(source).title).toBe('Getting Started');
+    expect(result).toContain('Welcome to the sample library.');
+    expect(result).toContain(
+      '> Important: Always pin an explicit version.\n> The pack records provenance for every file.'
+    );
+    expect(result).toContain(
+      '### Swift Package Manager\n\nAdd the dependency to `Package.swift`.\n\n```swift\n.package(url: "https://example.com/sample.git", from: "1.0.0")\n```'
+    );
+    expect(result).toContain("### CocoaPods\n\nAdd `pod 'Sample'` to your Podfile.");
+    expect(result).toContain(
+      'The left column explains requests.\n\nThe right column explains responses.'
+    );
+    expect(result).toContain('![Sample architecture diagram](hero.png)');
+    expect(result).toContain('[Video: Getting started tour](intro.mov)');
+    expect(result).toContain('`Sample/Snippets/hello#setup`');
+    expect(result).toContain('## 快速入门\n\n中文标题也需要稳定的标识符。');
+    expect(result).not.toContain('Internal note');
+    expect(result).not.toContain('PageColor');
+    expect(result).not.toMatch(
+      /@(?:Metadata|DisplayName|Comment|Row|Column|TabNavigator|Tab|Image|Video|Snippet)\b/
+    );
+  });
+
+  it('drops one-line @Metadata, @Options blocks, and a sourceless @Image with its body', () => {
+    const result = body(
+      [
+        '## Guide',
+        '',
+        '@Metadata { @PageColor(purple) }',
+        '',
+        '@Options(scope: local) {',
+        '  @AutomaticSeeAlso(disabled)',
+        '}',
+        '',
+        'Real prose with <doc:SignInWithOTP>.',
+        '',
+        '@Image(alt: "No source") {',
+        '  Accessibility text.',
+        '}',
+        '',
+        'After.',
+      ].join('\n')
+    );
+
+    expect(result).toContain('Real prose with SignInWithOTP.');
+    expect(result).toContain('After.');
+    expect(result).not.toMatch(/@\w|PageColor|AutomaticSeeAlso|Accessibility text|<doc:/);
+  });
+
+  it('removes MDX declarations with comments, import attributes, and TypeScript suffixes', () => {
+    const source = [
+      "import { Something } from './thing' // trailing comment",
+      "import data from './data.json' assert { type: 'json' } // trailing comment",
+      "import './side-effect.json' with { type: 'json' } /* trailing comment */",
+      "import data from './data.json' with {",
+      "  type: 'json',",
+      '}',
+      '',
+      'export const metadata = {',
+      "  title: 'Edge Declarations',",
+      '} satisfies Metadata',
+      '',
+      'export const config = {',
+      "  runtime: 'edge',",
+      '} as const',
+      '',
+      '# Edge Declarations',
+      '',
+      'import them, then run setup to finish.',
+      '',
+      "import Foo, { Bar } from './x';",
+      '',
+      'Body prose survives.',
+    ].join('\n');
+
+    expect(body(source, { syntax: 'mdx' })).toBe(
+      '# Edge Declarations\n\nimport them, then run setup to finish.\n\nBody prose survives.\n'
+    );
+  });
+
+  it('scans unterminated quotes and backslash runs in linear time', () => {
+    const source = [
+      '# Heading',
+      '',
+      `<Cmp value="${'\\'.repeat(80)}`,
+      '',
+      `export const escaped = "${'\\'.repeat(80)}`,
+      '',
+      `export const pairs = {${'"\\'.repeat(200_000)}`,
+    ].join('\n');
+    const start = performance.now();
+    convert(source, { syntax: 'mdx' });
+
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  it('removes frontmatter holding mappings and lists, and keeps a fenced plain scalar as text', () => {
+    expect(body('---\ntitle: Guide\ntags:\n  - alpha\n  - beta\n---\n\nBody prose.\n')).toBe(
+      '# Guide\n\nBody prose.\n'
+    );
+    expect(body('---\njust prose\n---\n\nContent after the rules.\n')).toBe(
+      '---\njust prose\n---\n\nContent after the rules.\n'
+    );
   });
 });

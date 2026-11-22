@@ -4,9 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { FormatDetector } from '../../src/core/detector.js';
 import { DocNodeType, type DocNode } from '../../src/core/models.js';
-import { FormatType } from '../../src/parsers/base.js';
 import { OpenApiFormatParser, parseOpenApiFile } from '../../src/parsers/openapi/index.js';
 
 const tempDirs: string[] = [];
@@ -237,9 +235,7 @@ describe('OpenAPI / Swagger parser', () => {
       'utf-8'
     );
 
-    const detector = new FormatDetector();
-
-    expect(await detector.detect(openApiPath)).toBe(FormatType.OPENAPI);
+    expect(await new OpenApiFormatParser().detect(openApiPath)).toBe(true);
     expect(await new OpenApiFormatParser().detect(otherYamlPath)).toBe(false);
 
     const root = await parseOpenApiFile(openApiPath);

@@ -3,9 +3,9 @@
  *
  * Holds the registered directive dialects in application order and applies only
  * those whose exact marker syntax is present in a given document. This is the
- * seam where future vendor dialects or parser plugins hook in; the generic
- * markdown parser calls {@link applyMarkdownDirectives} and never references any
- * individual dialect.
+ * seam where future vendor dialects hook in; the Markdown page pipeline
+ * (src/pack/markdown.ts) calls {@link applyMarkdownDirectives} and never
+ * references any individual dialect.
  */
 
 import type { MarkdownDirectiveExtension } from './types.js';

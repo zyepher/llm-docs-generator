@@ -1,6 +1,6 @@
 {
-  // Declarations only: tsup bundles the JavaScript, and TypeScript 7 (which
-  // ships no compiler API for tsup's dts step) emits the .d.ts files.
+  // Declarations only: tsdown bundles the JavaScript, and TypeScript 7 emits
+  // the .d.ts files (it ships no compiler API for a bundler's dts step).
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,

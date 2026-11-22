@@ -50,7 +50,7 @@
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",
-    "build": "tsup src/cli.ts src/index.ts --format esm --clean --minify --target node22 && tsc -p tsconfig.build.json",
+    "build": "tsdown src/cli.ts src/index.ts --no-config --format esm --clean --minify --target node22 --no-fixed-extension --no-dts --no-report --logLevel warn && tsc -p tsconfig.build.json",
     "build:plugin": "tsx scripts/build-plugin.ts",
     "check:plugin": "tsx scripts/check-plugin.ts",
     "test": "vitest run",
@@ -67,24 +67,23 @@
     "schema": "tsx scripts/generate-schemas.ts"
   },
   "dependencies": {
-    "commander": "^15.0.0",
+    "commander": "^15.1.0",
     "js-yaml": "^5.5.0",
     "jsonc-parser": "^3.3.1",
-    "marked": "^18.1.3",
     "picomatch": "^4.0.7",
     "smol-toml": "^1.9.1",
-    "undici": "^8.12.3",
+    "undici": "^8.13.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.5",
+    "@biomejs/biome": "2.6.8",
     "@types/node": "^22.20.5",
     "@types/picomatch": "^4.0.3",
-    "@vitest/coverage-v8": "^5.1.0",
-    "prettier": "^3.9.10",
-    "tsup": "^9.0.0",
+    "@vitest/coverage-v8": "^5.1.1",
+    "prettier": "^3.10.1",
+    "tsdown": "^0.23.7",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }

@@ -1,12 +1,31 @@
 {
-  "$comment": "Training data cutoffs per model, each read from the vendor page in source. For Claude models the cutoff is the reliable knowledge cutoff (the earlier of the two dates Anthropic publishes). Patterns match normalized model ids, first match wins. claudeCodeAliases maps Claude Code model aliases to the model each resolves to per provider; opusplan maps to its execution model.",
+  "$comment": "Training data cutoffs per model, each read from the vendor page in source. Where a vendor gives two dates for one model (Anthropic: reliable knowledge cutoff and training data cutoff; Google model cards: a general date and an earlier one some domains stop at), the entry uses the earlier one, so a library is never assumed known when the vendor says it may not be. Patterns match normalized model ids, first match wins, so a more specific pattern comes before a less specific one. claudeCodeAliases maps Claude Code model aliases to the model each resolves to per provider; opusplan maps to its execution model. Refresh steps and source pages: docs/design/v3-spec.md section 6.3.",
   "schemaVersion": 1,
+  "reviewed": "2026-11-22",
   "models": [
+    {
+      "pattern": "^claude[-_. ]?(?:fable[-_. ]?5[-_.]2(?![-_.]?\\d)|5[-_.]2[-_. ]?fable)",
+      "label": "Claude Fable 5.2",
+      "cutoff": "2026-06",
+      "source": "https://platform.claude.com/docs/en/models/fable-5-2/overview"
+    },
+    {
+      "pattern": "^claude[-_. ]?(?:mythos[-_. ]?5[-_.]2(?![-_.]?\\d)|5[-_.]2[-_. ]?mythos)",
+      "label": "Claude Mythos 5.2",
+      "cutoff": "2026-06",
+      "source": "https://platform.claude.com/docs/en/models/mythos-5-2/overview"
+    },
     {
       "pattern": "^claude[-_. ]?(?:fable[-_. ]?5[-_.]1(?![-_.]?\\d)|5[-_.]1[-_. ]?fable)",
       "label": "Claude Fable 5.1",
       "cutoff": "2026-06",
-      "source": "https://platform.claude.com/docs/en/models/overview"
+      "source": "https://platform.claude.com/docs/en/models/fable-5-1/overview"
+    },
+    {
+      "pattern": "^claude[-_. ]?(?:mythos[-_. ]?5[-_.]1(?![-_.]?\\d)|5[-_.]1[-_. ]?mythos)",
+      "label": "Claude Mythos 5.1",
+      "cutoff": "2026-06",
+      "source": "https://platform.claude.com/docs/en/models/mythos-5-1/overview"
     },
     {
       "pattern": "^claude[-_. ]?(?:opus[-_. ]?5[-_.]5(?![-_.]?\\d)|5[-_.]5[-_. ]?opus)",
@@ -31,6 +50,12 @@
       "label": "Claude Fable 5",
       "cutoff": "2026-01",
       "source": "https://platform.claude.com/docs/en/models/fable-5/overview"
+    },
+    {
+      "pattern": "^claude[-_. ]?(?:mythos[-_. ]?5(?:[-_.]0)?(?![-_.]?\\d)|5(?:[-_.]0)?[-_. ]?mythos)",
+      "label": "Claude Mythos 5",
+      "cutoff": "2026-01",
+      "source": "https://platform.claude.com/docs/en/models/mythos-5/overview"
     },
     {
       "pattern": "^claude[-_. ]?(?:opus[-_. ]?5(?:[-_.]0)?(?![-_.]?\\d)|5(?:[-_.]0)?[-_. ]?opus)",
@@ -105,6 +130,18 @@
       "source": "https://www.anthropic.com/transparency"
     },
     {
+      "pattern": "^gpt-6\\.2-astra(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-6.2 Astra",
+      "cutoff": "2026-05",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.2-astra"
+    },
+    {
+      "pattern": "^gpt-6\\.2-sol(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-6.2 Sol",
+      "cutoff": "2026-06",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.2-sol"
+    },
+    {
       "pattern": "^gpt-6\\.1-sol(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "GPT-6.1 Sol",
       "cutoff": "2026-04",
@@ -153,16 +190,40 @@
       "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
     },
     {
+      "pattern": "^gpt-5\\.6-cyber(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-5.6 Cyber",
+      "cutoff": "2026-02",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-cyber"
+    },
+    {
+      "pattern": "^gpt-5\\.5-pro(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-5.5 pro",
+      "cutoff": "2025-12",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.5-pro"
+    },
+    {
       "pattern": "^gpt-5\\.5(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "GPT-5.5",
       "cutoff": "2025-12",
       "source": "https://developers.openai.com/api/docs/models/gpt-5.5"
     },
     {
+      "pattern": "^gpt-5\\.4-pro(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-5.4 pro",
+      "cutoff": "2025-08",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-pro"
+    },
+    {
       "pattern": "^gpt-5\\.4-mini(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "GPT-5.4 mini",
       "cutoff": "2025-08",
       "source": "https://developers.openai.com/api/docs/models/gpt-5.4-mini"
+    },
+    {
+      "pattern": "^gpt-5\\.4-nano(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-5.4 nano",
+      "cutoff": "2025-08",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-nano"
     },
     {
       "pattern": "^gpt-5\\.4(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
@@ -177,6 +238,12 @@
       "source": "https://developers.openai.com/api/docs/models/gpt-5.3-codex"
     },
     {
+      "pattern": "^gpt-5\\.2-pro(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-5.2 pro",
+      "cutoff": "2025-08",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.2-pro"
+    },
+    {
       "pattern": "^gpt-5\\.2(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "GPT-5.2",
       "cutoff": "2025-08",
@@ -189,16 +256,40 @@
       "source": "https://developers.openai.com/api/docs/models/gpt-5.1"
     },
     {
+      "pattern": "^gpt-5-pro(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-5 pro",
+      "cutoff": "2024-09",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-pro"
+    },
+    {
       "pattern": "^gpt-5-mini(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "GPT-5 mini",
       "cutoff": "2024-05",
       "source": "https://developers.openai.com/api/docs/models/gpt-5-mini"
     },
     {
+      "pattern": "^gpt-5-nano(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-5 nano",
+      "cutoff": "2024-05",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-nano"
+    },
+    {
       "pattern": "^gpt-5(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "GPT-5",
       "cutoff": "2024-09",
       "source": "https://developers.openai.com/api/docs/models/gpt-5"
+    },
+    {
+      "pattern": "^gpt-oss-120b(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "gpt-oss-120b",
+      "cutoff": "2024-06",
+      "source": "https://developers.openai.com/api/docs/models/gpt-oss-120b"
+    },
+    {
+      "pattern": "^gpt-oss-20b(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "gpt-oss-20b",
+      "cutoff": "2024-06",
+      "source": "https://developers.openai.com/api/docs/models/gpt-oss-20b"
     },
     {
       "pattern": "^gpt-4\\.1-mini(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
@@ -213,6 +304,12 @@
       "source": "https://developers.openai.com/api/docs/models/gpt-4.1"
     },
     {
+      "pattern": "^gpt-4o-mini(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "GPT-4o mini",
+      "cutoff": "2023-10",
+      "source": "https://developers.openai.com/api/docs/models/gpt-4o-mini"
+    },
+    {
       "pattern": "^gpt-4o(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "GPT-4o",
       "cutoff": "2023-10",
@@ -225,10 +322,64 @@
       "source": "https://developers.openai.com/api/docs/models/o4-mini"
     },
     {
+      "pattern": "^o3-pro(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "o3-pro",
+      "cutoff": "2024-06",
+      "source": "https://developers.openai.com/api/docs/models/o3-pro"
+    },
+    {
       "pattern": "^o3(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
       "label": "o3",
       "cutoff": "2024-06",
       "source": "https://developers.openai.com/api/docs/models/o3"
+    },
+    {
+      "pattern": "^gemini-4-carbon(?:-\\d{3})?$",
+      "label": "Gemini 4 Carbon",
+      "cutoff": "2026-03",
+      "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-carbon"
+    },
+    {
+      "pattern": "^gemini-4-neon(?:-\\d{3})?$",
+      "label": "Gemini 4 Neon",
+      "cutoff": "2026-03",
+      "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-neon"
+    },
+    {
+      "pattern": "^gemini-4-hydrogen(?:-\\d{3})?$",
+      "label": "Gemini 4 Hydrogen",
+      "cutoff": "2026-03",
+      "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-hydrogen"
+    },
+    {
+      "pattern": "^gemini-4-argon(?:-\\d{3})?$",
+      "label": "Gemini 4 Argon",
+      "cutoff": "2026-03",
+      "source": "https://deepmind.google/models/model-cards/gemini-4-argon/"
+    },
+    {
+      "pattern": "^gemini-3\\.8-flash(?:-\\d{3})?$",
+      "label": "Gemini 3.8 Flash",
+      "cutoff": "2025-01",
+      "source": "https://deepmind.google/models/model-cards/gemini-3-8-flash/"
+    },
+    {
+      "pattern": "^gemini-3\\.7-flash(?:-\\d{3})?$",
+      "label": "Gemini 3.7 Flash",
+      "cutoff": "2025-01",
+      "source": "https://deepmind.google/models/model-cards/gemini-3-7-flash/"
+    },
+    {
+      "pattern": "^gemini-3\\.6-flash(?:-\\d{3})?$",
+      "label": "Gemini 3.6 Flash",
+      "cutoff": "2025-01",
+      "source": "https://deepmind.google/models/model-cards/gemini-3-6-flash/"
+    },
+    {
+      "pattern": "^gemini-3\\.5-flash-lite(?:-\\d{3})?$",
+      "label": "Gemini 3.5 Flash-Lite",
+      "cutoff": "2025-01",
+      "source": "https://deepmind.google/models/model-cards/gemini-3-5-flash-lite/"
     },
     {
       "pattern": "^gemini-2\\.5-pro(?:-\\d{3})?$",
@@ -253,6 +404,12 @@
       "label": "Gemini 2.0 Flash",
       "cutoff": "2024-08",
       "source": "https://aistudio.google.com/docs/models/gemini-2.0-flash"
+    },
+    {
+      "pattern": "^grok-4\\.7(?:[-_ ](?:none|minimal|low|medium|high|xhigh|max|fast|thinking))*$",
+      "label": "Grok 4.7",
+      "cutoff": "2026-05",
+      "source": "https://docs.x.ai/developers/grok-4-7"
     }
   ],
   "claudeCodeAliases": {
@@ -262,28 +419,51 @@
         "opus": "claude-opus-5-5",
         "sonnet": "claude-sonnet-5-5",
         "haiku": "claude-haiku-5-5",
-        "fable": "claude-fable-5-1",
-        "best": "claude-fable-5-1",
+        "fable": "claude-fable-5-2",
+        "best": "claude-opus-5-5",
+        "opusplan": "claude-sonnet-5-5"
+      },
+      "anthropic-aws": {
+        "opus": "claude-opus-5-5",
+        "sonnet": "claude-sonnet-4-6",
+        "haiku": "claude-haiku-4-5",
+        "fable": "claude-fable-5-2",
+        "best": "claude-opus-5-5",
+        "opusplan": "claude-sonnet-4-6"
+      },
+      "anthropic-google-cloud": {
+        "opus": "claude-opus-5-5",
+        "sonnet": "claude-sonnet-5-5",
+        "haiku": "claude-haiku-4-5",
+        "fable": "claude-fable-5-2",
+        "best": "claude-opus-5-5",
         "opusplan": "claude-sonnet-5-5"
       },
       "bedrock": {
         "opus": "claude-opus-5-5",
         "sonnet": "claude-sonnet-4-5",
         "haiku": "claude-haiku-4-5",
+        "fable": "claude-fable-5-2",
+        "best": "claude-opus-5-5",
         "opusplan": "claude-sonnet-4-5"
       },
       "vertex": {
         "opus": "claude-opus-5-5",
         "sonnet": "claude-sonnet-4-5",
         "haiku": "claude-haiku-4-5",
+        "fable": "claude-fable-5-2",
+        "best": "claude-opus-5-5",
         "opusplan": "claude-sonnet-4-5"
       },
       "foundry": {
         "opus": "claude-opus-4-6",
         "sonnet": "claude-sonnet-4-5",
         "haiku": "claude-haiku-4-5",
+        "fable": "claude-fable-5-2",
+        "best": "claude-opus-4-6",
         "opusplan": "claude-sonnet-4-5"
-      }
+      },
+      "mantle": {}
     }
   }
 }

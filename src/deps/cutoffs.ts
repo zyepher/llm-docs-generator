@@ -42,6 +42,7 @@ const ALIAS_PIN_ENV: Readonly<Record<string, string>> = {
   sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
   haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   fable: 'ANTHROPIC_DEFAULT_FABLE_MODEL',
+  best: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
   opusplan: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
 };
 
@@ -75,20 +76,24 @@ export function normalizeModelId(modelId: string): string {
   return id;
 }
 
+/**
+ * The variables that switch Claude Code to another provider, in the order it
+ * applies them: Bedrock and Foundry win over Claude Platform on AWS, and all
+ * three over Google Cloud (Anthropic managed), which wins over Agent Platform
+ * (Vertex). Mantle is a Bedrock endpoint whose alias defaults are not
+ * published, so its aliases stay unresolved.
+ */
+const PROVIDER_SWITCHES: ReadonlyArray<readonly [string, ClaudeCodeProvider]> = [
+  ['CLAUDE_CODE_USE_BEDROCK', 'bedrock'],
+  ['CLAUDE_CODE_USE_MANTLE', 'mantle'],
+  ['CLAUDE_CODE_USE_FOUNDRY', 'foundry'],
+  ['CLAUDE_CODE_USE_ANTHROPIC_AWS', 'anthropic-aws'],
+  ['CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'anthropic-google-cloud'],
+  ['CLAUDE_CODE_USE_VERTEX', 'vertex'],
+];
+
 function claudeCodeProvider(env: NodeJS.ProcessEnv): ClaudeCodeProvider {
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_BEDROCK)) {
-    return 'bedrock';
-  }
-
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_VERTEX)) {
-    return 'vertex';
-  }
-
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_FOUNDRY)) {
-    return 'foundry';
-  }
-
-  return 'anthropic';
+  return PROVIDER_SWITCHES.find(([name]) => isTruthyEnv(env[name]))?.[1] ?? 'anthropic';
 }
 
 function isTruthyEnv(value: string | undefined): boolean {
