@@ -463,6 +463,29 @@ describe('inspectWebsite', () => {
     expect(evidence?.morePathPrefixes).toBe(2);
   });
 
+  it('counts a URL that ends in a slash under its own directory', async () => {
+    const { baseUrl } = await startTestServer((request, response) => {
+      const origin = `http://${request.headers.host ?? ''}`;
+      if (request.url === '/llms.txt') {
+        writeHttpResponse(
+          response,
+          200,
+          'text/plain',
+          [
+            `- [Home](${origin}/docs/2026-07-28/)`,
+            `- [Intro](${origin}/docs/2026-07-28/intro)`,
+          ].join('\n')
+        );
+        return;
+      }
+      writeHttpResponse(response, 404, 'text/plain', 'not found');
+    });
+
+    allowPrivateNetwork();
+    const evidence = (await inspectWebsite({ url: `${baseUrl}/` })).llmsTxt;
+    expect(evidence?.pathPrefixes).toEqual([{ prefix: '/docs/2026-07-28', urls: 2 }]);
+  });
+
   it('reports no llms.txt evidence when the site serves none', async () => {
     const { baseUrl } = await startTestServer((_request, response) => {
       writeHttpResponse(response, 404, 'text/plain', 'not found');

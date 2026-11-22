@@ -374,10 +374,8 @@ function pathPrefixes(
     if (url.origin !== origin) {
       return [];
     }
-    const directories = url.pathname
-      .split('/')
-      .filter((segment) => segment !== '')
-      .slice(0, -1);
+    const segments = url.pathname.split('/').filter((segment) => segment !== '');
+    const directories = url.pathname.endsWith('/') ? segments : segments.slice(0, -1);
     return [{ directories, version: directories.findIndex((s) => VERSION_SEGMENT.test(s)) }];
   });
   // Unversioned URLs under a directory whose other URLs are versioned are cut at the same
