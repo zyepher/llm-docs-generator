@@ -12,11 +12,20 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { PACK_LIMITS, type ResolvedSourceOfType } from '../../src/config/project.js';
+import { ConfigError, PACK_LIMITS, type ResolvedSourceOfType } from '../../src/config/project.js';
 import type { AcquireContext } from '../../src/sources/acquire.js';
-import { acquireGit, GitError } from '../../src/sources/git.js';
+import { acquireGit, createGitRunner, GitError } from '../../src/sources/git.js';
+import { ALLOW_PRIVATE_NETWORK_ENV } from '../../src/sources/http.js';
+import {
+  createTestCertificate,
+  gitHttpBackend,
+  startHttpsServer,
+  trustCertificate,
+  type TestCertificate,
+  type TestHttpsServer,
+} from '../helpers/https-git-server.js';
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
@@ -314,6 +323,171 @@ describe('acquireGit', () => {
     } finally {
       process.env.PATH = previous;
     }
+  });
+});
+
+describe('git over https', () => {
+  let certificate: TestCertificate;
+  let certificateDir = '';
+  let untrust = (): void => {};
+  const servers: TestHttpsServer[] = [];
+  const saved = {
+    caInfo: process.env.GIT_SSL_CAINFO,
+    allowPrivate: process.env[ALLOW_PRIVATE_NETWORK_ENV],
+  };
+
+  beforeAll(async () => {
+    certificateDir = await mkdtemp(join(await realpath(tmpdir()), 'llm-docs-cert-'));
+    certificate = await createTestCertificate(certificateDir);
+    untrust = trustCertificate(certificate);
+    // The runner keeps GIT_SSL_CAINFO: the TLS trust a corporate network needs.
+    process.env.GIT_SSL_CAINFO = certificate.certPath;
+    process.env[ALLOW_PRIVATE_NETWORK_ENV] = '1';
+  });
+
+  afterAll(async () => {
+    untrust();
+    restoreEnv('GIT_SSL_CAINFO', saved.caInfo);
+    restoreEnv(ALLOW_PRIVATE_NETWORK_ENV, saved.allowPrivate);
+    await rm(certificateDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((server) => server.close()));
+  });
+
+  /**
+   * A git host serving `repo` as /new/widget.git, redirecting /old/ to it
+   * (a renamed repository), /elsewhere/ to `elsewhere`, and /nonrepo/ to a
+   * page that is not a repository.
+   */
+  async function gitHost(repo: Fixture, elsewhere = ''): Promise<TestHttpsServer> {
+    const root = await temp('llm-docs-served-');
+    await git(root, 'clone', '--quiet', '--bare', repo.dir, join(root, 'new', 'widget.git'));
+    const backend = await gitHttpBackend(root);
+    const server = await startHttpsServer(certificate, (request, response) => {
+      const path = request.url ?? '/';
+      const redirect = path.startsWith('/old/')
+        ? path.replace('/old/', '/new/')
+        : path.startsWith('/elsewhere/')
+          ? elsewhere
+          : path.startsWith('/nonrepo/')
+            ? '/login'
+            : undefined;
+      if (redirect === undefined) {
+        backend(request, response);
+        return;
+      }
+      response.writeHead(302, { location: redirect });
+      response.end();
+    });
+    servers.push(server);
+    return server;
+  }
+
+  it('never lets git follow a redirect to a host nobody vetted', async () => {
+    const internal = await startHttpsServer(certificate, (_request, response) => {
+      response.writeHead(404);
+      response.end();
+    });
+    servers.push(internal);
+    const host = await gitHost(
+      await makeRepo(),
+      `${internal.origin.replace('127.0.0.1', 'localhost')}/internal-admin/x/info/refs?service=git-upload-pack`
+    );
+    const repo = new URL(`${host.origin}/elsewhere/widget.git`);
+    const runner = await createGitRunner(await temp('llm-docs-work-'), repo);
+
+    await expect(runner(['ls-remote', repo.href])).rejects.toBeInstanceOf(GitError);
+    expect(host.requests).toEqual(['GET /elsewhere/widget.git/info/refs?service=git-upload-pack']);
+    expect(internal.requests).toEqual([]);
+  });
+
+  it('follows a renamed repository through the vetted client and records both URLs', async () => {
+    const repo = await makeRepo();
+    const host = await gitHost(repo);
+    const requested = `${host.origin}/old/widget.git`;
+
+    const result = await acquireGit(gitSource(requested, 'v1'), await context());
+
+    expect(result.origin).toEqual({
+      type: 'git',
+      repo: requested,
+      finalRepo: `${host.origin}/new/widget.git`,
+      ref: 'v1',
+      commit: repo.v1,
+      refKind: 'tag',
+    });
+    expect(result.files.map((file) => file.path).sort()).toEqual(['guide/start.md', 'index.md']);
+    expect(result.warnings).toContain(
+      `git repo ${requested} redirects to ${host.origin}/new/widget.git, so this build fetched from there; put that URL in "repo" to skip the redirect.`
+    );
+    // Only the client's discovery request went to the old path; git itself never did.
+    expect(host.requests.filter((request) => request.includes('/old/'))).toEqual([
+      'GET /old/widget.git/info/refs?service=git-upload-pack',
+    ]);
+  });
+
+  it('refuses a redirect that does not lead to a repository', async () => {
+    const host = await gitHost(await makeRepo());
+    const error = await acquireGit(
+      gitSource(`${host.origin}/nonrepo/widget.git`, 'v1'),
+      await context()
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ConfigError);
+    expect(String(error)).toContain(
+      `redirects to ${host.origin}/login, which is not a git repository URL`
+    );
+  });
+
+  it('ignores the config of a repository that encloses its work directory', async () => {
+    const host = await gitHost(await makeRepo());
+    const enclosing = await temp('llm-docs-enclosing-');
+    await git(enclosing, 'init', '--quiet');
+    await git(
+      enclosing,
+      'config',
+      `url.${host.origin}/new/widget.git.insteadOf`,
+      'https://steered.invalid/widget.git'
+    );
+    const work = join(enclosing, 'work');
+    await mkdir(work);
+    const runner = await createGitRunner(work, new URL('https://steered.invalid/widget.git'));
+
+    // Control: plain git in that directory follows the enclosing repository's rewrite.
+    expect(await git(work, 'ls-remote', 'https://steered.invalid/widget.git')).toContain(
+      'refs/tags/v1'
+    );
+    await expect(runner(['ls-remote', 'https://steered.invalid/widget.git'])).rejects.toThrow(
+      /steered\.invalid/
+    );
+  });
+});
+
+describe('fetched object checks', () => {
+  it('refuses a repository whose commit is malformed', async () => {
+    const repo = await makeRepo();
+    const tree = await git(repo.dir, 'rev-parse', 'v1^{tree}');
+    const malformed = join(await temp('llm-docs-malformed-'), 'commit');
+    await writeFile(
+      malformed,
+      `tree ${tree}\nauthor Test <test@example.com> 1700000000 +99999\ncommitter Test <test@example.com> 1700000000 +0000\n\nbad timezone\n`
+    );
+    const commit = await git(
+      repo.dir,
+      'hash-object',
+      '-t',
+      'commit',
+      '--literally',
+      '-w',
+      malformed
+    );
+    await git(repo.dir, 'tag', 'malformed', commit);
+
+    await expect(acquireGit(gitSource(repo.url, 'malformed'), await context())).rejects.toThrow(
+      /badTimezone/
+    );
   });
 });
 

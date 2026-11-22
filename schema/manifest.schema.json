@@ -721,6 +721,9 @@
               "repo": {
                 "type": "string"
               },
+              "finalRepo": {
+                "type": "string"
+              },
               "ref": {
                 "type": "string"
               },

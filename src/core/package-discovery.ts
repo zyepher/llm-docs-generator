@@ -18,7 +18,7 @@ import {
   type RegistryEndpoints,
 } from '../deps/registries.js';
 import {
-  assertRepositoryAllowed,
+  resolveRepository,
   createGitRunner,
   fetchCommit,
   GitError,
@@ -166,9 +166,16 @@ export function parsePackageSpec(value: string): PackageSpec {
         `--package swiftpm:<repository url> needs an https:// or file:// URL; got "${redactUrl(name)}".`
       );
     }
-    if ((url.protocol !== 'https:' && url.protocol !== 'file:') || url.username !== '') {
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'file:') ||
+      url.username !== '' ||
+      url.password !== '' ||
+      url.search !== '' ||
+      url.hash !== ''
+    ) {
+      // The name is echoed in the output, so a credential anywhere in it is refused here.
       throw new ConfigError(
-        `--package swiftpm:<repository url> needs an https:// or file:// URL without credentials; got "${redactUrl(name)}".`
+        `--package swiftpm:<repository url> needs an https:// or file:// URL without credentials, a query, or a fragment; got "${redactUrl(name)}".`
       );
     }
     return { ecosystem, name, version };
@@ -582,33 +589,46 @@ export async function discoverPackage(
       : normalizeRepositoryUrl(declared.url);
 
   if ('refused' in normalized) {
-    result.repository = { status: 'refused', declared: declared.url, reason: normalized.refused };
+    result.repository = {
+      status: 'refused',
+      declared: redactUrl(declared.url),
+      reason: normalized.refused,
+    };
     return result;
   }
 
-  const repoUrl = new URL(normalized.url);
+  const requestedUrl = new URL(normalized.url);
+  let repoUrl: URL;
   try {
-    await assertRepositoryAllowed(repoUrl);
+    repoUrl = await resolveRepository(requestedUrl);
   } catch (error) {
     if (error instanceof ConfigError) {
       result.repository = {
         status: 'refused',
-        declared: declared.url,
+        declared: redactUrl(declared.url),
         reason: errorMessage(error),
       };
       return result;
     }
-    result.repository = { status: 'ok', url: normalized.url, directory: null };
+    result.repository = { status: 'ok', url: redactUrl(normalized.url), directory: null };
     result.tags = { status: 'unreachable', error: errorMessage(error) };
-    result.docDirectories = skipped(`${normalized.url} could not be reached; see tags.error.`);
+    result.docDirectories = skipped(
+      `${redactUrl(normalized.url)} could not be reached; see tags.error.`
+    );
     return result;
   }
 
+  const url = repoUrl.href === requestedUrl.href ? normalized.url : repoUrl.href;
+  if (url !== normalized.url) {
+    warnings.push(
+      `Repository ${redactUrl(normalized.url)} redirects to ${redactUrl(url)}, so the tags and directories here were read there; pass that URL to 'llm-docs add --git'.`
+    );
+  }
   const directory = declared.directory ?? normalized.directory;
-  result.repository = { status: 'ok', url: normalized.url, directory };
+  result.repository = { status: 'ok', url, directory };
   const tagName =
     spec.ecosystem === 'swiftpm'
-      ? posix.basename(repoUrl.pathname).replace(/\.git$/i, '')
+      ? posix.basename(requestedUrl.pathname).replace(/\.git$/i, '')
       : spec.name;
   const workDir = await mkdtemp(join(tmpdir(), 'llm-docs-discover-'));
 
@@ -617,13 +637,13 @@ export async function discoverPackage(
     let tags: Map<string, string>;
 
     try {
-      tags = parseRemoteTags(await git(['ls-remote', '--tags', normalized.url]));
+      tags = parseRemoteTags(await git(['ls-remote', '--tags', url]));
     } catch (error) {
       if (!(error instanceof GitError)) {
         throw error;
       }
       result.tags = { status: 'unreachable', error: errorMessage(error) };
-      result.docDirectories = skipped(`${normalized.url} could not be reached; see tags.error.`);
+      result.docDirectories = skipped(`${url} could not be reached; see tags.error.`);
       return result;
     }
 
@@ -647,7 +667,7 @@ export async function discoverPackage(
     }
 
     const checkout = join(workDir, 'repository');
-    const fetched = await fetchTagCommits(git, checkout, normalized.url, [
+    const fetched = await fetchTagCommits(git, checkout, url, [
       first,
       ...matches.slice(1, DATED_TAG_LIMIT),
     ]);
@@ -678,7 +698,7 @@ export async function discoverPackage(
     const listed = first.form === 'suffix' ? undefined : first;
     if (listed === undefined) {
       result.docDirectories = skipped(
-        `Only tags that end in ${version} matched (${matches.map((match) => match.tag).join(', ')}); none has an exact form, so none was listed. Pass the one you mean to 'llm-docs add --git ${normalized.url} --ref <tag>'.`
+        `Only tags that end in ${version} matched (${matches.map((match) => match.tag).join(', ')}); none has an exact form, so none was listed. Pass the one you mean to 'llm-docs add --git ${url} --ref <tag>'.`
       );
     } else {
       if (matches.length > 1) {

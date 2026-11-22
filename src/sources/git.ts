@@ -5,13 +5,14 @@
  * report the files with their pinned upstream URLs.
  *
  * Git runs hardened: `execFile` (never a shell), no terminal prompts, no
- * system or user config, no hooks, no symlinks, no submodules, and a
- * protocol allowlist (https, plus file for file:// repositories).
+ * system, user, or enclosing-repository config, no credential helpers, no
+ * hooks, no symlinks, no submodules, no redirects, object checks on fetch,
+ * and a protocol allowlist (https, plus file for file:// repositories).
  */
 
 import { execFile } from 'node:child_process';
 import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
-import { join, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 
 import { ConfigError, type ResolvedSourceOfType } from '../config/project.js';
 import { detectLicense, isLicenseFileName, type LicenseFile } from '../pack/license.js';
@@ -25,7 +26,7 @@ import {
   type AcquiredFile,
   type SourceAcquisition,
 } from './acquire.js';
-import { ALLOW_PRIVATE_NETWORK_ENV, redactUrl, resolveAllowedAddress } from './http.js';
+import { createHttpClient, redactUrl } from './http.js';
 
 const GIT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 const GIT_MAX_BUFFER = 256 * 1024 * 1024;
@@ -62,6 +63,9 @@ export async function createGitRunner(workDir: string, repo: URL): Promise<GitRu
   }
   delete env.SSH_ASKPASS;
   Object.assign(env, {
+    // Commands run outside the checkout must not find a repository enclosing the work
+    // directory: its config (url.*.insteadOf, credential.helper) would steer this run.
+    GIT_CEILING_DIRECTORIES: dirname(workDir),
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: emptyConfig,
@@ -77,6 +81,13 @@ export async function createGitRunner(workDir: string, repo: URL): Promise<GitRu
     'protocol.allow=never',
     'protocol.https.allow=always',
     ...(repo.protocol === 'file:' ? ['protocol.file.allow=always'] : []),
+    // A redirect could lead git to a host the network policy never saw; resolveRepository
+    // follows them through the HTTP client instead. This also stops http-alternates.
+    'http.followRedirects=false',
+    // An empty value clears every helper, so a 401 from a remote never reaches stored credentials.
+    'credential.helper=',
+    // Hostile repositories are in the threat model: malformed objects are refused on arrival.
+    'transfer.fsckObjects=true',
     'submodule.recurse=false',
     'fetch.recurseSubmodules=false',
     'advice.detachedHead=false',
@@ -305,19 +316,47 @@ function sample(paths: readonly string[]): string {
   return `${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', ...' : ''}`;
 }
 
+const DISCOVERY_SUFFIX = '/info/refs?service=git-upload-pack';
+
 /**
- * Refuse a repository URL that is neither https:// nor file://, and vet an
- * https host against the network policy: git resolves the host itself, so
- * without this a URL could reach a private network.
+ * The URL git should use for a repository. Anything but https:// and file://
+ * is refused. git never follows a redirect (`http.followRedirects=false`), so
+ * for https this sends git's own first request through the HTTP client, which
+ * vets every hop (scheme, address, credentials) and connects only to vetted
+ * addresses; a redirect that ends at another repository URL is returned for
+ * git to use. Real hosts redirect: GitLab sends a URL without `.git` to the
+ * one with it. git still resolves the final host on its own, unpinned.
  */
-export async function assertRepositoryAllowed(repoUrl: URL): Promise<void> {
-  if (repoUrl.protocol === 'https:') {
-    await resolveAllowedAddress(repoUrl, process.env[ALLOW_PRIVATE_NETWORK_ENV] === '1');
-  } else if (repoUrl.protocol !== 'file:') {
+export async function resolveRepository(repoUrl: URL): Promise<URL> {
+  if (repoUrl.protocol === 'file:') {
+    return repoUrl;
+  }
+  if (repoUrl.protocol !== 'https:') {
     throw new ConfigError(
       `git repo "${redactUrl(repoUrl)}" must be an https:// or file:// URL; ssh and git@ remotes are not supported, so use the repository's https:// URL.`
     );
   }
+  if (repoUrl.search !== '' || repoUrl.hash !== '') {
+    throw new ConfigError(
+      `git repo "${redactUrl(repoUrl)}" has a query or fragment, which no repository URL has; use the URL you would pass to git clone.`
+    );
+  }
+
+  const discovery = `${repoUrl.href.replace(/\/+$/, '')}${DISCOVERY_SUFFIX}`;
+  const client = createHttpClient();
+  const response = await client
+    .get(discovery, { maxBytes: 0, truncate: true, acceptErrorStatus: true })
+    .finally(() => client.close());
+
+  if (response.finalUrl === discovery) {
+    return repoUrl;
+  }
+  if (!response.finalUrl.endsWith(DISCOVERY_SUFFIX)) {
+    throw new ConfigError(
+      `git repo ${redactUrl(repoUrl)} redirects to ${redactUrl(response.finalUrl)}, which is not a git repository URL; put the repository's own https:// URL in "repo".`
+    );
+  }
+  return new URL(response.finalUrl.slice(0, -DISCOVERY_SUFFIX.length));
 }
 
 /**
@@ -365,13 +404,17 @@ export async function acquireGit(
   source: ResolvedSourceOfType<'git'>,
   context: AcquireContext
 ): Promise<SourceAcquisition> {
-  const repoUrl = new URL(source.repo);
   const warnings: string[] = [];
-
-  await assertRepositoryAllowed(repoUrl);
+  const repoUrl = await resolveRepository(new URL(source.repo));
+  const repo = repoUrl.href === new URL(source.repo).href ? source.repo : repoUrl.href;
+  if (repo !== source.repo) {
+    warnings.push(
+      `git repo ${redactUrl(source.repo)} redirects to ${redactUrl(repo)}, so this build fetched from there; put that URL in "repo" to skip the redirect.`
+    );
+  }
   if (repoUrl.protocol === 'file:') {
     warnings.push(
-      `git source ${source.repo} is a file:// repository: a non-portable origin that only this machine can refresh; use its https:// URL so others can rebuild the pack.`
+      `git source ${redactUrl(source.repo)} is a file:// repository: a non-portable origin that only this machine can refresh; use its https:// URL so others can rebuild the pack.`
     );
   }
 
@@ -379,8 +422,8 @@ export async function acquireGit(
   const paths = normalizeTakenPaths(source.paths);
   const git = await createGitRunner(context.workDir, repoUrl);
   const checkout = join(context.workDir, 'checkout');
-  const resolved = await resolveRef(git, source.repo, source.ref);
-  const commit = await fetchCommit(git, checkout, source.repo, [resolved.refspec]);
+  const resolved = await resolveRef(git, repo, source.ref);
+  const commit = await fetchCommit(git, checkout, repo, [resolved.refspec]);
 
   const sparse = !paths.includes('.');
   if (sparse) {
@@ -499,7 +542,14 @@ export async function acquireGit(
   warnings.push(...license.warnings);
 
   return {
-    origin: { type: 'git', repo: source.repo, ref: source.ref, commit, refKind: resolved.kind },
+    origin: {
+      type: 'git',
+      repo: source.repo,
+      ...(repo === source.repo ? {} : { finalRepo: repo }),
+      ref: source.ref,
+      commit,
+      refKind: resolved.kind,
+    },
     files,
     warnings,
     license: license.detected,

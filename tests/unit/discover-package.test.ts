@@ -11,10 +11,10 @@ import type { AddressInfo } from 'node:net';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ConfigError } from '../../src/config/project.js';
 import {
@@ -40,6 +40,13 @@ import {
   createHttpClient,
   HttpRequestError,
 } from '../../src/sources/http.js';
+import {
+  createTestCertificate,
+  gitHttpBackend,
+  startHttpsServer,
+  trustCertificate,
+  type TestCertificate,
+} from '../helpers/https-git-server.js';
 
 const execFileAsync = promisify(execFile);
 const cleanups: (() => Promise<void>)[] = [];
@@ -256,9 +263,24 @@ describe('normalizeRepositoryUrl', () => {
     ['svn://svn.example.org/widget', /uses svn:/],
     ['not a url', /is not a URL/],
     ['https://github.com/acme', /does not name a repository on github\.com/],
+    ['git+file:///etc/repo', /uses file:/],
+    ['ext::sh -c touch% /tmp/pwned', /uses ext:/],
+    ['--upload-pack=touch /tmp/pwned', /is not a URL/],
+    ['-oProxyCommand=touch /tmp/pwned', /is not a URL/],
   ])('refuses %s', (declared, message) => {
     const result = normalizeRepositoryUrl(declared);
     expect('refused' in result && result.refused).toMatch(message);
+  });
+
+  it('drops credentials a registry declares in the repository URL', () => {
+    expect(normalizeRepositoryUrl('git+https://user:s3cr3t@github.com/acme/widget.git')).toEqual({
+      url: 'https://github.com/acme/widget',
+      directory: null,
+    });
+    expect(normalizeRepositoryUrl('https://:s3cr3t@gitlab.example.com/acme/widget')).toEqual({
+      url: 'https://gitlab.example.com/acme/widget',
+      directory: null,
+    });
   });
 });
 
@@ -842,6 +864,101 @@ describe('discoverPackage', () => {
     expect(discovery.tags.status).toBe('skipped');
   });
 
+  it.each([
+    'https://10.0.0.1/acme/widget.git',
+    'https://169.254.169.254/latest/meta-data',
+    'https://[::ffff:0:7f00:1]/acme/widget.git',
+  ])('refuses the private repository %s without connecting', async (repository) => {
+    vi.stubEnv(ALLOW_PRIVATE_NETWORK_ENV, '');
+    const discovery = await discoverPackage(parsePackageSpec(`swiftpm:${repository}@1.0.0`));
+
+    expect(discovery.repository).toEqual({
+      status: 'refused',
+      declared: repository,
+      reason: expect.stringMatching(/set LLM_DOCS_ALLOW_PRIVATE_NETWORK=1 to allow private/),
+    });
+    expect(discovery.tags.status).toBe('skipped');
+  });
+
+  it('refuses a repository URL carrying credentials and never prints them', async () => {
+    for (const repository of [
+      'https://:s3cr3t@github.com/acme/widget.git',
+      'https://github.com/acme/widget.git?private_token=s3cr3t',
+    ]) {
+      // Refused when the spec is parsed, before anything echoes the name.
+      const outcome = await (async () =>
+        discoverPackage(parsePackageSpec(`swiftpm:${repository}@1.0.0`)))().catch(
+        (error: unknown) => String(error)
+      );
+      const shown = typeof outcome === 'string' ? outcome : JSON.stringify(outcome);
+      expect(shown).not.toContain('s3cr3t');
+      expect(shown).toMatch(/without credentials, a query, or a fragment/);
+    }
+  });
+
+  describe('over https', () => {
+    let certificate: TestCertificate;
+    let certificateDir = '';
+    let untrust = (): void => {};
+
+    beforeAll(async () => {
+      certificateDir = await mkdtemp(join(await realpath(tmpdir()), 'llm-docs-cert-'));
+      certificate = await createTestCertificate(certificateDir);
+      untrust = trustCertificate(certificate);
+    });
+
+    afterAll(async () => {
+      untrust();
+      await rm(certificateDir, { recursive: true, force: true });
+    });
+
+    it('follows a registry repository that redirects only through the vetted client', async () => {
+      vi.stubEnv('GIT_SSL_CAINFO', certificate.certPath);
+      const upstream = await makeUpstream();
+      const root = await temp('llm-docs-served-');
+      await git(
+        root,
+        'clone',
+        '--quiet',
+        '--bare',
+        fileURLToPath(upstream.url),
+        join(root, 'new', 'widget.git')
+      );
+      const backend = await gitHttpBackend(root);
+      const host = await startHttpsServer(certificate, (request, response) => {
+        const path = request.url ?? '/';
+        if (path.startsWith('/old/')) {
+          response.writeHead(301, { location: path.replace('/old/', '/new/') });
+          response.end();
+          return;
+        }
+        backend(request, response);
+      });
+      cleanups.push(() => host.close());
+      const { endpoints } = await startRegistry({
+        '/npm/widget/latest': json({
+          version: '1.0.0',
+          repository: `git+${host.origin}/old/widget.git`,
+        }),
+      });
+
+      const discovery = await discoverPackage(parsePackageSpec('npm:widget'), { endpoints });
+
+      expect(discovery.repository).toEqual({
+        status: 'ok',
+        url: `${host.origin}/new/widget`,
+        directory: null,
+      });
+      expect(discovery.tags).toMatchObject({ status: 'matched', tagCount: 3 });
+      expect(discovery.warnings).toContain(
+        `Repository ${host.origin}/old/widget redirects to ${host.origin}/new/widget, so the tags and directories here were read there; pass that URL to 'llm-docs add --git'.`
+      );
+      expect(host.requests.filter((request) => request.includes('/old/'))).toEqual([
+        'GET /old/widget/info/refs?service=git-upload-pack',
+      ]);
+    });
+  });
+
   it('records an unreachable repository and a version with no tag', async () => {
     const upstream = await makeUpstream();
     const { endpoints } = await startRegistry({
@@ -856,7 +973,9 @@ describe('discoverPackage', () => {
     });
     expect(gone.tags).toEqual({
       status: 'unreachable',
-      error: expect.stringMatching(/^git ls-remote failed for https:\/\/127\.0\.0\.1:9\/gone/),
+      error: expect.stringMatching(
+        /^GET https:\/\/127\.0\.0\.1:9\/gone\/info\/refs\?service=git-upload-pack failed/
+      ),
     });
     expect(gone.docDirectories).toEqual({
       status: 'skipped',

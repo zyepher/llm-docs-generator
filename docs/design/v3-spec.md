@@ -250,7 +250,7 @@ no lock.
   "acquiredAt": "2026-11-05T10:00:00.000Z",
   "origins": [                          // one per source, same order as recipe.sources
     { "type": "git", "repo": "https://github.com/vitejs/vite", "ref": "v8.2.0",
-      "commit": "<40 hex>", "refKind": "tag" },
+      "commit": "<40 hex>", "refKind": "tag" },   // + "finalRepo" after a redirect
     { "type": "llms-txt", "url": "https://x.dev/llms.txt", "sha256": "sha256:..." },  // + "finalUrl" after a redirect
     { "type": "urls" },
     { "type": "local", "path": "manuals", "hostCommit": "<hex>|null", "hostDirty": false }  // both null outside git
@@ -321,12 +321,18 @@ to `api.github.com` and only when set.
 every `GIT_*` variable from the parent is dropped except `GIT_SSL_CAINFO` and `GIT_SSL_CAPATH`
 (TLS trust a corporate network needs), `SSH_ASKPASS` is removed, and `GIT_TERMINAL_PROMPT=0`,
 `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` pointed at an empty file, `GIT_LITERAL_PATHSPECS=1`,
-and `GCM_INTERACTIVE=never` are set. Config flags on every invocation:
+`GIT_CEILING_DIRECTORIES` set to the work directory's parent (so no enclosing repository's config
+applies), and `GCM_INTERACTIVE=never` are set. Config flags on every invocation:
 `-c core.hooksPath=<empty dir>`, `-c core.symlinks=false`, `-c core.fsmonitor=false`,
 `-c protocol.allow=never -c protocol.https.allow=always` (`protocol.file.allow=always` only for
-`file://` repos), `-c submodule.recurse=false`, `-c fetch.recurseSubmodules=false`. Before git
-runs, an `https` repository's host is checked against the address rules above (git connects on
-its own, so this check is not pinned). Fetch strategy: `git ls-remote` first resolves the ref
+`file://` repos), `-c http.followRedirects=false`, `-c credential.helper=` (no helper),
+`-c transfer.fsckObjects=true`, `-c submodule.recurse=false`, `-c fetch.recurseSubmodules=false`.
+A repository URL with a query or fragment is refused. Before git runs, an `https` repository's
+discovery URL (`<repo>/info/refs?service=git-upload-pack`) is requested through the HTTP client,
+which applies the address rules above to every redirect hop; when it redirects to another
+repository URL, git runs against that URL, and the origin records it as `finalRepo` with a
+warning; a redirect to anything else is an error. git resolves the host on its own, so its
+connection is not pinned. Fetch strategy: `git ls-remote` first resolves the ref
 kind (a tag wins over a branch of the same name; a 40-hex name is a commit only when no tag or
 branch has it), then `git init --template=`, `git remote add origin <repo>`, `git fetch --depth
 1 --filter=blob:none --no-tags --no-recurse-submodules origin <refspec>` (`refs/tags/<ref>`,
@@ -410,10 +416,15 @@ Unknown transform names are config errors.
 ### 4.5 Links in pages
 
 Rewriting runs on Markdown text outside fenced code, indented code, and inline code, covering
-inline links, images, reference definitions, autolinks, and `href`/`src` attributes in raw
-HTML. For each target:
+inline links, images, reference definitions, autolinks, and the URL attributes in raw HTML
+(`href`, `src`, each `srcset` candidate, `action`, `formaction`, `poster`, `data`,
+`xlink:href`). For each target:
 
-1. Fragment-only (`#x`): unchanged.
+1. Fragment-only (`#x`): unchanged. A target with a scheme other than `https`, `http`, or
+   `mailto` (`file:`, `javascript:`, `data:`, `tel:`, app schemes) goes to step 5 with reason
+   `disallowed-scheme`; the scheme is read as a browser reads it (case folded, character
+   references and backslash escapes decoded, tabs and line breaks dropped, leading spaces and
+   control characters skipped; a percent-encoded colon is not a scheme).
 2. Relative path that resolves (after stripping a `.md`, `.mdx`, `.markdown`, `.html`, `.htm`,
    or `.rst` extension or a trailing `/index`, the same normalization v2 uses for extensionless
    routes) to another acquired page of the same pack: rewritten to the relative path from this
@@ -430,9 +441,9 @@ HTML. For each target:
    For other hosts it goes to step 5.
 5. Anything else: converted to plain text `[label] (unresolved: target)` and recorded in
    `links.unresolved` with a reason (`not-found`, `not-in-pack`, `outside-source`,
-   `outside-repository`, `outside-pack-non-github-remote`, `site-absolute-without-base-url`, or
-   `malformed`). In raw HTML the attribute is renamed to `data-unresolved-href` or
-   `data-unresolved-src` instead.
+   `outside-repository`, `outside-pack-non-github-remote`, `site-absolute-without-base-url`,
+   `malformed`, or `disallowed-scheme`). In raw HTML the attribute is renamed to
+   `data-unresolved-<name>` (`data-unresolved-href`, `data-unresolved-src`, ...) instead.
 
 `verify` fails on a relative link in a page or index that does not resolve on disk, so the
 build never leaves one: a relative target is rewritten to a pack page or an absolute upstream

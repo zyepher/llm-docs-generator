@@ -69,7 +69,7 @@ The pack's recipe from `llm-docs.json` with every default filled in and every pl
 
 | `type` | Fields |
 |---|---|
-| `git` | `repo`, `ref` (as resolved, placeholders substituted), `commit` (40 hex), `refKind` (`tag`, `branch`, or `commit`). |
+| `git` | `repo`, `ref` (as resolved, placeholders substituted), `commit` (40 hex), `refKind` (`tag`, `branch`, or `commit`), and `finalRepo` when the repository redirected and git fetched from there. |
 | `llms-txt` | `url` of the index, `sha256` of its bytes, and `finalUrl` when redirects led elsewhere. |
 | `urls` | No other fields; each page's URL is on its `sources` entry. |
 | `local` | `path` (project-relative), `hostCommit` (the host repository's `HEAD`, or `null` outside git), `hostDirty` (whether that repository had uncommitted changes, or `null` outside git). |
@@ -126,9 +126,9 @@ An agent conversion is stale when `inputSha256` differs from `sha256`: the origi
 |---|---|
 | `rewritten` | How many link targets the build changed: to the relative path of another pack file, or to an absolute upstream URL. |
 | `external` | How many links point outside the pack after the build, whether rewritten or left as written. |
-| `unresolved` | An entry with `page`, `target`, and `reason` for each link the build could neither keep, point at a pack file, nor point at an upstream URL. The build turns each one into plain text, `[label] (unresolved: target)`. In raw HTML it renames the attribute to `data-unresolved-href` or `data-unresolved-src` instead. A pack therefore never contains a dead local link. |
+| `unresolved` | An entry with `page`, `target`, and `reason` for each link the build could neither keep, point at a pack file, nor point at an upstream URL. The build turns each one into plain text, `[label] (unresolved: target)`. In raw HTML it renames the attribute instead (`data-unresolved-href`, `data-unresolved-src`, and so on). A link whose scheme is not `https`, `http`, or `mailto` is treated the same way. A pack therefore never contains a dead local link. |
 
-`reason` is one of `not-found`, `not-in-pack`, `outside-source`, `outside-repository`, `outside-pack-non-github-remote`, `site-absolute-without-base-url`, or `malformed`.
+`reason` is one of `not-found`, `not-in-pack`, `outside-source`, `outside-repository`, `outside-pack-non-github-remote`, `site-absolute-without-base-url`, `malformed`, or `disallowed-scheme`.
 
 ## Determinism
 
