@@ -93,7 +93,7 @@ function site(): Record<string, string> {
       '',
     ].join('\n'),
     '/spec/2026-07-28/index.md': `${BANNER}# Overview\n\nRead [transports](basic/transports.md).\n`,
-    '/spec/2026-07-28/basic/transports.md': `${BANNER}# Transports\n\nStdio and HTTP.\n`,
+    '/spec/2026-07-28/basic/transports.md': `${BANNER}# Transports\n\nStdio and HTTP.\n\n\nThis documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.`,
     '/spec/2025-06-18/index.md': '# Old\n',
   };
 }
@@ -159,6 +159,9 @@ describe('network sources in sync and refresh', () => {
     const page = await readFile(join(packDir, 'pages', 'index.md'), 'utf-8');
     expect(page).toBe(
       `<!-- llm-docs: spec@2026-07-28 | source: ${origin}/spec/2026-07-28/index.md -->\n\n# Overview\n\nRead [transports](basic/transports.md).\n`
+    );
+    expect(await readFile(join(packDir, 'pages', 'basic', 'transports.md'), 'utf-8')).toBe(
+      `<!-- llm-docs: spec@2026-07-28 | source: ${origin}/spec/2026-07-28/basic/transports.md -->\n\n# Transports\n\nStdio and HTTP.\n`
     );
     expect((await verifyPacks(root, undefined)).ok).toBe(true);
 

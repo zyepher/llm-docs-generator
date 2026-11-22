@@ -464,7 +464,10 @@ Named, deterministic, opt-in per source, recorded in the manifest with the count
 changed. v3.0 ships:
 
 - `strip-mintlify-banner`: removes the leading "Documentation Index" block Mintlify prepends to
-  raw `.md` pages (exact marker match; no fuzzy matching).
+  raw `.md` pages, and the footer line it appends ("This documentation is built and hosted on
+  [Mintlify](https://mintlify.com), a developer documentation platform.") when that line is the
+  last non-blank content of the page (exact text match for both; no fuzzy matching, so prose
+  that mentions Mintlify stays). A page counts once when either is removed.
 - `strip-html-comments`: removes HTML comments outside code.
 - `drop-frontmatter-description`: suppresses the description paragraph from 4.3.
 

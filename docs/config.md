@@ -177,7 +177,7 @@ Transforms are deterministic, opt in per source, and recorded in the manifest wi
 
 | Name | Effect |
 |---|---|
-| `strip-mintlify-banner` | Removes the leading "Documentation Index" block that Mintlify prepends to raw `.md` pages. Exact marker match only. |
+| `strip-mintlify-banner` | Removes the leading "Documentation Index" block that Mintlify prepends to raw `.md` pages, and the "This documentation is built and hosted on Mintlify" footer line it appends, when that line ends the page. Exact text match only, so prose that mentions Mintlify stays. |
 | `strip-html-comments` | Removes HTML comments outside code. |
 | `drop-frontmatter-description` | Leaves out the paragraph the converter makes from a frontmatter `description`. |
 
