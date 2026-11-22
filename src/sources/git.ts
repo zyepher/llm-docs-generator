@@ -26,7 +26,8 @@ import {
   type AcquiredFile,
   type SourceAcquisition,
 } from './acquire.js';
-import { createHttpClient, redactUrl } from './http.js';
+import { createHttpClient } from './http.js';
+import { redactUrl } from '../utils/url-credentials.js';
 
 const GIT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 const GIT_MAX_BUFFER = 256 * 1024 * 1024;
@@ -547,7 +548,7 @@ export async function acquireGit(
 
     const url =
       github === undefined ? undefined : `${github}/blob/${commit}/${encodePath(entry.path)}`;
-    const sourceLabel = url ?? `${source.repo}@${commit}:${entry.path}`;
+    const sourceLabel = url ?? `${redactUrl(source.repo)}@${commit}:${entry.path}`;
 
     if (stats.size > context.maxFileBytes) {
       throw new ConfigError(
@@ -588,7 +589,7 @@ export async function acquireGit(
     origin: {
       type: 'git',
       repo: source.repo,
-      ...(repo === source.repo ? {} : { finalRepo: repo }),
+      ...(repo === source.repo ? {} : { finalRepo: redactUrl(repo) }),
       ref: source.ref,
       commit,
       refKind: resolved.kind,

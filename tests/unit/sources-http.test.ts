@@ -12,13 +12,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createHttpClient,
   HttpPolicyError,
-  redactUrl,
   IPV4_TRANSLATION_PREFIXES,
   SPECIAL_ADDRESS_BLOCKS,
   specialAddressReason,
   USER_AGENT,
   type HttpClient,
 } from '../../src/sources/http.js';
+import { redactUrl } from '../../src/utils/url-credentials.js';
 
 const servers: Server[] = [];
 const clients: HttpClient[] = [];

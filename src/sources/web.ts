@@ -21,7 +21,8 @@ import { pathCollisionKey } from '../utils/fs-path.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { compileGlobs, type AcquireContext, type AcquiredFile } from './acquire.js';
 import type { SourceAcquisition } from './acquire.js';
-import { createHttpClient, redactUrl, type HttpClient, type HttpResponse } from './http.js';
+import { createHttpClient, type HttpClient, type HttpResponse } from './http.js';
+import { redactUrl } from '../utils/url-credentials.js';
 
 /** Requests in flight per source; the client also caps each host at 4. */
 const FETCH_CONCURRENCY = 8;
@@ -34,7 +35,8 @@ interface PlannedFetch {
 
 function fetchMetadata(response: HttpResponse): ManifestFetch {
   return {
-    finalUrl: response.finalUrl,
+    // A redirect may lead to a presigned URL: manifests record it redacted.
+    finalUrl: redactUrl(response.finalUrl),
     status: response.status,
     ...(response.etag === undefined ? {} : { etag: response.etag }),
     ...(response.lastModified === undefined ? {} : { lastModified: response.lastModified }),
@@ -90,7 +92,7 @@ async function fetchAll(
         sha256: sha256Prefixed(response.body),
         bytes: response.body.byteLength,
         url: entry.url,
-        sourceLabel: entry.url,
+        sourceLabel: redactUrl(entry.url),
         fetch: fetchMetadata(response),
       };
     }
@@ -226,7 +228,9 @@ export async function acquireLlmsTxt(
         type: 'llms-txt',
         url: source.url,
         sha256: sha256Prefixed(index.body),
-        ...(index.finalUrl === new URL(source.url).href ? {} : { finalUrl: index.finalUrl }),
+        ...(index.finalUrl === new URL(source.url).href
+          ? {}
+          : { finalUrl: redactUrl(index.finalUrl) }),
       },
       files,
       warnings: [],

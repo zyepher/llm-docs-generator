@@ -1887,6 +1887,44 @@ describe('a pack bound to a dependency from another registry', () => {
   });
 });
 
+describe('URLs that carry a credential', () => {
+  it('are refused in every URL-valued key before add writes llm-docs.json', async () => {
+    const root = await makeProject({});
+    const refused = 'must be an https:// URL without credentials';
+    for (const args of [
+      ['--url', 'https://docs.example.com/a?token=abc'],
+      ['--llms-txt', 'https://docs.example.com/llms.txt?api_key=abc', '--include', '**'],
+      ['--git', 'https://github.com/o/r?access_token=abc', '--ref', 'v1'],
+      ['--local', 'docs', '--site', 'https://docs.example.com/?sig=abc'],
+    ]) {
+      const add = await runCli(root, ['add', 'demo', ...args, '--version', '1.0.0', '--dry-run']);
+      expect(add.code, args.join(' ')).toBe(2);
+      expect(add.stderr, args.join(' ')).toContain(
+        args[0] === '--git' ? 'without credentials' : refused
+      );
+      expect(add.stderr, args.join(' ')).not.toContain('abc');
+    }
+    expect(await readdir(root)).toEqual([]);
+
+    const config = JSON.stringify({
+      schemaVersion: 3,
+      packs: {
+        demo: {
+          version: '1.0.0',
+          sources: [
+            { type: 'urls', urls: [{ url: 'https://x.dev/a?X-Amz-Signature=s', path: 'a.md' }] },
+          ],
+        },
+      },
+    });
+    await writeFile(join(root, 'llm-docs.json'), config);
+    const sync = await runCli(root, ['sync']);
+    expect(sync.code).toBe(2);
+    expect(sync.stderr).toContain('packs.demo.sources[0].urls[0].url');
+    expect(sync.stderr).toContain(refused);
+  });
+});
+
 describe('a symbolic link planted in a pack', () => {
   // Each link points at a copy of what it replaces, outside the project, so a
   // command that followed it would find a pack that looks valid.

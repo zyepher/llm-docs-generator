@@ -34,6 +34,7 @@ import {
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { canonicalJsonStringify } from '../utils/json.js';
+import { redactUrl, urlCredentials } from '../utils/url-credentials.js';
 import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 
 export const CONFIG_FILE_NAME = 'llm-docs.json';
@@ -113,10 +114,6 @@ const mountSchema = z
 const globSchema = z.string().min(1);
 const globListSchema = z.array(globSchema);
 
-function hasCredentials(url: URL): boolean {
-  return url.username !== '' || url.password !== '';
-}
-
 function parsedUrl(value: string): URL | undefined {
   try {
     return new URL(value);
@@ -136,13 +133,20 @@ function isDocsUrl(url: URL): boolean {
   );
 }
 
-/** An https URL without credentials; `{version}`-style placeholders may appear in it. */
+/**
+ * An https URL that carries no credential (urlCredentials, the HTTP client's
+ * rule): pack manifests record these URLs, so one is refused when the config
+ * is read, before `add` writes it. `{version}`-style placeholders may appear.
+ */
 const httpsUrlSchema = z.string().refine(
   (value) => {
     const url = parsedUrl(value);
-    return url !== undefined && isDocsUrl(url) && !hasCredentials(url);
+    return url !== undefined && isDocsUrl(url) && urlCredentials(url).length === 0;
   },
-  { error: 'must be an https:// URL without credentials' }
+  {
+    error:
+      'must be an https:// URL without credentials (no user name or password, and no token, key, signature, or similar parameter)',
+  }
 );
 
 const gitRepoSchema = z.string().refine(
@@ -151,12 +155,12 @@ const gitRepoSchema = z.string().refine(
     return (
       url !== undefined &&
       (url.protocol === 'https:' || url.protocol === 'file:') &&
-      !hasCredentials(url)
+      urlCredentials(url).length === 0
     );
   },
   {
     error:
-      'must be an https:// (or file://) URL without credentials; ssh and git@ remotes are not supported',
+      'must be an https:// (or file://) URL without credentials (no user name or password, and no token, key, or similar parameter); ssh and git@ remotes are not supported',
   }
 );
 
@@ -1057,7 +1061,7 @@ function resolveUrlEntries(
 
     if (parsed === undefined || !isDocsUrl(parsed)) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${where}: "${url}" is not an https:// URL; only https:// pages are fetched, so fix the URL.`
+        `${CONFIG_FILE_NAME} ${where}: "${redactUrl(url)}" is not an https:// URL; only https:// pages are fetched, so fix the URL.`
       );
     }
 
@@ -1076,7 +1080,7 @@ function resolveUrlEntries(
 
     if (previous !== undefined) {
       throw new ConfigError(
-        `${CONFIG_FILE_NAME} ${path}.urls: ${previous.url} and ${url} would both be stored at "${previous.path === storedPath ? storedPath : `${previous.path}" and "${storedPath}`}"${previous.path === storedPath ? '' : ' (one path on a case- or normalization-insensitive file system)'}; give one an explicit "path".`
+        `${CONFIG_FILE_NAME} ${path}.urls: ${redactUrl(previous.url)} and ${redactUrl(url)} would both be stored at "${previous.path === storedPath ? storedPath : `${previous.path}" and "${storedPath}`}"${previous.path === storedPath ? '' : ' (one path on a case- or normalization-insensitive file system)'}; give one an explicit "path".`
       );
     }
 

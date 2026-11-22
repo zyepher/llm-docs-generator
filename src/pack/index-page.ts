@@ -8,6 +8,7 @@
 
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import type { ManifestOutputEntry, PackManifest } from './manifest.js';
+import { redactUrl } from '../utils/url-credentials.js';
 
 /** A `recipe.readFirst` target as the build resolved it against the pack's outputs. */
 export interface ReadFirstLink {
@@ -74,11 +75,12 @@ function describeOrigin(
         repo === undefined
           ? `commit ${short}`
           : `commit [${short}](https://github.com/${repo}/commit/${origin.commit})`;
-      const name = repo === undefined ? origin.repo : `[${repo}](https://github.com/${repo})`;
+      const name =
+        repo === undefined ? redactUrl(origin.repo) : `[${repo}](https://github.com/${repo})`;
       return `the git repository ${name} at ${commit} (${origin.refKind} ${escapeIndexText(origin.ref)})`;
     }
     case 'llms-txt':
-      return `the index ${origin.url}`;
+      return `the index ${redactUrl(origin.url)}`;
     case 'urls': {
       const count = input.sources.filter((entry) => entry.source === index).length;
       return `${count} listed URL${count === 1 ? '' : 's'}`;

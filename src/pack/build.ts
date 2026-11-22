@@ -65,6 +65,7 @@ import { sha256Prefixed } from '../utils/hash.js';
 import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
+import { redactUrl } from '../utils/url-credentials.js';
 import { renderCombinedPack } from './combined.js';
 import { renderIndexPage, type ReadFirstLink } from './index-page.js';
 import {
@@ -899,7 +900,7 @@ function movedRefWarnings(
     if (before?.type !== 'git' || before.commit === origin.commit) {
       return [];
     }
-    const moved = `git ${origin.refKind} ${origin.ref} of ${origin.repo} now resolves to commit ${origin.commit}; the previous build recorded ${before.commit}`;
+    const moved = `git ${origin.refKind} ${origin.ref} of ${redactUrl(origin.repo)} now resolves to commit ${origin.commit}; the previous build recorded ${before.commit}`;
     return [
       origin.refKind === 'branch'
         ? `${moved}. A branch is expected to move, but the pack's content may differ from what was reviewed; pin a tag or a commit as the ref to build a fixed version.`

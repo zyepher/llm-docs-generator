@@ -66,6 +66,7 @@ import {
 import { supportedSourceTypes } from './sources/acquire.js';
 import { CONVERTER_INSTALL_HINTS } from './sources/convert.js';
 import { errorMessage, isRecord } from './utils/guards.js';
+import { redactUrl } from './utils/url-credentials.js';
 
 const CLI_NAME = 'llm-docs';
 // Not package.json's description: the bundle inlines each package.json value
@@ -883,7 +884,7 @@ function printRefreshReport(report: SyncReport): void {
 
     for (const ref of refresh.refs) {
       say(
-        `  git ref ${ref.ref} of ${ref.repo} now resolves to ${ref.commit.slice(0, 12)} (was ${ref.previousCommit.slice(0, 12)})`
+        `  git ref ${ref.ref} of ${redactUrl(ref.repo)} now resolves to ${ref.commit.slice(0, 12)} (was ${ref.previousCommit.slice(0, 12)})`
       );
     }
     for (const file of refresh.files) {

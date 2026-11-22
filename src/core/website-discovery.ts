@@ -2,12 +2,12 @@ import {
   ALLOW_PRIVATE_NETWORK_ENV,
   assertUrlAllowed,
   createHttpClient,
-  redactUrl,
   type HostResolver,
   type HttpClient,
 } from '../sources/http.js';
 import { errorMessage } from '../utils/guards.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
+import { redactUrl } from '../utils/url-credentials.js';
 
 export const DEFAULT_WEBSITE_FETCH_TIMEOUT_MS = 10_000;
 export const DEFAULT_WEBSITE_MAX_BYTES_PER_RESPONSE = 65_536;
@@ -212,7 +212,7 @@ export async function inspectWebsite(
 
       if (fetched.error !== null) {
         warnings.push(
-          `Fetch failed for ${plannedResource.sourceRole} resource: ${plannedResource.url}. ${fetched.error}`
+          `Fetch failed for ${plannedResource.sourceRole} resource: ${redactUrl(plannedResource.url)}. ${fetched.error}`
         );
         continue;
       }
@@ -223,14 +223,14 @@ export async function inspectWebsite(
 
       if (fetched.resource.status < 200 || fetched.resource.status >= 300) {
         warnings.push(
-          `Non-2xx HTTP ${fetched.resource.status} for ${plannedResource.sourceRole} resource: ${plannedResource.url}`
+          `Non-2xx HTTP ${fetched.resource.status} for ${plannedResource.sourceRole} resource: ${redactUrl(plannedResource.url)}`
         );
         continue;
       }
 
       if (fetched.resource.truncated) {
         warnings.push(
-          `Response truncated at ${maxBytesPerResponse} bytes for ${plannedResource.sourceRole} resource: ${plannedResource.url}; URLs after that point were not read, so the candidates${plannedResource.sourceRole === 'llms-txt' ? ' and the llmsTxt counts' : ''} from it are incomplete.`
+          `Response truncated at ${maxBytesPerResponse} bytes for ${plannedResource.sourceRole} resource: ${redactUrl(plannedResource.url)}; URLs after that point were not read, so the candidates${plannedResource.sourceRole === 'llms-txt' ? ' and the llmsTxt counts' : ''} from it are incomplete.`
         );
       }
 
@@ -238,7 +238,7 @@ export async function inspectWebsite(
         warnings.push(
           `Unsupported content type for ${plannedResource.sourceRole} resource: ${formatContentTypeForWarning(
             fetched.resource.contentType
-          )} at ${plannedResource.url}`
+          )} at ${redactUrl(plannedResource.url)}`
         );
         continue;
       }
@@ -796,14 +796,14 @@ function normalizeCandidateUrl(
     url = new URL(trimmed, baseUrl);
   } catch {
     warnings.push(
-      `Skipped malformed candidate URL in ${plannedResource.sourceRole} resource ${plannedResource.url}.`
+      `Skipped malformed candidate URL in ${plannedResource.sourceRole} resource ${redactUrl(plannedResource.url)}.`
     );
     return null;
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     warnings.push(
-      `Skipped unsupported candidate URL scheme ${url.protocol} in ${plannedResource.sourceRole} resource ${plannedResource.url}.`
+      `Skipped unsupported candidate URL scheme ${url.protocol} in ${plannedResource.sourceRole} resource ${redactUrl(plannedResource.url)}.`
     );
     return null;
   }
@@ -812,7 +812,7 @@ function normalizeCandidateUrl(
     url.username = '';
     url.password = '';
     warnings.push(
-      `Scrubbed embedded credentials from candidate URL ${url.href} in ${plannedResource.sourceRole} resource ${plannedResource.url}.`
+      `Scrubbed embedded credentials from candidate URL ${redactUrl(url)} in ${plannedResource.sourceRole} resource ${redactUrl(plannedResource.url)}.`
     );
   }
 

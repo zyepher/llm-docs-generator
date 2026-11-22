@@ -42,6 +42,7 @@ import {
   type ReleaseInfo,
   type ReleaseQuery,
 } from './registries.js';
+import { urlCredentials } from '../utils/url-credentials.js';
 
 export type PackState =
   | 'ok'
@@ -363,7 +364,7 @@ function discoverCommand(dependency: ResolvedDependency): string {
     dependency.ecosystem === 'swiftpm' &&
     repository !== undefined &&
     URL.canParse(repository) &&
-    new URL(repository).username === ''
+    urlCredentials(new URL(repository)).length === 0
       ? repository
       : dependency.name;
   return `llm-docs discover --package ${dependency.ecosystem}:${messageText(name)}@${messageText(dependency.version)}`;
