@@ -17,7 +17,7 @@ import { z } from 'zod';
 
 import { gitTopLevel } from '../core/git-state.js';
 import { ECOSYSTEMS, type DependencyRef, type DependencyVersionLookup } from '../deps/lockfiles.js';
-import { isSameOrDescendant } from '../utils/fs-path.js';
+import { isSameOrDescendant, resolveEffectiveOutputPath } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError, isRecord } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
 import { canonicalJsonStringify } from '../utils/json.js';
@@ -463,7 +463,7 @@ export async function loadProjectConfig(projectRoot: string): Promise<LoadedProj
     throw error;
   }
 
-  return parseProjectConfig(root, text);
+  return assertPacksDirInsideProject(parseProjectConfig(root, text));
 }
 
 /** The project's config, or an empty one when llm-docs.json does not exist yet (`add`, `migrate`). */
@@ -472,10 +472,35 @@ export async function loadOrEmptyConfig(projectRoot: string): Promise<LoadedProj
     return await loadProjectConfig(projectRoot);
   } catch (error) {
     if (error instanceof ConfigError && error.message.startsWith(`No ${CONFIG_FILE_NAME}`)) {
-      return parseProjectConfig(projectRoot, JSON.stringify({ schemaVersion: 3, packs: {} }));
+      return assertPacksDirInsideProject(
+        parseProjectConfig(projectRoot, JSON.stringify({ schemaVersion: 3, packs: {} }))
+      );
     }
     throw error;
   }
+}
+
+/**
+ * `parseProjectConfig` can only check packsDir lexically. Every pack write, staging delete,
+ * swap, and prune goes through this directory, so a symlink that leads out of the project
+ * would let sync create and delete files elsewhere (spec 2.2: inside the project after
+ * resolution).
+ */
+async function assertPacksDirInsideProject(
+  loaded: LoadedProjectConfig
+): Promise<LoadedProjectConfig> {
+  const [projectRoot, packsDir] = await Promise.all([
+    resolveEffectiveOutputPath(loaded.projectRoot),
+    resolveEffectiveOutputPath(loaded.packsDir),
+  ]);
+
+  if (!isSameOrDescendant(projectRoot, packsDir)) {
+    throw new ConfigError(
+      `${CONFIG_FILE_NAME} packsDir "${loaded.packsDirRelative}" resolves to ${packsDir}, outside the project (${projectRoot}), through a symbolic link. Replace the link with a real directory inside the project, or point packsDir at one.`
+    );
+  }
+
+  return loaded;
 }
 
 /** Validate config text for the project at `projectRoot` (absolute). */
@@ -566,7 +591,7 @@ export async function initProjectConfig(
 
   const text = newConfigText(options.packsDir);
   // Validate the text we are about to write with the same rules a load applies.
-  parseProjectConfig(projectRoot, text);
+  await assertPacksDirInsideProject(parseProjectConfig(projectRoot, text));
   await writeTextFileSafely(configPath, text);
   return { created: true, configPath };
 }
@@ -598,7 +623,7 @@ export async function saveProjectConfig(
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
   });
   const updated = `${applyEdits(text, edits).replace(/\s*$/, '')}\n`;
-  const loaded = parseProjectConfig(projectRoot, updated);
+  const loaded = await assertPacksDirInsideProject(parseProjectConfig(projectRoot, updated));
   await writeTextFileSafely(configPath, updated);
   return loaded;
 }

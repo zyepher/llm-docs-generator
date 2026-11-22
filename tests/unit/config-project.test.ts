@@ -1,8 +1,19 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
+
+import { canCreateSymlinks } from '../helpers/symlinks.js';
 
 import {
   ConfigError,
@@ -490,4 +501,46 @@ describe('project files', () => {
       /run 'llm-docs init' first/
     );
   });
+
+  it.skipIf(!canCreateSymlinks)(
+    'rejects a packsDir that leaves the project through a symlink, on load, init, and save',
+    async () => {
+      const base = await makeTempDir();
+      const root = join(base, 'project');
+      const outside = join(base, 'outside');
+      await mkdir(root);
+      await mkdir(outside);
+      await symlink(outside, join(root, 'agent-docs'), 'dir');
+
+      await expect(initProjectConfig(root)).rejects.toThrow(
+        /packsDir "agent-docs" resolves to .*outside.* through a symbolic link/
+      );
+      await expect(
+        saveProjectConfig(root, 'x', {
+          version: '1',
+          sources: [{ type: 'local', path: 'docs' }],
+        })
+      ).rejects.toThrow(ConfigError);
+      expect(await readdir(root)).toEqual(['agent-docs']);
+
+      await writeFile(join(root, 'llm-docs.json'), '{"schemaVersion":3,"packs":{}}\n');
+      await expect(loadProjectConfig(root)).rejects.toThrow(ConfigError);
+      expect(await readdir(outside)).toEqual([]);
+    }
+  );
+
+  it.skipIf(!canCreateSymlinks)(
+    'accepts a packsDir symlink that stays inside the project, and a symlinked project root',
+    async () => {
+      const base = await makeTempDir();
+      const root = join(base, 'project');
+      await mkdir(join(root, 'docs', 'packs'), { recursive: true });
+      await symlink(join(root, 'docs', 'packs'), join(root, 'agent-docs'), 'dir');
+      await symlink(root, join(base, 'alias'), 'dir');
+      await writeFile(join(root, 'llm-docs.json'), '{"schemaVersion":3,"packs":{}}\n');
+
+      expect((await loadProjectConfig(root)).packsDirRelative).toBe('agent-docs');
+      expect((await loadProjectConfig(join(base, 'alias'))).packsDirRelative).toBe('agent-docs');
+    }
+  );
 });
