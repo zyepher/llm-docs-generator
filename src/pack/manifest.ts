@@ -42,10 +42,11 @@ const hashSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/, {
 /**
  * A relative POSIX path that cannot leave the directory it is joined to: no
  * absolute form, no empty, `.`, or `..` segment, no backslash, and no control
- * character (NUL included). Every path a manifest records is one, so no
- * reader can be steered outside the pack or the origin.
+ * character (NUL included). Every path a manifest or the citations lock
+ * records is one, so no reader can be steered outside the pack or the origin
+ * (on Windows a backslash separates segments, so `pages\..\..\x` climbs).
  */
-function isContainedRelativePath(value: string): boolean {
+export function isContainedRelativePath(value: string): boolean {
   return (
     !value.includes('\\') &&
     !/\p{Cc}/u.test(value) &&

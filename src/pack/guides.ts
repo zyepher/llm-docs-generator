@@ -27,7 +27,12 @@ import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { withPacksLock } from './lock.js';
-import { ManifestError, readPackManifest, type PackManifest } from './manifest.js';
+import {
+  isContainedRelativePath,
+  ManifestError,
+  readPackManifest,
+  type PackManifest,
+} from './manifest.js';
 import { findLinkTargets, headingSlugs } from './markdown.js';
 import type { RefreshReport } from './refresh.js';
 import type { CheckFinding } from './verify.js';
@@ -142,11 +147,9 @@ function decodePart(value: string): string {
   }
 }
 
-/** A normalized pack-relative path under `pages/` or `files/`, never climbing out. */
+/** A contained pack-relative path under `pages/` or `files/`. */
 function isCitablePath(path: string): boolean {
-  return (
-    CITABLE_ROOT.test(path) && posix.normalize(path) === path && !path.split('/').includes('..')
-  );
+  return CITABLE_ROOT.test(path) && isContainedRelativePath(path);
 }
 
 function formatTarget(path: string, fragment: string | null): string {
@@ -340,9 +343,7 @@ const citationsLockSchema = z.strictObject({
     z
       .string()
       .regex(/^guides\/.+\.md$/i, { error: 'must be a guides/**.md path' })
-      .refine((path) => posix.normalize(path) === path && !path.split('/').includes('..'), {
-        error: 'must be a normalized path inside guides/',
-      }),
+      .refine(isContainedRelativePath, { error: 'must be a normalized path inside guides/' }),
     z.strictObject({
       sha256: hashSchema,
       citations: z.array(
