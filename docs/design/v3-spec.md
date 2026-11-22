@@ -721,7 +721,12 @@ Supported inputs and how directness is decided:
 
 Non-registry dependencies (git, path, workspace, `file:`, npm aliases to other names, `link:`,
 URLs, alternate registries, Go modules replaced by a `replace` directive, and SwiftPM pins with
-only a revision) are skipped with one aggregated warning. `bun.lockb` (binary) is reported as unsupported.
+only a revision) are skipped with one aggregated warning. A dependency is from an alternate
+registry when the source its lockfile records is not the ecosystem's public registry
+(`registry.npmjs.org` and its yarn and npmmirror mirrors; `pypi.org` and
+`files.pythonhosted.org`; crates.io; pub.dev), or, for an npm entry that records no URL, when
+the project's `.npmrc` (`.yarnrc.yml` for yarn berry), read as data, sends its scope or the
+default elsewhere. A dependency with no recorded source is taken as the public registry's. `bun.lockb` (binary) is reported as unsupported.
 Name normalization: PyPI names are PEP 503 normalized; others exact. Parsers never execute
 project code. TOML is parsed with `smol-toml`.
 

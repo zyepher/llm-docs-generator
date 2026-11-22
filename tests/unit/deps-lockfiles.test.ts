@@ -133,6 +133,138 @@ describe('npm lockfiles', () => {
     });
   });
 
+  it('skips npm packages from another registry, by recorded URL or by the project .npmrc or .yarnrc.yml', async () => {
+    const tarball = (host: string, name: string, version: string): string =>
+      `https://${host}/${name}/-/${name.split('/').at(-1)}-${version}.tgz`;
+    const packageJson = JSON.stringify({
+      dependencies: { zod: '4.0.0', 'left-pad': '1.3.0', '@corp/ui': '2.0.0' },
+    });
+    const scan = await scanDependencies(
+      await makeProject({
+        'npm/package.json': packageJson,
+        'npm/package-lock.json': JSON.stringify({
+          lockfileVersion: 3,
+          packages: {
+            '': { dependencies: { zod: '4.0.0', 'left-pad': '1.3.0', '@corp/ui': '2.0.0' } },
+            'node_modules/zod': {
+              version: '4.0.0',
+              resolved: tarball('registry.npmjs.org', 'zod', '4.0.0'),
+            },
+            'node_modules/left-pad': {
+              version: '1.3.0',
+              resolved: tarball('registry.yarnpkg.com', 'left-pad', '1.3.0'),
+            },
+            'node_modules/@corp/ui': {
+              version: '2.0.0',
+              resolved: tarball('npm.corp.example', '@corp/ui', '2.0.0'),
+            },
+          },
+        }),
+        'pnpm/package.json': packageJson,
+        'pnpm/.npmrc': '; corp scope\n@corp:registry=https://npm.corp.example/\n',
+        'pnpm/pnpm-lock.yaml': [
+          "lockfileVersion: '9.0'",
+          'importers:',
+          '  .:',
+          '    dependencies:',
+          '      zod: {specifier: 4.0.0, version: 4.0.0}',
+          "      '@corp/ui': {specifier: 2.0.0, version: 2.0.0}",
+          'packages:',
+          '  zod@4.0.0: {resolution: {integrity: sha512-x}}',
+          "  '@corp/ui@2.0.0': {resolution: {integrity: sha512-y}}",
+          '',
+        ].join('\n'),
+        'berry/package.json': packageJson,
+        'berry/.yarnrc.yml': 'npmRegistryServer: "https://npm.corp.example"\n',
+        'berry/yarn.lock': [
+          '__metadata:',
+          '  version: 8',
+          '"zod@npm:4.0.0":',
+          '  version: 4.0.0',
+          '  resolution: "zod@npm:4.0.0"',
+          '',
+        ].join('\n'),
+        'bun/package.json': packageJson,
+        'bun/bun.lock': JSON.stringify({
+          lockfileVersion: 1,
+          workspaces: { '': { dependencies: { zod: '4.0.0', '@corp/ui': '2.0.0' } } },
+          packages: {
+            zod: ['zod@4.0.0', '', {}, 'sha512-x'],
+            '@corp/ui': ['@corp/ui@2.0.0', 'https://npm.corp.example/', {}, 'sha512-y'],
+          },
+        }),
+      })
+    );
+
+    expect(
+      scan.dependencies.map((dependency) => `${dependency.lockfile} ${dependency.name}`)
+    ).toEqual([
+      'npm/package-lock.json left-pad',
+      'bun/bun.lock zod',
+      'npm/package-lock.json zod',
+      'pnpm/pnpm-lock.yaml zod',
+    ]);
+    expect(scan.warnings).toEqual([
+      'Skipped 4 non-registry dependencies (alternate-registry): berry/yarn.lock: zod (alternate-registry); bun/bun.lock: @corp/ui (alternate-registry); npm/package-lock.json: @corp/ui (alternate-registry); pnpm/pnpm-lock.yaml: @corp/ui (alternate-registry).',
+    ]);
+  });
+
+  it('skips Python packages from another index, and keeps those with no recorded source', async () => {
+    const pyproject = '[project]\nname = "app"\ndependencies = ["internal-lib", "httpx"]\n';
+    const scan = await scanDependencies(
+      await makeProject({
+        'uv/pyproject.toml': pyproject,
+        'uv/uv.lock': [
+          'version = 1',
+          '[[package]]',
+          'name = "internal-lib"',
+          'version = "1.2.3"',
+          'source = { registry = "https://pypi.corp.example/simple" }',
+          '[[package]]',
+          'name = "httpx"',
+          'version = "0.27.0"',
+          'source = { registry = "https://pypi.org/simple" }',
+          '',
+        ].join('\n'),
+        'poetry/pyproject.toml': pyproject,
+        'poetry/poetry.lock': [
+          '[[package]]',
+          'name = "internal-lib"',
+          'version = "1.2.3"',
+          '[package.source]',
+          'type = "legacy"',
+          'url = "https://pypi.corp.example/simple"',
+          'reference = "corp"',
+          '[[package]]',
+          'name = "httpx"',
+          'version = "0.27.0"',
+          '',
+        ].join('\n'),
+        'pipenv/Pipfile.lock': JSON.stringify({
+          _meta: {
+            sources: [
+              { name: 'pypi', url: 'https://pypi.org/simple' },
+              { name: 'corp', url: 'https://pypi.corp.example/simple' },
+            ],
+          },
+          default: {
+            'internal-lib': { version: '==1.2.3', index: 'corp' },
+            httpx: { version: '==0.27.0', index: 'pypi' },
+          },
+        }),
+        'req/requirements.txt':
+          '--index-url https://pypi.corp.example/simple\ninternal-lib==1.2.3\n',
+      })
+    );
+
+    expect(
+      scan.dependencies.map((dependency) => `${dependency.lockfile} ${dependency.name}`)
+    ).toEqual(['pipenv/Pipfile.lock httpx', 'poetry/poetry.lock httpx', 'uv/uv.lock httpx']);
+    expect(scan.warnings).toContain(
+      'Skipped 4 non-registry dependencies (alternate-registry): pipenv/Pipfile.lock: internal-lib (alternate-registry); poetry/poetry.lock: internal-lib (alternate-registry); req/requirements.txt: internal-lib (alternate-registry); uv/uv.lock: internal-lib (alternate-registry).'
+    );
+  });
+
   it('reads npm-shrinkwrap.json (lockfile v2) from its packages map', async () => {
     const scan = await scanFixture('npm-shrinkwrap-v2');
 

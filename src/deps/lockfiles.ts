@@ -561,7 +561,7 @@ export function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-async function readTextIfExists(path: string): Promise<string | undefined> {
+export async function readTextIfExists(path: string): Promise<string | undefined> {
   try {
     return await readFile(path, 'utf-8');
   } catch (error) {
@@ -940,6 +940,24 @@ function missingManifestWarning(manifest: string): string {
   return `no ${manifest} next to the lockfile, so no dependency is marked direct.`;
 }
 
+/** PyPI's own hosts: an index or file URL elsewhere is an alternate registry. */
+const PYPI_HOSTS: ReadonlySet<string> = new Set([
+  'pypi.org',
+  'pypi.python.org',
+  'files.pythonhosted.org',
+]);
+
+function isPypiUrl(url: string): boolean {
+  if (!URL.canParse(url)) {
+    return false;
+  }
+  const parsed = new URL(url);
+  return (
+    (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+    PYPI_HOSTS.has(parsed.hostname.toLowerCase())
+  );
+}
+
 function pypiDependency(
   context: LockfileContext,
   name: string,
@@ -976,6 +994,11 @@ async function parseUvLock(context: LockfileContext): Promise<LockfileResult> {
     }
 
     const normalized = normalizePypiName(name);
+
+    if (isNonEmptyString(source.registry) && !isPypiUrl(source.registry)) {
+      result.skipped.push({ name: normalized, reason: 'alternate-registry' });
+      continue;
+    }
 
     if (isNonEmptyString(source.registry) && version) {
       result.dependencies.push(
@@ -1028,6 +1051,7 @@ async function parsePoetryLock(context: LockfileContext): Promise<LockfileResult
     const name = stringValue(pkg.name);
     const version = stringValue(pkg.version);
     const sourceType = stringValue(recordValue(pkg.source).type);
+    const sourceUrl = stringValue(recordValue(pkg.source).url);
 
     if (!name || !version) {
       continue;
@@ -1042,6 +1066,12 @@ async function parsePoetryLock(context: LockfileContext): Promise<LockfileResult
 
     if (sourceType === 'url') {
       result.skipped.push({ name: normalized, reason: 'url' });
+      continue;
+    }
+
+    // A package from PyPI records no source; a legacy or explicit index records its URL.
+    if (sourceType !== undefined && !(sourceUrl !== undefined && isPypiUrl(sourceUrl))) {
+      result.skipped.push({ name: normalized, reason: 'alternate-registry' });
       continue;
     }
 
@@ -1085,6 +1115,16 @@ async function parsePdmLock(context: LockfileContext): Promise<LockfileResult> {
       continue;
     }
 
+    // pdm records file URLs only when asked to (static_urls); when it did, they say where.
+    const fileUrls = arrayValue(pkg.files).flatMap((file) => {
+      const url = stringValue(recordValue(file).url);
+      return url === undefined ? [] : [url];
+    });
+    if (fileUrls.length > 0 && !fileUrls.some(isPypiUrl)) {
+      result.skipped.push({ name, reason: 'alternate-registry' });
+      continue;
+    }
+
     const flags = declaredDirect(declared ?? emptyDeclared(), name);
     const groups = arrayValue(pkg.groups).filter(isNonEmptyString);
     const dev = flags.direct ? flags.dev : groups.length > 0 && !groups.includes('default');
@@ -1099,6 +1139,14 @@ async function parsePipfileLock(context: LockfileContext): Promise<LockfileResul
   const lock = recordValue(JSON.parse(context.text));
   const pipfile = await readTomlIfExists(join(context.directory, 'Pipfile'));
   const declared = emptyDeclared();
+  const sourceUrls = new Map(
+    arrayValue(recordValue(lock._meta).sources).flatMap((value) => {
+      const source = recordValue(value);
+      const name = stringValue(source.name);
+      const url = stringValue(source.url);
+      return name === undefined || url === undefined ? [] : [[name, url] as const];
+    })
+  );
 
   if (pipfile) {
     addRequirementTable(declared.prod, pipfile.packages);
@@ -1132,6 +1180,13 @@ async function parsePipfileLock(context: LockfileContext): Promise<LockfileResul
         continue;
       }
 
+      const index = stringValue(entry.index);
+      const indexUrl = index === undefined ? undefined : sourceUrls.get(index);
+      if (index !== undefined && !(indexUrl !== undefined && isPypiUrl(indexUrl))) {
+        result.skipped.push({ name, reason: 'alternate-registry' });
+        continue;
+      }
+
       const flags = declaredDirect(declared, name);
       const dev = flags.direct ? flags.dev : section === 'develop';
       result.dependencies.push(
@@ -1158,6 +1213,11 @@ async function parseRequirementsTxt(context: LockfileContext): Promise<LockfileR
     fileName.replace(/\.txt$/, '')
   );
   const logicalLines = context.text.replace(/\\\r?\n/g, ' ').split(/\r?\n/);
+  // An --index-url replaces PyPI for every pin in the file (--extra-index-url only adds one).
+  const indexUrl = logicalLines
+    .map((line) => /^\s*(?:--index-url|-i)(?:\s+|=)(\S+)/.exec(line)?.[1])
+    .find((url) => url !== undefined);
+  const alternate = indexUrl !== undefined && !isPypiUrl(indexUrl);
 
   for (const rawLine of logicalLines) {
     const withoutComment = rawLine.replace(/(?:^|\s)#.*$/, '');
@@ -1173,6 +1233,11 @@ async function parseRequirementsTxt(context: LockfileContext): Promise<LockfileR
     const match = REQUIREMENT_PIN_PATTERN.exec(requirement);
 
     if (match?.[1] === undefined || match[2] === undefined) {
+      continue;
+    }
+
+    if (alternate) {
+      result.skipped.push({ name: normalizePypiName(match[1]), reason: 'alternate-registry' });
       continue;
     }
 
