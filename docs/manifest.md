@@ -4,6 +4,15 @@ Every pack directory holds a `manifest.json` that `sync` writes. It records the 
 
 The JSON Schema is [`schema/manifest.schema.json`](../schema/manifest.schema.json), generated from the zod schema in `src/pack/manifest.ts`. Every object is strict.
 
+## Reading a manifest
+
+A reader trusts a manifest only when all of these hold. Otherwise `verify` fails `manifest-schema`, `status` reports the pack as `missing`, and `sync` rebuilds it.
+
+- `manifest.json` is a regular file, and the pack directory is a real directory. Neither is ever read through a symbolic link.
+- The manifest agrees with its own recipe: `recipeHash` is the hash of `recipe`, `pack.title`, `pack.version`, and `dependency` equal the recipe's, there is one origin per recipe source with the same `type`, and every `sources[].source` names a recipe source.
+- Every path it records is contained: relative POSIX, with no empty, `.`, or `..` segment, no backslash, and no control character. The JSON Schema states only the shape; `src/pack/manifest.ts` applies this rule.
+- Each output path fits its kind: a page under `pages/`, a passthrough file under `files/`, the index at `index.md`, and the combined file at `<pack id>.full.md`.
+
 ## What a pack contains
 
 ```
@@ -69,8 +78,8 @@ The pack's recipe from `llm-docs.json` with every default filled in and every pl
 
 | `type` | Fields |
 |---|---|
-| `git` | `repo`, `ref` (as resolved, placeholders substituted), `commit` (40 hex), `refKind` (`tag`, `branch`, or `commit`), and `finalRepo` when the repository redirected and git fetched from there. |
-| `llms-txt` | `url` of the index, `sha256` of its bytes, and `finalUrl` when redirects led elsewhere. |
+| `git` | `repo`, `ref` (as resolved, placeholders substituted), `commit` (40 hex), `refKind` (`tag`, `branch`, or `commit`), and `finalRepo` when the repository redirected and git fetched from there. `finalRepo` is stored redacted: a user name and the values of credential-looking parameters become `***`. |
+| `llms-txt` | `url` of the index, `sha256` of its bytes, and `finalUrl`, redacted the same way, when redirects led elsewhere. |
 | `urls` | No other fields; each page's URL is on its `sources` entry. |
 | `local` | `path` (project-relative), `hostCommit` (the host repository's `HEAD`, or `null` outside git), `hostDirty` (whether that repository had uncommitted changes, or `null` outside git). |
 
@@ -104,7 +113,7 @@ One entry per acquired upstream file, including the `X.md` an agent wrote for a 
 | `path` | Origin-relative POSIX path. |
 | `url` | Where the file lives upstream, when it has one: the fetched URL for `urls` and `llms-txt` sources, and a blob URL pinned to the commit for git sources on `github.com`. |
 | `sha256`, `bytes` | Hash and size of the acquired bytes. |
-| `fetch` | HTTP sources only: `finalUrl` after redirects, `status`, and `etag` and `lastModified` when the server sent them. |
+| `fetch` | HTTP sources only: `finalUrl` after redirects, redacted because a redirect may lead to a presigned URL, `status`, and `etag` and `lastModified` when the server sent them. |
 | `converter` | Converted documents only: `tool`, `version` (the first line of the tool's `--version` output, or `null` when it could not be read and always for `agent`), `outputSha256`, and for `agent` conversions `inputSha256`. |
 
 An agent conversion is stale when `inputSha256` differs from `sha256`: the original changed and its `.md` did not. `sync` still builds and warns. `verify` fails the `conversion` check.
@@ -139,3 +148,4 @@ Given the same recipe and the same upstream bytes, `sync` writes byte-identical 
 - `acquiredAt` carries over while no acquired file changed.
 - Generated text uses `\n` line endings and ends with exactly one newline.
 - Paths are POSIX and relative to the project, the pack, or the origin. Nothing machine-specific is recorded, with one exception you opt into: a `file://` git repository records its URL, and sync warns that such an origin only works on this machine.
+- A URL the recipe names is recorded as written. That is safe because `llm-docs.json` refuses a URL that carries a credential, and the HTTP client refuses to request one.

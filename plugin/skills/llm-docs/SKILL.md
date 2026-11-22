@@ -89,12 +89,12 @@ Each check reports `pass`, `fail`, or `warn`, one line per problem with the pack
 
 | Check | Fails when | Fix |
 |---|---|---|
-| `manifest-schema` | `manifest.json` is missing, unreadable, or not schema 3. | Run `llm-docs sync <id>`. For a v2 pack, run `llm-docs migrate <v2-pack-dir>` first. |
+| `manifest-schema` | `manifest.json` is missing, unreadable, not a regular file, not schema 3, disagrees with its own recipe, or records a path that could leave the pack. | Run `llm-docs sync <id>`. For a v2 pack, run `llm-docs migrate <v2-pack-dir>` first. |
 | `outputs` | A file the manifest lists is missing or its hash differs. | Someone edited a tool-written file. Run `llm-docs sync <id>` to rebuild it. Put your own notes in `guides/` instead. |
-| `unlisted-files` | A file in the pack is not in the manifest. `guides/` and operating system files such as `.DS_Store` are reported as info only. | Move the file out of the pack, or into `guides/` if it is agent-written text. |
-| `links` | A relative link in a page, the index, or the combined file does not resolve inside the pack. Under `--strict`, also a fragment with no matching heading. | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
+| `unlisted-files` | A file in the pack is not in the manifest, the pack holds a symbolic link, or part of the pack could not be examined. `guides/` and operating system files such as `.DS_Store` are reported as info only. | Move the file out of the pack, or into `guides/` if it is agent-written text. |
+| `links` | A link in a page, the index, or the combined file has a scheme other than `https`, `http`, or `mailto`, or a relative link does not resolve inside the pack. Under `--strict`, also a fragment with no matching heading. | Run `llm-docs sync <id>`. A build never writes a dead local link, so the pack was edited or is stale. |
 | `recipe` | The recipe in `llm-docs.json` changed since the last sync. Warns when the config has no pack with this id (an orphan). | Run `llm-docs sync <id>`. For an orphan, run `llm-docs sync --prune` or add the pack back to the config. |
-| `lockfile` | The lockfile resolves the bound dependency to another version than the pack's. | Run `llm-docs sync <id>`. If the recipe pins `version`, change it first, because an explicit version wins. |
+| `lockfile` | The lockfile resolves the bound dependency to another version than the pack's, or no lockfile resolves it. When the lockfiles install it only from another registry, it fails unless the recipe sets `version`. | Run `llm-docs sync <id>`. If the recipe pins `version`, change it first, because an explicit version wins. For a dependency from another registry, set `version`. |
 | `citations` | A guide citation no longer resolves, or a cited section changed since stamping. Warns for an unstamped guide or one edited after stamping. | Re-review the guide with the `write-docs-guide` skill, then run `llm-docs guides stamp <id> <guide>`. |
 | `conversion` | A document's `agent` conversion is stale: the original changed after its `.md` was written. | Write the `.md` conversion again from the current original, then run `llm-docs sync <id>`. |
 | `license` | Warns for an `unknown` or `proprietary` license. Fails under `--strict`. | Set `"license"` on the pack in `llm-docs.json` to an SPDX id or `"proprietary"`, then run `llm-docs sync <id>`. |
@@ -105,7 +105,7 @@ Each check reports `pass`, `fail`, or `warn`, one line per problem with the pack
 
 When the plugin is installed, each session starts with a note from `llm-docs hook session-start`. `llm-docs status --brief` prints the same text. It has up to four parts, and leaves out any part with nothing in it.
 
-1. **Pinned docs packs to fix.** Each line says what is wrong and ends with the step that fixes it, usually `llm-docs sync <id>`. Do it before you rely on that pack.
+1. **Pinned docs packs to fix.** Each line says what is wrong and ends with the step that fixes it, usually `llm-docs sync <id>`. Do it before you rely on that pack. A pack whose files no longer match its manifest, or that llm-docs cannot use as it is, is listed only here, never as pinned docs: do not read its pages until the fix has run.
 2. **Pinned docs for libraries released after or close to your training data cutoff.** Your memory of these libraries predates the pinned versions. Read the pack index and the pages for the APIs you touch before you write code against them, starting with the pages the pack marks to read first.
 3. **Direct dependencies released after or close to your cutoff with no pinned docs.** Read their current docs before you use their APIs, or pin them with the `add-docs` skill.
 4. **The pack list**, when the agent file your harness reads has no managed block. Treat it like the managed block.

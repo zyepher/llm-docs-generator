@@ -105,7 +105,7 @@ llm-docs never sends credentials to git, and it clears git's credential helpers,
 |---|---|---|---|
 | `urls` | array | required | At least one entry. An entry is an `https://` URL string, or `{ "url": ..., "path": ... }` to choose the stored path. A URL must carry no credentials: no user name or password, and no token, key, signature, or similar parameter. |
 
-The stored path of a URL string is its pathname, percent-decoded, with `.md` appended when the last segment has no extension and `index.md` for a trailing slash. Two entries with the same stored path are a config error naming both URLs.
+The stored path of a URL string is its pathname, percent-decoded, with `.md` appended when the last segment has no extension and `index.md` for a trailing slash. Two entries whose stored paths name one file on a case-insensitive file system (`Guide.md` and `guide.md`) are a config error naming both URLs.
 
 llm-docs sends no cookies, tokens, or other credentials with a request, so it cannot fetch a page behind a login. The same holds for `llms-txt` sources. To pin such docs, copy them into a folder in the project and use a [`local`](#local) source.
 

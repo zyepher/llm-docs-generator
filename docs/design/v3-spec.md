@@ -68,8 +68,17 @@ explicitly named index (`llms.txt`) lists after an explicit planner-written filt
                                 by the `citations` check through recomputation (section 8)
 ```
 
-The project root is the nearest ancestor of the working directory containing `llm-docs.json`.
-Commands that create config (`init`, `add`, `migrate`) use that project when one exists, else
+The project root is the nearest ancestor of the working directory containing an entry named
+`llm-docs.json`. The entry must be a regular file (a link to one is followed); anything else is
+a config error naming it, never a reason to look further up. A command that rewrites it refuses
+a read-only or hard-linked file with a config error. Discovery does not ask who owns the
+config, so below a directory another user can write to (a shared `/tmp`) it may be theirs. On
+POSIX systems, when `llm-docs.json` or its directory belongs to another user (by `lstat` uid
+against `process.getuid()`; root is another user unless running as root), no converter whose
+executable the config names runs: `sync`, `add`, and `refresh` fail that pack with a config
+error saying whose file it is, and the hook ignores the config (7.2). Fetching per its recipe
+and reading packs stay allowed, since neither runs code. Windows has no uids and skips the
+check. Commands that create config (`init`, `add`, `migrate`) use that project when one exists, else
 the git top-level directory when inside a git repository, else the working directory.
 `--project <dir>` names the root, as given, on every command that reads a project (section 5),
 `status` included: with no `llm-docs.json` there, `status` analyses that directory's
@@ -304,6 +313,20 @@ clear message instead of waiting. `sync --check` takes no lock.
   verifies it by recomputing every hash it records (section 8).
 - Reading a manifest whose `schemaVersion` is not 3 fails with a message pointing to
   `llm-docs migrate`.
+- A manifest is read only from a regular `manifest.json` in a real pack directory, never
+  through a symbolic link, and it must agree with its own recipe: `recipeHash` is the hash of
+  `recipe`; `pack.title`, `pack.version`, and `dependency` equal the recipe's; there is one origin
+  per recipe source, of the same type; every `sources[].source` names a recipe source. A manifest
+  that fails any of these is invalid: `verify` fails `manifest-schema` and `sync` rebuilds.
+- Every path a manifest records (`sources[].path`, `outputs[].path`, the paths inside
+  `outputs[].sources`, `links.unresolved[].page`, a local origin's `path`) is a contained
+  relative POSIX path: no empty, `.`, or `..` segment, no backslash, no control character.
+  Output paths also fit their kind: pages under `pages/`, passthrough files under `files/`,
+  `index.md`, and `<id>.full.md`. `guides/citations.lock.json` applies the same predicate
+  (`isContainedRelativePath`) to its guide keys and citation targets.
+- `fetch.finalUrl`, an `llms-txt` origin's `finalUrl`, and a git origin's `finalRepo` are
+  stored redacted (`redactUrl`), since a redirect may lead to a presigned URL. URLs the recipe
+  names are stored as written: the config refuses one that carries a credential (section 4.1).
 
 ## 4. Building a pack
 
@@ -314,9 +337,14 @@ an identity) that is removed afterwards, including on failure.
 
 **Network policy (shared HTTP client, `src/sources/http.ts`):** `https:` only (plus `http:` to
 loopback when `LLM_DOCS_ALLOW_PRIVATE_NETWORK=1`, which tests use). Before connecting, resolve
-the hostname and reject private, loopback, link-local, CGNAT, multicast, and unique-local
-addresses (IPv4 and IPv6, including IPv4-mapped IPv6), plus the documentation, benchmarking,
-reserved, NAT64, 6to4, Teredo, discard, and site-local ranges, unless the same env flag is set.
+the hostname and reject every address in a block the IANA IPv4 and IPv6 Special-Purpose
+Address Registries mark not globally reachable (private, loopback, link-local, CGNAT,
+documentation, benchmarking, reserved, discard, and the rest), plus multicast, site-local, and
+the IPv6 forms that carry an IPv4 address (IPv4-compatible, IPv4-translated, 6to4, Teredo, and
+the local-use NAT64 prefix `64:ff9b:1::/48`), unless the same env flag is set. Two forms are
+judged by the IPv4 address in their last 32 bits instead: an IPv4-mapped address and NAT64's
+well-known prefix `64:ff9b::/96`, which is how a DNS64 resolver returns IPv4-only hosts on an
+IPv6-only network (RFC 6052). One that carries a special IPv4 address is refused, naming it.
 Every resolved address must pass. Pin the connection to the vetted address so DNS rebinding
 cannot swap it. Follow at most 5 redirects,
 re-applying the policy to each hop and recording the final URL. Timeouts: 15 s connect, 60 s
@@ -324,9 +352,15 @@ total per request. Per-response cap 20 MB (configurable per pack up to 200 MB wi
 `limits.maxFileBytes`), streamed and aborted when exceeded. Per-pack caps: 5,000 files and
 500 MB total. Concurrency 4 per host. Retries: 2, only for network errors, 429, and 5xx, with
 jittered backoff honoring `Retry-After` up to 30 s. User-Agent:
-`llm-docs/<version> (+https://github.com/Zyepher/llm-docs-generator)`. Credentials in URLs are
-rejected; URLs are redacted (`redactUrl`) in every log and error. `GITHUB_TOKEN` is sent only
-to `api.github.com` and only when set.
+`llm-docs/<version> (+https://github.com/Zyepher/llm-docs-generator)`. A requested URL that
+carries a credential (user info, or a parameter whose name looks like a token, key, signature,
+password, session, or similar, as `urlCredentials` decides) is refused; a redirect may still
+lead to one, since servers presign download URLs. The config schema applies the same
+predicate to every URL-valued key, so `add` fails before writing `llm-docs.json`. Every URL in
+a log line, error, warning, page provenance line, or `index.md` goes through `redactUrl`.
+The engine sends no credentials, so a private repository or a page behind a login cannot be
+fetched; copy such docs into the project and use a `local` source. `GITHUB_TOKEN` is sent only
+to `api.github.com`, only when set, and only for release-date lookups.
 
 **Git policy (`src/sources/git.ts`):** run git with `execFile`, never a shell. Environment:
 every `GIT_*` variable from the parent is dropped except `GIT_SSL_CAINFO` and `GIT_SSL_CAPATH`
@@ -337,7 +371,12 @@ applies), and `GCM_INTERACTIVE=never` are set. Config flags on every invocation:
 `-c core.hooksPath=<empty dir>`, `-c core.symlinks=false`, `-c core.fsmonitor=false`,
 `-c protocol.allow=never -c protocol.https.allow=always` (`protocol.file.allow=always` only for
 `file://` repos), `-c http.followRedirects=false`, `-c credential.helper=` (no helper),
-`-c transfer.fsckObjects=true`, `-c submodule.recurse=false`, `-c fetch.recurseSubmodules=false`.
+`-c transfer.fsckObjects=true`, `-c fetch.fsck.<id>=ignore` for the legacy ids git-config(1)
+documents for old repositories (`badTimezone`, `badDate`, `badDateOverflow`, `zeroPaddedDate`,
+`missingSpaceBeforeDate`, `zeroPaddedFilemode`), `-c submodule.recurse=false`,
+`-c fetch.recurseSubmodules=false`. git applies no `fetch.fsck.<id>` to a filtered fetch, so a
+fetch that fails only on one of those ids is redone without `--filter=blob:none`, where they
+apply; every other fsck id stays an error.
 A repository URL with a query or fragment is refused. Before git runs, an `https` repository's
 discovery URL (`<repo>/info/refs?service=git-upload-pack`) is requested through the HTTP client,
 which applies the address rules above to every redirect hop; when it redirects to another
@@ -369,7 +408,9 @@ are checked for collisions, of whole paths and of every directory on the way (un
 NFKC, then full Unicode case folding, then NFKC, because macOS and Windows file systems are
 case-insensitive and APFS is normalization-insensitive; the key is deliberately coarser than
 any one file system, so it may refuse a pair, such as `ﬀ` and `ff`, that some file system
-keeps apart; and again after rendering, for OpenAPI tag pages), for
+keeps apart; `pathCollisionKey` in `src/utils/fs-path.ts`; again after rendering, for
+OpenAPI tag pages, whose names the parser already makes unique under the same key; and for the
+stored paths of `urls` entries and of `llms-txt` pages before anything is fetched), for
 Windows-reserved names, for characters Windows forbids, and for segments ending in a dot or a
 space; each is an error naming the files.
 
@@ -459,10 +500,13 @@ inline links, images, reference definitions, autolinks, and the URL attributes i
    `malformed`, or `disallowed-scheme`). In raw HTML the attribute is renamed to
    `data-unresolved-<name>` (`data-unresolved-href`, `data-unresolved-src`, ...) instead.
 
-`verify` fails on a relative link in a page or index that does not resolve on disk, so the
-build never leaves one: a relative target is rewritten to a pack page or an absolute upstream
-URL when it can be, and otherwise made plain text by step 5. The count of such conversions is a
-manifest warning.
+`verify` fails on a relative link in a page or index that does not resolve on disk, and on a
+link whose scheme is outside the same allowlist (`LIVE_SCHEMES`, read by the same `linkScheme`),
+so a page edited after the build cannot carry one. The build never leaves either: a relative
+target is rewritten to a pack page or an absolute upstream URL when it can be, and otherwise
+made plain text by step 5. The manifest records two warnings with counts: one for links made
+plain text because they did not resolve, and one for links made plain text because of their
+scheme.
 
 ### 4.6 Converters
 
@@ -659,12 +703,12 @@ fails, the other pack checks are skipped):
 
 | Check | Fails when |
 |---|---|
-| `manifest-schema` | manifest missing, unparsable, not schema v3, for another pack id, inconsistent with its own recipe (`recipeHash`, `pack.title`, `pack.version`, `dependency`), or recording a path that is not a contained relative POSIX path under the directory its kind allows; a pack directory or `manifest.json` that is a symbolic link is never read |
+| `manifest-schema` | manifest missing, unparsable, not a regular file, not schema v3, for another pack id, inconsistent with its own recipe (`recipeHash`, `pack.title`, `pack.version`, `dependency`, origins, source indexes), or recording a path that is not a contained relative POSIX path under the directory its kind allows; a pack directory or `manifest.json` that is a symbolic link is never read |
 | `outputs` | a listed output is missing or its hash differs |
 | `unlisted-files` | a file in the pack is not listed, the pack holds a symlink or is one, or the walk could not examine part of it (depth, entry count, or an unreadable directory, named where it stopped) (`guides/**` and OS junk, `.DS_Store`, `Thumbs.db`, `desktop.ini`, are reported as info). Every file verify opens resolves inside the pack directory with no link on the way; an I/O error on one file is a failing finding for that file, and every other check still runs |
-| `links` | a relative link in a page, index, or combined file does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
+| `links` | a link in a page, index, or combined file has a scheme outside `LIVE_SCHEMES` (`https`, `http`, `mailto`), or a relative link does not resolve inside the pack, or is site-absolute (fragments are checked against heading slugs only in `--strict`, and never into `guides/`) |
 | `recipe` | the config recipe for this id, resolved at the version the manifest records, has a different `recipeHash` (the config was edited) or cannot be resolved (warn when the config has no such pack: orphan); a lockfile that moved while the config stayed the same passes here, since `lockfile` reports it: one cause, one finding |
-| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, or no lockfile resolves it; when lockfiles disagree, warn if one matches and fail otherwise. A `covers` entry never fails it: warn when the lockfiles resolve it to a version whose major (the leading `<number>.`) differs from `pack.version`'s, since the pack may not describe that package's version (no finer comparison: a family's packages do not always share versions) |
+| `lockfile` | `dependency` is set and the lockfile version differs from `pack.version`, no lockfile resolves it, or the lockfiles install it only from another registry while the recipe sets no `version`; when lockfiles disagree, warn if one matches and fail otherwise. A `covers` entry never fails it: warn when the lockfiles resolve it to a version whose major (the leading `<number>.`) differs from `pack.version`'s, since the pack may not describe that package's version (no finer comparison: a family's packages do not always share versions) |
 | `citations` | a guide citation does not resolve, its cited section hash changed since stamping, or the lock is invalid; an unstamped guide, a guide edited after stamping, or a lock entry for a deleted guide is a warning |
 | `conversion` | an `agent` conversion's original changed since the last sync (warn when a local original no longer exists) |
 | `license` | warn for `unknown` and `proprietary`; fail under `--strict` |
@@ -684,8 +728,13 @@ and `packsDir`), finds lockfiles, and returns resolved dependencies. Directories
 depth limit are named in one warning. A lockfile larger than `maxLockfileBytes` (64 MiB for
 commands; 4 MiB for the hook, whose deadline cannot interrupt a synchronous parse) is skipped
 with a warning naming it and its size. The hook's deadline can stop the scan early, with a
-warning. A lockfile skipped either way is listed in `unread`, and a lookup in its ecosystem
-answers `unread` rather than guessing from the other lockfiles. Every entry a parser returns
+warning. Every lockfile, and every file read beside one (`package.json`, `.npmrc`,
+`.yarnrc.yml`, `pyproject.toml`, `Cargo.toml`, `go.work`, `go.mod`, `Package.swift`, and the
+rest), is read only when it is a regular file (`readRegularFile`), so a named pipe can never
+block the scan or the hook. A lockfile that is not one, or whose neighbor is not one, is
+skipped with a warning naming the file. A lockfile skipped in any of these ways is listed in
+`unread`, and a lookup in its ecosystem answers `unread` rather than guessing from the other
+lockfiles. Every entry a parser returns
 must have a version that is one line of printable characters without whitespace, at most 128
 characters, and a name that follows its registry's rule; any other entry is skipped with a
 warning naming the lockfile and the package:
@@ -704,6 +753,8 @@ interface ResolvedDependency {
 interface DependencyScan {
   dependencies: ResolvedDependency[]  // sorted by ecosystem, name, version, lockfile
   lockfiles: string[]
+  unread: UnreadLockfile[]
+  otherRegistry: { ecosystem: Ecosystem; name: string; lockfile: string }[]
   warnings: string[]
 }
 ```
@@ -726,7 +777,12 @@ registry when the source its lockfile records is not the ecosystem's public regi
 (`registry.npmjs.org` and its yarn and npmmirror mirrors; `pypi.org` and
 `files.pythonhosted.org`; crates.io; pub.dev), or, for an npm entry that records no URL, when
 the project's `.npmrc` (`.yarnrc.yml` for yarn berry), read as data, sends its scope or the
-default elsewhere. A dependency with no recorded source is taken as the public registry's. `bun.lockb` (binary) is reported as unsupported.
+default elsewhere. A dependency with no recorded source is taken as the public registry's.
+An alternate-registry dependency is kept in `otherRegistry`, never in `dependencies`, so no
+release date is ever looked up for it: the public registry's date for a package of the same
+name says nothing about a private one. A lookup that finds a dependency only there answers
+`other-registry` rather than `missing`; `sync` then asks for an explicit `version`, and
+`status` reports the `other-registry` state (6.4). `bun.lockb` (binary) is reported as unsupported.
 Name normalization: PyPI names are PEP 503 normalized; others exact. Parsers never execute
 project code. TOML is parsed with `smol-toml`.
 
@@ -792,14 +848,17 @@ and DeepMind model cards (`docs.cloud.google.com/gemini-enterprise-agent-platfor
 
 Joins the dependency scan, the packs, release dates, and the cutoff:
 
-- Packs: id, version, dependency, state (`ok`, `stale-pack` when the lockfile moved or
-  lockfiles disagree with none matching; `lockfile-conflict` when the lockfiles disagree and
-  one matches; `not-in-lockfile` when no lockfile resolves the bound dependency;
-  `lockfile-unread` when a lockfile of its ecosystem was skipped (too large, or past the
-  hook's deadline), so its version is unknown; these win over `recipe-changed`;
-  `recipe-changed`;
-  `missing` when configured but never synced or its manifest cannot be read; `orphan`), the
-  release date of
+- Packs: id, version, dependency, state (`ok`; `unusable` when `sync` would refuse the pack
+  as it is, such as a pack directory or `guides/` that is a symbolic link, with the refusal's
+  first sentence as the next step; `missing` when configured but never synced or its manifest
+  cannot be read; `stale-pack` when the lockfile moved or lockfiles disagree with none
+  matching; `lockfile-conflict` when the lockfiles disagree and one matches;
+  `not-in-lockfile` when no lockfile resolves the bound dependency; `other-registry` when the
+  lockfiles install it only from another registry and the recipe sets no `version`;
+  `lockfile-unread` when a lockfile of its ecosystem was skipped (too large, not a regular
+  file, or past the hook's deadline), so its version is unknown; these win over the rest;
+  `recipe-changed`; `sources-changed` when a `local` source's files changed; `pack-changed`
+  when the pack's files no longer match its manifest; `orphan`), the release date of
   the pack's version of its bound dependency and whether it falls after or near the cutoff,
   the built pack's read-first targets (4.8) as project-relative paths (the full list in
   `--json`, a count in the human table), and the step that brings the pack back to `ok`
@@ -808,10 +867,18 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
   `covers` (2.2) that the lockfiles resolve, at each resolved version, with its lockfiles,
   release date, window, and whether its major version differs from the pack's (`covered` in
   `--json`; a line under the pack's row in the human table, with a note when the major differs).
+- The states after the lockfile ones come from `packOfflineStaleness` in
+  `src/pack/build.ts`, the decision `sync --check` makes without the network (acquire the
+  sources that need no network, then compare the recipe, the lockfiles, the pack's own files,
+  and the local sources), so `status` never calls a pack `ok` that `sync --check` would
+  rebuild or refuse for a reason it can see offline. An upstream change needs the network:
+  `status` never reports one, and `refresh --check` is the command that asks. A pack that is
+  `pack-changed` or `unusable` is never offered as pinned docs in the note.
 - Direct dependencies released after the cutoff, or within `nearCutoffDays` before it, that
   have no pack bound to that name or covering it, at any version: name, version, release date,
   and a suggested next step (`llm-docs discover --package <eco>:<name>@<version>`, the evidence
-  for writing a recipe; for SwiftPM the repository URL is the name). With no cutoff, the direct
+  for writing a recipe; for SwiftPM the repository URL is the name, unless it carries a
+  credential, when the package name is used). With no cutoff, the direct
   dependencies released in the last 180 days instead, as the hook does.
 - Without `--model`, the model id comes from `ANTHROPIC_MODEL` and the Claude Code settings
   files, as in the hook (7.2). The report names the model and where its id came from (`--model`,
@@ -868,7 +935,8 @@ the first packs and ends with `- ...and N more: see agent-docs/`. Upstream-deriv
 spaces, Unicode format characters (zero-width and bidirectional controls) and backticks are
 removed, `@` is removed (Claude Code expands `@path` in `CLAUDE.md`), `<`/`>` become `&lt;` and
 `&gt;`, whitespace collapses to a single line, and the result is capped at 80 code points (77
-plus `...`). Blocks
+plus `...`). The session note (7.2) escapes more lightly, since it is no agent file: it keeps
+`@`, because nothing expands `@path` in injected context. Blocks
 are inserted at the end of the file when absent, with one blank line before. The block uses
 `\r\n` when every line feed outside it is part of a `\r\n` (judged by the whole file when
 there is no line feed outside the block), else `\n`; bare `\r` line endings are kept as they
@@ -904,7 +972,9 @@ context for the agent. Behavior:
 - Model: payload `model` (Claude Code sends it only in some sessions; headless `-p` runs omit
   it), Cursor `model_id`/`model`, Codex `model`; then `ANTHROPIC_MODEL`; then `model` from
   `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`,
-  `~/.claude/settings.json`. The payload's `model` wins over `model_id`, and a `{ "id": ... }`
+  `~/.claude/settings.json`, each read asynchronously and only when it is a regular file (one
+  that is not is skipped and logged, so a named pipe cannot block the hook past its deadline).
+  The payload's `model` wins over `model_id`, and a `{ "id": ... }`
   object is accepted. Claude Code aliases (`opus`, `sonnet`, `haiku`, `fable`, `best`,
   `opusplan`, with optional `[1m]`-style suffixes) resolve through the cutoff table's
   `claudeCodeAliases` to the model the alias currently selects, per provider
@@ -925,9 +995,12 @@ context for the agent. Behavior:
   dependencies (your training data may predate them)"): a fact from release dates, not a guess
   about the model.
 - Content (at most 2,000 characters; nothing at all when there is nothing to say):
-  1. Packs to fix (the lockfile moved, no lockfile resolves the bound dependency, the
-     lockfiles disagree on it, the recipe changed, or never built), each with its fix from
-     `status`. A dependency name is printed exactly, as a code span (`` `@types/node` ``).
+  1. Packs to fix (any state but `ok`, `lockfile-unread`, and `orphan` in 6.4: the lockfile
+     moved, no lockfile resolves the bound dependency, the lockfiles install it from another
+     registry, the lockfiles disagree on it, the recipe changed, its local sources changed, its
+     files no longer match its manifest, sync would refuse it as it is, or never built), each
+     with its fix from `status`. A pack whose files no longer match its manifest, or that sync
+     would refuse, is never listed in item 2. A dependency name is printed exactly, as a code span (`` `@types/node` ``).
      Every value from a lockfile, a manifest, a registry, or config passes through one escape
      where it is placed (one line, no backtick, `<` and `>` as `&lt;` and `&gt;`), here and in
      the human `status` report. A `lockfile-unread` pack gets no row: the note says nothing
@@ -968,13 +1041,17 @@ context for the agent. Behavior:
   `status --project <root> --json` process, started after the note is written, at most one per
   project per 6 hours, tracked by a marker file in `<cache dir>/hook-warm/`, so the next session
   has it. The stdin read gets at most 1,000 ms, and 150 ms are reserved at the end of the
-  deadline for rendering and writing. The lockfile scan and the lookups stop when the deadline
+  deadline for rendering and writing. The per-pack offline check of 6.4 gets 400 ms (about a
+  thousand local pages, measured); a pack whose check does not finish is judged by its manifest
+  and the lockfiles alone, and the hook logs it. The lockfile scan and the lookups stop when the deadline
   nears. A run that misses the deadline prints nothing.
 - Failure policy: always exit 0. Errors go to `<cache dir>/hook.log` (rotated at 1 MB, one
   previous file kept), never to stdout or stderr. The log is only appended to a regular file
   with one link, and the warm-up marker only written in a real `hook-warm/` directory. An agent
-  file that is not a regular file counts as absent for the block-visibility check, and is logged. An invalid `llm-docs.json` is logged and the
-  hook continues with the dependency analysis only. A malformed `LLM_DOCS_MODEL_CUTOFF` costs the
+  file that is not a regular file counts as absent for the block-visibility check, and is logged. An invalid `llm-docs.json`, one that is not a regular file, and one that another user owns or that sits in a directory another user owns (2.1) is logged and ignored, and the
+  hook continues with the dependency analysis only. The hook never reads a file it did not
+  create with a synchronous call, and never opens one at a fixed name except through
+  `readRegularFile`. A malformed `LLM_DOCS_MODEL_CUTOFF` costs the
   override, not the note: it is logged, that source is ignored, and cutoff resolution goes on
   with the next source, ending at the neutral heading when none resolves. (A malformed
   `model.cutoff` makes `llm-docs.json` invalid, so the rule above applies to it.)
@@ -1125,10 +1202,14 @@ writes files.
 - Fetched docs are untrusted input that ends up in an agent's context. The engine never copies
   upstream text into agent files beyond escaped titles and directory names (7.1), never executes
   fetched content, and never follows links inside fetched pages.
-- Network: section 4.1 policy (scheme allowlist, private-address blocking with DNS pinning,
-  redirect re-validation, size and count caps, timeouts, credential rejection, redaction).
+- Network: section 4.1 policy (scheme allowlist, special-purpose address blocking from the
+  IANA registries with DNS pinning, IPv4-carrying forms judged or refused, redirect
+  re-validation, size and count caps, timeouts, refusal of credential-bearing URLs in config
+  and requests, redaction by rule everywhere a URL is printed). The tool sends no credentials,
+  so private sources are taken from a project folder.
 - Git: section 4.1 policy (no hooks, no submodules, no symlinks, protocol allowlist, isolated
-  config, no shell).
+  config, no shell, no redirect git follows on its own, no credential helper, object checks
+  with only the documented legacy ids ignored, a ceiling on repository discovery).
 - File system: pack files are written only inside the pack staging directory; the other
   writes are `llm-docs.json` (init, add, migrate), `<packsDir>/.gitignore`, the packs lock,
   `guides/citations.lock.json` (stamp), the agent files `agentFiles` selects (7.1), deletes of
@@ -1136,13 +1217,24 @@ writes files.
   `hook-warm/`). Paths are checked with `isSameOrDescendant`, after resolving symlinks for
   `packsDir`, local sources, and agent files; collisions and reserved names are errors; writes
   are atomic (`writeTextFileSafely`, `writeJsonFileSafely`), keep the replaced file's permission
-  bits, and refuse to replace anything but a regular, writable file with one link. Files read by
-  a fixed name (agent files, the packs lock, `citations.lock.json`, `<packsDir>/.gitignore`, the
-  hook's warm-up marker) are read only when they are regular files, so a named pipe can never
-  block a command. `docs/security.md` lists every control with the file that implements it.
+  bits, and refuse to replace anything but a regular, writable file with one link. Every file
+  read by a fixed or user-controlled name in the project or the home directory (`llm-docs.json`,
+  manifests, agent files, the packs lock, `citations.lock.json`, `<packsDir>/.gitignore`,
+  lockfiles and the files beside them, Claude Code settings, the caches, the hook's warm-up
+  marker, and source files) is read only when it is a regular file (`readRegularFile`,
+  `openRegularFile`), so a named pipe can never block a command or the hook. The pack directory
+  and its `guides/` must be real directories. `docs/security.md` lists every control with the
+  file that implements it.
 - Converters run with `execFile`, a timeout, and paths the engine chose; `command` converters
-  are trusted local configuration, documented as such.
+  are trusted local configuration, documented as such, and never run from a config another
+  user owns (2.1).
 - The hook never writes outside the cache directory and never prints secrets or tokens.
+- Accepted risks: project discovery uses the nearest `llm-docs.json`; git resolves a host
+  itself, so its connection is not pinned; a local attacker who can write to the project can
+  race a check and a write, which is out of scope; `sync`, `add`, `refresh`, `init`, and
+  `migrate` run read-only git commands in the project (`src/core/git-state.ts`: the host
+  commit of a `local` source, the git top level) with the user's own git config, outside the
+  4.1 policy, while `status`, `sync --check`, and the hook never run git there.
 
 ## 12. Quality bar and delivery
 
