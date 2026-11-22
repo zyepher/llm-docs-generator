@@ -293,8 +293,14 @@ Text that reaches an agent file (pack titles, versions, descriptions, and top-le
           "transforms": ["strip-mintlify-banner"]
         }
       ],
-      "license": "MIT"
+      "site": {
+        "baseUrl": "https://modelcontextprotocol.io",
+        "aliases": { "/specification/latest": "/specification/{version}" }
+      },
+      "license": "Apache-2.0 AND MIT"
     }
   }
 }
 ```
+
+The `mcp` license comes from the `LICENSE` file of the specification repository at the tag `2026-07-28`: new specification contributions are Apache-2.0, contributions whose authors have not yet agreed to relicense remain MIT, and documentation other than the specification is CC-BY-4.0. This pack takes only the specification, so it declares `Apache-2.0 AND MIT`; a pack that also takes the site's `/docs/` pages declares `Apache-2.0 AND MIT AND CC-BY-4.0`.
