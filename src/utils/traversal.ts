@@ -9,7 +9,7 @@ import { compareStringsByCodeUnit } from './sort.js';
  * control internals, dependency trees, and build outputs. One shared list so
  * every bounded local inspection skips the same vendored trees.
  */
-export const SKIPPED_DIRECTORY_NAMES = [
+const SKIPPED_DIRECTORY_NAMES = [
   '.cache',
   '.docusaurus',
   '.git',
@@ -28,7 +28,7 @@ export const SKIPPED_DIRECTORY_NAMES = [
 
 const SKIPPED_DIRECTORY_NAME_SET: ReadonlySet<string> = new Set(SKIPPED_DIRECTORY_NAMES);
 
-export function isSkippedTraversalDirectory(name: string): boolean {
+function isSkippedTraversalDirectory(name: string): boolean {
   return SKIPPED_DIRECTORY_NAME_SET.has(name);
 }
 

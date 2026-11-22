@@ -43,7 +43,7 @@ export type ConverterTool = ConvertSpec['tool'];
 export type ManifestConverter = NonNullable<ManifestSourceEntry['converter']>;
 
 /** A converter failed to run or produced nothing usable: a runtime failure (exit 3). */
-export class ConverterError extends Error {
+class ConverterError extends Error {
   override name = 'ConverterError';
 }
 

@@ -18,7 +18,7 @@ import { isFileNotFoundError } from './guards.js';
  * input (normalized relpaths such as the link rewriter's); on POSIX platforms
  * the two prefixes coincide.
  */
-export function isParentRelativePath(path: string): boolean {
+function isParentRelativePath(path: string): boolean {
   return path === '..' || path.startsWith(`..${sep}`) || path.startsWith('../');
 }
 
@@ -30,15 +30,6 @@ export function isSameOrDescendant(parentPath: string, candidatePath: string): b
   const relativePath = relative(parentPath, candidatePath);
 
   return relativePath === '' || (!isParentRelativePath(relativePath) && !isAbsolute(relativePath));
-}
-
-/** realpath(path), or undefined when the path does not exist. */
-export async function realpathIfExists(path: string): Promise<string | undefined> {
-  try {
-    return await realpath(path);
-  } catch {
-    return undefined;
-  }
 }
 
 /**

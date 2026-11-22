@@ -45,7 +45,7 @@ export class HttpPolicyError extends ConfigError {
 }
 
 /** A request that failed at runtime (network error, timeout, bad status, size cap). */
-export class HttpRequestError extends Error {
+class HttpRequestError extends Error {
   override name = 'HttpRequestError';
 
   constructor(

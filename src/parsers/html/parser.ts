@@ -147,7 +147,7 @@ interface HtmlTextNode {
 
 type HtmlNode = HtmlRootNode | HtmlElementNode | HtmlTextNode;
 
-export class HtmlParser {
+class HtmlParser {
   constructor(private readonly filePath: string) {}
 
   async parse(): Promise<HtmlDocument> {

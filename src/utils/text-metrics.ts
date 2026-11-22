@@ -7,7 +7,7 @@
  * tokenizer; changing the formula would change every recorded value, so it is
  * part of the on-disk contract.
  */
-export const DEFAULT_ESTIMATED_CHARACTERS_PER_TOKEN = 4;
+const DEFAULT_ESTIMATED_CHARACTERS_PER_TOKEN = 4;
 
 /**
  * Estimate token count as ceil(characters / divisor). The divisor is sanitized
