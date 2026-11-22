@@ -12,7 +12,7 @@
  * Known user of this dialect: the TanStack docs site (https://tanstack.com/).
  *
  * The first extension registered in the directive seam; other dialects register
- * alongside it without touching the parser core.
+ * alongside it without touching the page pipeline.
  */
 
 import { getOpeningFence, isClosingFence, type FenceState } from '../fences.js';

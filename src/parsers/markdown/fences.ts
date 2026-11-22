@@ -1,10 +1,9 @@
 /**
- * Fenced-code-block scanning primitives shared by the markdown parser core and
- * the markdown-directive extensions.
+ * Fenced-code-block scanning primitives shared by the Markdown dialect helpers
+ * and the markdown-directive extensions.
  *
- * Kept as pure functions (no parser state) so a self-contained directive
- * extension can be fence-aware without reaching back into the parser class, and
- * so the parser and every extension apply exactly one fence-detection rule.
+ * Kept as pure functions (no state) so a self-contained directive extension can
+ * be fence-aware, and every extension applies exactly one fence-detection rule.
  */
 
 export interface FenceState {

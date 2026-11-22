@@ -1,9 +1,8 @@
 /**
- * Text-level Markdown dialect helpers shared by the DocNode parser and the v3
- * source-preserving page pipeline (src/pack/markdown.ts): YAML frontmatter
- * detection, DocC block directives and cross-references, and MDX ESM
- * declaration detection. Pure functions over strings, so both callers apply
- * exactly one rule for each dialect.
+ * Text-level Markdown dialect helpers for the source-preserving page pipeline
+ * (src/pack/markdown.ts): YAML frontmatter detection, DocC block directives
+ * and cross-references, and MDX ESM declaration detection. Pure functions over
+ * strings.
  */
 
 import { loadYaml } from '../../utils/yaml.js';

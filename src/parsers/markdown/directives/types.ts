@@ -1,11 +1,11 @@
 /**
  * Markdown-directive extension seam.
  *
- * A directive extension teaches the generic markdown parser one vendor's private
+ * A directive extension teaches the Markdown page pipeline one vendor's private
  * directive dialect (e.g. TanStack's `<!-- ::start:KIND -->` switcher comments)
- * without baking that dialect into the parser core. New vendors or parser
- * plugins register an extension in the directive registry; the parser never
- * names any single dialect.
+ * without baking that dialect into the pipeline. New dialects register an
+ * extension in the directive registry; the pipeline never names any single
+ * dialect.
  */
 
 export interface MarkdownDirectiveExtension {

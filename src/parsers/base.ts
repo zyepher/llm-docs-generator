@@ -14,10 +14,8 @@ import { errorMessage } from '../utils/guards.js';
  */
 export enum FormatType {
   OPENAPI = 'openapi',
-  MARKDOWN = 'markdown',
   RST = 'rst',
   HTML = 'html',
-  AUTO = 'auto',
 }
 
 /**

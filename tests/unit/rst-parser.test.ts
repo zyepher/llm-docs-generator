@@ -6,14 +6,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { canCreateSymlinks } from '../helpers/symlinks.js';
 
-import { FormatDetector } from '../../src/core/detector.js';
 import {
   ContentBlockType,
   DocNodeType,
   type ContentBlock,
   type DocNode,
 } from '../../src/core/models.js';
-import { FormatType } from '../../src/parsers/base.js';
 import { RstFormatParser, parseRstFile } from '../../src/parsers/rst/index.js';
 
 const tempDirs: string[] = [];
@@ -39,7 +37,7 @@ afterEach(async () => {
 });
 
 describe('reStructuredText parser foundation', () => {
-  it('detects .rst files and registers RST with the format detector', async () => {
+  it('detects .rst files', async () => {
     const dir = await createTempDir();
     const rstPath = join(dir, 'tutorial.rst');
     const textPath = join(dir, 'tutorial.txt');
@@ -48,12 +46,9 @@ describe('reStructuredText parser foundation', () => {
     await writeFile(textPath, 'Tutorial\n========\n', 'utf-8');
 
     const parser = new RstFormatParser();
-    const detector = new FormatDetector();
 
     expect(await parser.detect(rstPath)).toBe(true);
     expect(await parser.detect(textPath)).toBe(false);
-    expect(await detector.detect(rstPath)).toBe(FormatType.RST);
-    expect(detector.getAvailableFormats()).toContain(FormatType.RST);
   });
 
   it('parses underline headings, paragraphs, and simple lists into DocNode IR', async () => {
@@ -230,10 +225,8 @@ describe('reStructuredText parser foundation', () => {
       await symlink(symlinkTarget, join(sourceDir, 'linked-docs'));
 
       const parser = new RstFormatParser();
-      const detector = new FormatDetector();
 
       expect(await parser.detect(sourceDir)).toBe(true);
-      expect(await detector.detect(sourceDir)).toBe(FormatType.RST);
 
       const root = await parser.parse(sourceDir);
       const sourcePaths = root.metadata.get('sourcePaths');
@@ -258,12 +251,10 @@ describe('reStructuredText parser foundation', () => {
     await writeFile(sourcePath, 'Tutorial\n========\n', 'utf-8');
 
     const parser = new RstFormatParser();
-    const detector = new FormatDetector();
 
     expect(await parser.detect(sourcePath)).toBe(false);
     await expect(parser.parse(sourcePath)).rejects.toThrow(/Unsupported RST file extension/);
     await expect(parseRstFile(sourcePath)).rejects.toThrow(/Unsupported RST file extension/);
-    await expect(detector.detect(sourcePath)).rejects.toThrow(/Unable to detect format/);
   });
 
   it.skipIf(!canCreateSymlinks)(

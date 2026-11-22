@@ -6,14 +6,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { canCreateSymlinks } from '../helpers/symlinks.js';
 
-import { FormatDetector } from '../../src/core/detector.js';
 import {
   ContentBlockType,
   DocNodeType,
   type ContentBlock,
   type DocNode,
 } from '../../src/core/models.js';
-import { FormatType } from '../../src/parsers/base.js';
 import { HtmlFormatParser, parseHtmlFile } from '../../src/parsers/html/index.js';
 
 const tempDirs: string[] = [];
@@ -39,7 +37,7 @@ afterEach(async () => {
 });
 
 describe('static HTML parser foundation', () => {
-  it('detects .html/.htm files and registers HTML with the format detector', async () => {
+  it('detects .html/.htm files', async () => {
     const dir = await createTempDir();
     const htmlPath = join(dir, 'index.html');
     const htmPath = join(dir, 'legacy.htm');
@@ -50,14 +48,10 @@ describe('static HTML parser foundation', () => {
     await writeFile(textPath, '<!doctype html><h1>Text</h1>', 'utf-8');
 
     const parser = new HtmlFormatParser();
-    const detector = new FormatDetector();
 
     expect(await parser.detect(htmlPath)).toBe(true);
     expect(await parser.detect(htmPath)).toBe(true);
     expect(await parser.detect(textPath)).toBe(false);
-    expect(await detector.detect(htmlPath)).toBe(FormatType.HTML);
-    expect(await detector.detect(htmPath)).toBe(FormatType.HTML);
-    expect(detector.getAvailableFormats()).toContain(FormatType.HTML);
   });
 
   it('parses title/H1 fallback, headings, paragraphs, and lists into DocNode IR', async () => {
@@ -339,10 +333,8 @@ describe('static HTML parser foundation', () => {
       await symlink(join(symlinkTarget, 'hidden.html'), join(sourceDir, 'linked-file.html'));
 
       const parser = new HtmlFormatParser();
-      const detector = new FormatDetector();
 
       expect(await parser.detect(sourceDir)).toBe(true);
-      expect(await detector.detect(sourceDir)).toBe(FormatType.HTML);
 
       const root = await parser.parse(sourceDir);
       const sourcePaths = root.metadata.get('sourcePaths');
@@ -374,12 +366,10 @@ describe('static HTML parser foundation', () => {
       await symlink(targetPath, symlinkPath);
 
       const parser = new HtmlFormatParser();
-      const detector = new FormatDetector();
 
       expect(await parser.detect(textPath)).toBe(false);
       await expect(parser.parse(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
       await expect(parseHtmlFile(textPath)).rejects.toThrow(/Unsupported HTML file extension/);
-      await expect(detector.detect(textPath)).rejects.toThrow(/Unable to detect format/);
 
       expect(await parser.detect(symlinkPath)).toBe(false);
       await expect(parser.parse(symlinkPath)).rejects.toThrow(/Invalid HTML source path/);
