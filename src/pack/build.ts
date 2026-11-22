@@ -75,7 +75,7 @@ import {
   reviewGuidesForRefreshCheck,
   type GuideReviewReport,
 } from './guides.js';
-import { createPackLinkRewriter } from './links.js';
+import { createPackLinkRewriter, liveSchemeList } from './links.js';
 import { resolvePackLicense } from './license.js';
 import {
   MANIFEST_FILE_NAME,
@@ -1087,6 +1087,7 @@ async function buildPack(
     const unknownComponents = new Map<string, number>();
     const links: PackManifest['links'] = { rewritten: 0, external: 0, unresolved: [] };
     let plainTextConversions = 0;
+    let disallowedSchemes = 0;
     const writtenPages: { path: string; text: string }[] = [];
     // Selection cannot see the tag pages of an OpenAPI document: check those
     // paths against every other page here, with selection's collision key.
@@ -1148,6 +1149,9 @@ async function buildPack(
         ...result.links.unresolved.map((entry) => ({ page: unit.outputPath, ...entry }))
       );
       plainTextConversions += result.links.plainTextConversions;
+      disallowedSchemes += result.links.unresolved.filter(
+        (entry) => entry.reason === 'disallowed-scheme'
+      ).length;
     }
 
     const sources = baseSources.map((entry) => {
@@ -1175,9 +1179,15 @@ async function buildPack(
         .join(', ');
       warnings.push(`Pages keep MDX components the tool does not unwrap: ${detail}.`);
     }
-    if (plainTextConversions > 0) {
+    const unresolvable = plainTextConversions - disallowedSchemes;
+    if (unresolvable > 0) {
       warnings.push(
-        `${plainTextConversions} unresolvable relative link${plainTextConversions === 1 ? ' was' : 's were'} converted to plain text.`
+        `${unresolvable} unresolvable relative link${unresolvable === 1 ? ' was' : 's were'} converted to plain text.`
+      );
+    }
+    if (disallowedSchemes > 0) {
+      warnings.push(
+        `${disallowedSchemes} link${disallowedSchemes === 1 ? '' : 's'} whose scheme is not ${liveSchemeList()} ${disallowedSchemes === 1 ? 'was' : 'were'} converted to plain text: pages never keep any other scheme live.`
       );
     }
 

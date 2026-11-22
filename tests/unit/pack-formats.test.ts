@@ -308,3 +308,47 @@ describe('syncPacks: the combined layout', () => {
     expect(await snapshot(pack)).toEqual(first);
   });
 });
+
+describe('links whose scheme a page never keeps live', () => {
+  it('says the build turned them to plain text for their scheme, and verify fails one added later', async () => {
+    const root = await makeProject(
+      {
+        demo: {
+          title: 'Demo',
+          version: '1.0.0',
+          license: 'MIT',
+          sources: [{ type: 'local', path: 'docs' }],
+        },
+      },
+      {
+        'docs/index.md':
+          '# Home\n\nRun [this](javascript:alert(1)), open [that](file:///etc/passwd), or read [gone](gone.md).\n',
+      }
+    );
+    const report = await syncPacks(root, undefined);
+    const manifest = await readPackManifest(join(root, 'agent-docs', 'demo'));
+
+    expect(report.packs[0]?.status).toBe('built');
+    expect(manifest.warnings).toEqual([
+      '1 unresolvable relative link was converted to plain text.',
+      '2 links whose scheme is not https, http, or mailto were converted to plain text: pages never keep any other scheme live.',
+    ]);
+
+    const page = join(root, 'agent-docs', 'demo', 'pages', 'index.md');
+    await writeFile(
+      page,
+      `${await readFile(page, 'utf-8')}\n[later](javascript:alert(2)) and [mail](mailto:a@b.c)\n`
+    );
+    const links = (await verifyPacks(root, undefined)).results.find(
+      (result) => result.check === 'links'
+    );
+    expect(links?.findings).toEqual([
+      {
+        status: 'fail',
+        path: 'pages/index.md',
+        message:
+          'link scheme is not https, http, or mailto, so a reader could run code or open local files through it: javascript:alert(2)',
+      },
+    ]);
+  });
+});

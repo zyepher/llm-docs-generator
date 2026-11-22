@@ -27,6 +27,7 @@ import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { walkBoundedDirectoryTree } from '../utils/traversal.js';
 import { checkCitations } from './guides.js';
 import { MANIFEST_FILE_NAME, readProjectPacks, type PackManifest } from './manifest.js';
+import { LIVE_SCHEMES, linkScheme, liveSchemeList } from './links.js';
 import { findLinkTargets, headingAnchors } from './markdown.js';
 import { readRegularFile } from '../utils/safe-write.js';
 
@@ -386,6 +387,15 @@ async function checkLinks(context: PackCheckContext): Promise<CheckOutcome> {
     for (const link of findLinkTargets(text)) {
       const target = link.target.trim();
 
+      const scheme = linkScheme(target);
+      if (scheme !== undefined && !LIVE_SCHEMES.has(scheme)) {
+        findings.push({
+          status: 'fail',
+          path: output.path,
+          message: `link scheme is not ${liveSchemeList()}, so a reader could run code or open local files through it: ${target}`,
+        });
+        continue;
+      }
       if (target === '' || URL_SCHEME.test(target) || target.startsWith('//')) {
         continue;
       }
