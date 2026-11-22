@@ -54,6 +54,26 @@ async function makeProject(files: Record<string, string>): Promise<string> {
   return root;
 }
 
+/** A package-lock.json (v3) whose root package depends directly on `name` at `version`. */
+function npmLockfile(name: string, version: string): string {
+  return `${JSON.stringify({
+    name: 'app',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': { name: 'app', dependencies: { [name]: `^${version}` } },
+      [`node_modules/${name}`]: { version },
+    },
+  })}\n`;
+}
+
+async function packVersion(root: string, id: string): Promise<string> {
+  const manifest = JSON.parse(
+    await readFile(join(root, 'agent-docs', id, 'manifest.json'), 'utf-8')
+  );
+  return manifest.pack.version;
+}
+
 const DOCS = {
   'docs/index.md': '# Home\n\nSee [start](guide/start.md).\n',
   'docs/guide/start.mdx': "import X from 'x'\n\n# Start\n\n<Tip>Use it.</Tip>\n",
@@ -184,6 +204,75 @@ describe('llm-docs v3 CLI', () => {
       { outputPath: 'pages/index.md', kind: 'page', source: 'docs/index.md' },
     ]);
     expect(await readdir(root)).toEqual(['docs']);
+  });
+
+  it('follows the lockfile for a dependency-bound pack and flags an explicit version that disagrees', async () => {
+    const root = await makeProject({
+      ...DOCS,
+      'package-lock.json': npmLockfile('demo-lib', '1.0.0'),
+    });
+    const dryRun = await runCli(root, [
+      'add',
+      'demo',
+      '--local',
+      'docs',
+      '--dependency',
+      'npm:demo-lib',
+      '--dry-run',
+      '--json',
+      '--project',
+      root,
+    ]);
+    expect(dryRun.code).toBe(0);
+    expect(JSON.parse(dryRun.stdout)).toMatchObject({ recipe: { version: '1.0.0' } });
+
+    const add = await runCli(root, [
+      'add',
+      'demo',
+      '--local',
+      'docs',
+      '--dependency',
+      'npm:demo-lib',
+      '--project',
+      root,
+    ]);
+    expect(add.code).toBe(0);
+    expect(await packVersion(root, 'demo')).toBe('1.0.0');
+    expect((await runCli(root, ['verify'])).code).toBe(0);
+
+    await writeFile(join(root, 'package-lock.json'), npmLockfile('demo-lib', '1.1.0'));
+    const check = await runCli(root, ['sync', '--check']);
+    expect(check.code).toBe(1);
+    expect(check.stderr).toContain('demo: would rebuild (the recipe changed)');
+    const stale = await runCli(root, ['verify']);
+    expect(stale.code).toBe(1);
+    expect(stale.stderr).toContain(
+      "demo lockfile fail: stale-pack: lockfiles resolve npm:demo-lib 1.1.0 (package-lock.json), the pack is 1.0.0; run 'llm-docs sync demo'"
+    );
+    expect((await runCli(root, ['sync'])).code).toBe(0);
+    expect(await packVersion(root, 'demo')).toBe('1.1.0');
+    expect((await runCli(root, ['verify'])).code).toBe(0);
+
+    // An explicit version wins for the build, and verify reports that it disagrees (spec 2.4).
+    const pinned = await runCli(root, [
+      'add',
+      'pinned',
+      '--local',
+      'docs',
+      '--dependency',
+      'npm:demo-lib',
+      '--version',
+      '1.0.0',
+      '--project',
+      root,
+    ]);
+    expect(pinned.code).toBe(0);
+    expect(await packVersion(root, 'pinned')).toBe('1.0.0');
+    const disagree = await runCli(root, ['verify', 'pinned']);
+    expect(disagree.code).toBe(1);
+    expect(disagree.stderr).toContain(
+      "pinned lockfile fail: stale-pack: lockfiles resolve npm:demo-lib 1.1.0 (package-lock.json), the pack is 1.0.0; set packs.pinned.version in llm-docs.json to 1.1.0 (or remove it to follow the lockfile), then run 'llm-docs sync pinned'"
+    );
   });
 
   it('exits 2 with one clear line for usage and config errors', async () => {

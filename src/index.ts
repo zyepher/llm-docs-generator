@@ -33,7 +33,6 @@ export {
   ConfigError,
   findProjectRoot,
   loadProjectConfig,
-  LockfileResolutionUnavailableError,
   recipeHash,
   resolvePackRecipe,
 } from './config/project.js';

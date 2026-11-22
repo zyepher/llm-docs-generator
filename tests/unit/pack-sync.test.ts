@@ -94,6 +94,19 @@ const PACK = {
 };
 const fixedClock = (iso: string) => (): Date => new Date(iso);
 
+/** A package-lock.json (v3) whose root package depends directly on `name` at `version`. */
+function npmLockfile(name: string, version: string): string {
+  return `${JSON.stringify({
+    name: 'app',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': { name: 'app', dependencies: { [name]: `^${version}` } },
+      [`node_modules/${name}`]: { version },
+    },
+  })}\n`;
+}
+
 function problems(report: VerifyReport): string[] {
   return report.results.flatMap((result) =>
     result.findings
@@ -599,43 +612,61 @@ describe('verifyPacks', () => {
     ]);
   });
 
-  it('checks the lockfile through the injected resolver and skips without one', async () => {
+  it("checks the lockfile against the project's own lockfiles", async () => {
     const root = await makeProject(
       { demo: { ...PACK, dependency: { ecosystem: 'npm', name: 'demo' } } },
-      DOCS
+      { ...DOCS, 'package-lock.json': npmLockfile('demo', '1.0.0') }
     );
     await syncPacks(root, undefined);
-    const lockfile = (report: VerifyReport) =>
-      report.results.find((result) => result.check === 'lockfile');
+    const lockfile = async () =>
+      (await verifyPacks(root, undefined)).results.find((result) => result.check === 'lockfile');
 
-    expect(lockfile(await verifyPacks(root, undefined))).toMatchObject({
-      status: 'skipped',
-      reason: 'lockfile resolution is not available',
+    expect(await lockfile()).toMatchObject({ status: 'pass' });
+
+    await writeFile(join(root, 'package-lock.json'), npmLockfile('demo', '1.1.0'));
+    expect(await lockfile()).toMatchObject({
+      status: 'fail',
+      findings: [
+        {
+          status: 'fail',
+          message:
+            "stale-pack: lockfiles resolve npm:demo 1.1.0 (package-lock.json), the pack is 1.0.0; set packs.demo.version in llm-docs.json to 1.1.0 (or remove it to follow the lockfile), then run 'llm-docs sync demo'",
+        },
+      ],
     });
-    expect(
-      lockfile(
-        await verifyPacks(root, undefined, {
-          resolveDependencyVersion: () => ({
-            kind: 'found',
-            version: '1.1.0',
-            lockfiles: ['package-lock.json'],
-          }),
-        })
-      )?.findings[0]?.message
-    ).toMatch(
-      /^stale-pack: lockfiles resolve npm:demo 1\.1\.0 \(package-lock\.json\), the pack is 1\.0\.0/
+
+    await rm(join(root, 'package-lock.json'));
+    expect((await lockfile())?.findings[0]?.message).toBe(
+      'no lockfile resolves npm:demo (searched: none found)'
     );
-    expect(
-      lockfile(
-        await verifyPacks(root, undefined, {
-          resolveDependencyVersion: () => ({
-            kind: 'found',
-            version: '1.0.0',
-            lockfiles: ['package-lock.json'],
-          }),
-        })
-      )?.status
-    ).toBe('pass');
+  });
+
+  it('takes a dependency-bound version from the lockfile and rebuilds when it moves', async () => {
+    const pack = { ...PACK, version: undefined, dependency: { ecosystem: 'npm', name: 'demo' } };
+    const root = await makeProject(
+      { demo: pack },
+      { ...DOCS, 'package-lock.json': npmLockfile('demo', '2.0.0') }
+    );
+
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+    expect((await readPackManifest(join(root, 'agent-docs', 'demo'))).pack.version).toBe('2.0.0');
+    expect((await verifyPacks(root, undefined)).ok).toBe(true);
+
+    await writeFile(join(root, 'package-lock.json'), npmLockfile('demo', '2.1.0'));
+    expect((await syncPacks(root, undefined, { check: true })).packs[0]).toMatchObject({
+      status: 'would-build',
+      reason: 'the recipe changed',
+    });
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({ status: 'built' });
+    expect((await readPackManifest(join(root, 'agent-docs', 'demo'))).pack.version).toBe('2.1.0');
+
+    await rm(join(root, 'package-lock.json'));
+    expect((await syncPacks(root, undefined)).packs[0]).toMatchObject({
+      status: 'failed',
+      exitCode: 2,
+      error:
+        'Pack "demo": no lockfile resolves npm:demo (lockfiles searched: none found); set "version" explicitly.',
+    });
   });
 
   it('reports a missing manifest and an invalid config', async () => {

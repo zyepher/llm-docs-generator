@@ -28,7 +28,7 @@ import {
 } from './config/project.js';
 import { migrateV2Pack } from './config/migrate.js';
 import { inspectWebsite } from './core/website-discovery.js';
-import { ECOSYSTEMS, type Ecosystem } from './deps/lockfiles.js';
+import { ECOSYSTEMS, projectDependencies, type Ecosystem } from './deps/lockfiles.js';
 import { ensurePacksDir, previewPack, syncPacks, type SyncReport } from './pack/build.js';
 import {
   PACK_CHECK_NAMES,
@@ -717,7 +717,11 @@ function buildProgram(): Command {
 
     if (options.dryRun === true) {
       const config = { ...loaded.config, packs: { ...loaded.config.packs, [id]: pack } };
-      const resolved = await resolvePackRecipe(config, id);
+      const resolved = await resolvePackRecipe(config, id, {
+        resolveDependencyVersion: projectDependencies(loaded.projectRoot, {
+          skipDirectories: [loaded.packsDirRelative],
+        }).resolveVersion,
+      });
       const preview = await previewPack({ ...loaded, config }, resolved);
 
       if (options.json === true) {

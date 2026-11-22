@@ -37,6 +37,7 @@ import {
   type ResolvedPackRecipe,
   type TransformName,
 } from '../config/project.js';
+import { projectDependencies } from '../deps/lockfiles.js';
 import {
   acquireSource,
   assertSourceSupported,
@@ -140,6 +141,7 @@ export interface SyncOptions {
    * changed or the pack files no longer verify.
    */
   refresh?: boolean;
+  /** Overrides the project's lockfile scan (tests pin a lockfile answer with it). */
   resolveDependencyVersion?: DependencyVersionResolver | undefined;
   afterSync?: AfterSyncStep | undefined;
   /** Clock for `acquiredAt` (tests pin it). */
@@ -1025,9 +1027,13 @@ async function refreshOnePack(
   return { id, status: 'built', reason: 'upstream changed', warnings, refresh: report };
 }
 
-async function syncOnePack(context: SyncContext, id: string): Promise<PackSyncResult> {
+async function syncOnePack(
+  context: SyncContext,
+  id: string,
+  resolveDependencyVersion: DependencyVersionResolver
+): Promise<PackSyncResult> {
   const resolved = await resolvePackRecipe(context.loaded.config, id, {
-    resolveDependencyVersion: context.options.resolveDependencyVersion,
+    resolveDependencyVersion,
   });
   assertBuildable(resolved.recipe);
   const existing = await inspectExistingPack(context.loaded.packsDir, id);
@@ -1162,6 +1168,10 @@ export async function syncPacks(
     projectRoot: await resolveEffectiveOutputPath(loaded.projectRoot),
     options,
   };
+  const resolveDependencyVersion =
+    options.resolveDependencyVersion ??
+    projectDependencies(loaded.projectRoot, { skipDirectories: [loaded.packsDirRelative] })
+      .resolveVersion;
   let release: (() => Promise<void>) | undefined;
 
   if (!check) {
@@ -1175,7 +1185,7 @@ export async function syncPacks(
 
     for (const id of selected) {
       try {
-        packs.push(await syncOnePack(context, id));
+        packs.push(await syncOnePack(context, id, resolveDependencyVersion));
       } catch (error) {
         packs.push({
           id,

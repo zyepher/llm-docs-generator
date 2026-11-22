@@ -13,12 +13,12 @@ import { join, posix, sep } from 'node:path';
 
 import {
   ConfigError,
-  LockfileResolutionUnavailableError,
   loadProjectConfig,
   resolvePackRecipe,
   type DependencyVersionResolver,
   type LoadedProjectConfig,
 } from '../config/project.js';
+import { projectDependencies } from '../deps/lockfiles.js';
 import { isStaleAgentConversion } from '../sources/convert.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256File } from '../utils/hash.js';
@@ -73,6 +73,7 @@ export interface VerifyReport {
 
 export interface VerifyOptions {
   strict?: boolean;
+  /** Overrides the project's lockfile scan (tests pin a lockfile answer with it). */
   resolveDependencyVersion?: DependencyVersionResolver | undefined;
 }
 
@@ -88,6 +89,7 @@ interface PackCheckContext {
   manifest: PackManifest;
   listing: PackListing;
   loaded: LoadedProjectConfig | null;
+  resolveDependencyVersion: DependencyVersionResolver;
   options: VerifyOptions;
 }
 
@@ -330,7 +332,7 @@ async function checkRecipe(context: PackCheckContext): Promise<CheckOutcome> {
 
   try {
     const resolved = await resolvePackRecipe(loaded.config, context.packId, {
-      resolveDependencyVersion: context.options.resolveDependencyVersion,
+      resolveDependencyVersion: context.resolveDependencyVersion,
     });
 
     return resolved.recipeHash === context.manifest.recipeHash
@@ -342,11 +344,6 @@ async function checkRecipe(context: PackCheckContext): Promise<CheckOutcome> {
           },
         ];
   } catch (error) {
-    if (error instanceof LockfileResolutionUnavailableError) {
-      return {
-        skipped: 'the version comes from lockfiles, and lockfile resolution is not available',
-      };
-    }
     if (error instanceof ConfigError) {
       return [{ status: 'fail', message: error.message }];
     }
@@ -361,15 +358,15 @@ async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
     return [];
   }
 
-  const resolver = context.options.resolveDependencyVersion;
-
-  if (resolver === undefined) {
-    return { skipped: 'lockfile resolution is not available' };
-  }
-
   const label = `${dependency.ecosystem}:${dependency.name}`;
   const version = context.manifest.pack.version;
-  const lookup = await resolver(dependency);
+  const lookup = await context.resolveDependencyVersion(dependency);
+  const sync = `run 'llm-docs sync ${context.packId}'`;
+  // An explicit version wins at sync (spec 2.4), so syncing alone cannot fix the mismatch.
+  const pinned =
+    context.loaded !== null &&
+    Object.hasOwn(context.loaded.config.packs, context.packId) &&
+    context.loaded.config.packs[context.packId]?.version !== undefined;
 
   switch (lookup.kind) {
     case 'found':
@@ -378,7 +375,11 @@ async function checkLockfile(context: PackCheckContext): Promise<CheckOutcome> {
         : [
             {
               status: 'fail',
-              message: `stale-pack: lockfiles resolve ${label} ${lookup.version} (${lookup.lockfiles.join(', ')}), the pack is ${version}; run 'llm-docs sync ${context.packId}'`,
+              message: `stale-pack: lockfiles resolve ${label} ${lookup.version} (${lookup.lockfiles.join(', ')}), the pack is ${version}; ${
+                pinned
+                  ? `set packs.${context.packId}.version in llm-docs.json to ${lookup.version} (or remove it to follow the lockfile), then ${sync}`
+                  : sync
+              }`,
             },
           ];
     case 'missing':
@@ -523,6 +524,9 @@ export async function verifyPackFiles(
     manifest,
     listing: await listPack(packDir, options.guidesRoot),
     loaded: null,
+    resolveDependencyVersion: () => {
+      throw new Error('The pack-file checks never resolve lockfiles.');
+    },
     options: {},
   };
   const wanted = new Set<string>(options.checks ?? [...FILE_CHECKS]);
@@ -597,6 +601,10 @@ export async function verifyPacks(
 
   // Phase 4 registers `agent-block` here: each managed block matches what sync would write.
 
+  const resolveDependencyVersion =
+    options.resolveDependencyVersion ??
+    projectDependencies(loaded.projectRoot, { skipDirectories: [loaded.packsDirRelative] })
+      .resolveVersion;
   const onDisk = await packDirectoriesOnDisk(loaded.packsDir);
   const configured = Object.keys(loaded.config.packs);
   const known = new Set([...configured, ...onDisk]);
@@ -648,6 +656,7 @@ export async function verifyPacks(
       manifest,
       listing: await listPack(packDir, undefined),
       loaded,
+      resolveDependencyVersion,
       options,
     };
 

@@ -19,7 +19,6 @@ import {
   ConfigError,
   findProjectRoot,
   initProjectConfig,
-  LockfileResolutionUnavailableError,
   loadProjectConfig,
   parseProjectConfig,
   recipeHash,
@@ -339,14 +338,14 @@ describe('resolvePackRecipe', () => {
     );
   });
 
-  it('resolves the version from lockfiles through the injected resolver', async () => {
+  it('resolves the version from lockfiles through the resolver', async () => {
     const pack = {
       dependency: { ecosystem: 'npm', name: 'vite' },
       sources: [{ type: 'local', path: 'docs' }],
     };
 
-    await expect(resolvePackRecipe(config(pack), 'vite')).rejects.toBeInstanceOf(
-      LockfileResolutionUnavailableError
+    await expect(resolvePackRecipe(config(pack), 'vite')).rejects.toThrow(
+      /set "version" for packs\.vite/
     );
 
     const found = await resolvePackRecipe(config(pack), 'vite', {
