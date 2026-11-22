@@ -1,6 +1,6 @@
 /**
  * Regenerate the committed JSON Schemas from the zod schemas (`npm run schema`).
- * tests/unit/schemas.test.ts fails when the committed files are stale.
+ * tests/unit/pack-manifest.test.ts fails when the committed files are stale.
  */
 
 import { writeFile } from 'node:fs/promises';

@@ -21,7 +21,7 @@ import type { MarkdownDirectiveExtension } from './types.js';
 /**
  * Exact opening-marker syntax this dialect recognizes. Non-global so `.test` and
  * per-line `.match` stay stateless. Presence of this literal marker is the sole,
- * deterministic activation signal — no heuristics.
+ * deterministic activation signal, with no heuristics.
  */
 const START_DIRECTIVE = /<!--\s*::start:([A-Za-z-]+)([^>]*?)-->/;
 const END_DIRECTIVE = /<!--\s*::end:[A-Za-z-]+\s*-->/;

@@ -1650,7 +1650,7 @@ function compareParameterLines(left: string, right: string): number {
 
 function extractParameterLocation(line: string): (typeof PARAMETER_LOCATION_ORDER)[number] {
   // The formatted line is `name (location, required)`, so read the FIRST
-  // parenthetical token rather than scanning the whole line — otherwise a
+  // parenthetical token rather than scanning the whole line, otherwise a
   // description containing e.g. "(path, ...)" could misclassify the parameter.
   const match = /\(([a-z]+)[,)]/.exec(line);
   const candidate = match?.[1];
