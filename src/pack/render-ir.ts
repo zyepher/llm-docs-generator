@@ -27,6 +27,11 @@ export interface RenderedPage {
 export interface RenderedSource {
   pages: RenderedPage[];
   warnings: string[];
+  /**
+   * HTML elements removed before parsing, by tag (`script`: 2), so a pack
+   * reports them once for all its pages; empty for other formats.
+   */
+  strippedElements: Record<string, number>;
 }
 
 /** A fenced code block whose fence is longer than any backtick run inside it. */
@@ -278,9 +283,10 @@ export function renderOpenApiPages(root: DocNode, directory: string): RenderedPa
 
 /**
  * The parser's warnings, as pack warnings. A warning that locates something
- * in the page (an RST line, an HTML element) names the page; one that holds
- * for every page of its format (the HTML parser's static-rendering notice)
- * does not, so the manifest, which keeps each warning once, records it once.
+ * in the page (an RST line) names the page; one that holds for every page of
+ * its format (the HTML parser's static-rendering notice) does not, so the
+ * manifest, which keeps each warning once, records it once. The HTML
+ * parser's per-element counts are left to strippedElements.
  */
 function parserWarnings(root: Pick<DocNode, 'metadata'>, page: SelectedPage): string[] {
   const warnings = root.metadata.get('warnings');
@@ -295,12 +301,19 @@ function parserWarnings(root: Pick<DocNode, 'metadata'>, page: SelectedPage): st
     if (typeof warning.line === 'number') {
       return [`${page.file.sourceLabel} line ${warning.line}: ${warning.message}`];
     }
-    return [
-      typeof warning.tag === 'string'
-        ? `${page.file.sourceLabel}: ${warning.message}`
-        : warning.message,
-    ];
+    return typeof warning.tag === 'string' ? [] : [warning.message];
   });
+}
+
+function strippedElements(root: Pick<DocNode, 'metadata'>): Record<string, number> {
+  const counts = root.metadata.get('strippedElementCounts');
+  return isRecord(counts)
+    ? Object.fromEntries(
+        Object.entries(counts).flatMap(([tag, count]) =>
+          typeof count === 'number' && count > 0 ? [[tag, count]] : []
+        )
+      )
+    : {};
 }
 
 /** Render a reStructuredText, HTML, or OpenAPI page to Markdown. */
@@ -314,6 +327,7 @@ export async function renderSourcePage(page: SelectedPage): Promise<RenderedSour
         return {
           pages: [{ outputPath: page.outputPath, text: renderDocumentMarkdown(root) }],
           warnings: parserWarnings(root, page),
+          strippedElements: {},
         };
       }
       case 'html': {
@@ -326,6 +340,7 @@ export async function renderSourcePage(page: SelectedPage): Promise<RenderedSour
             },
           ],
           warnings: parserWarnings(root, page),
+          strippedElements: strippedElements(root),
         };
       }
       case 'openapi': {
@@ -333,6 +348,7 @@ export async function renderSourcePage(page: SelectedPage): Promise<RenderedSour
         return {
           pages: renderOpenApiPages(root, posix.dirname(page.outputPath)),
           warnings: parserWarnings(root, page),
+          strippedElements: {},
         };
       }
       case 'markdown':

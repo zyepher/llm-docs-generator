@@ -829,6 +829,30 @@ async function staleReason(
   return undefined;
 }
 
+/** One warning for every HTML element a pack's pages lost before parsing, naming up to three pages. */
+function strippedElementsWarning(
+  stripped: readonly { page: string; counts: Record<string, number> }[]
+): string | undefined {
+  if (stripped.length === 0) {
+    return undefined;
+  }
+  const byTag = new Map<string, number>();
+  for (const { counts } of stripped) {
+    for (const [tag, count] of Object.entries(counts)) {
+      byTag.set(tag, (byTag.get(tag) ?? 0) + count);
+    }
+  }
+  const total = [...byTag.values()].reduce((sum, count) => sum + count, 0);
+  const tags = [...byTag]
+    .sort(([a], [b]) => compareStringsByCodeUnit(a, b))
+    .map(([tag, count]) => `${count} <${tag}>`)
+    .join(', ');
+  const pages = stripped.map((entry) => entry.page).sort(compareStringsByCodeUnit);
+  const named = pages.slice(0, 3).join(', ');
+  const more = pages.length > 3 ? `, and ${pages.length - 3} more` : '';
+  return `Stripped ${total} element${total === 1 ? '' : 's'} (${tags}) from ${pages.length} HTML page${pages.length === 1 ? '' : 's'} before parsing: ${named}${more}.`;
+}
+
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
 async function readUtf8(selected: SelectedFile): Promise<string> {
@@ -944,6 +968,7 @@ async function buildPack(
     extraSources: readonly string[];
   }[] = [];
   const renderWarnings: string[] = [];
+  const stripped: { page: string; counts: Record<string, number> }[] = [];
   for (const page of pages) {
     if (page.format === 'markdown' || page.format === 'mdx') {
       units.push({
@@ -958,6 +983,9 @@ async function buildPack(
 
     const rendered = await renderSourcePage(page);
     renderWarnings.push(...rendered.warnings);
+    if (Object.keys(rendered.strippedElements).length > 0) {
+      stripped.push({ page: page.file.sourceLabel, counts: rendered.strippedElements });
+    }
     for (const unit of rendered.pages) {
       const ref = fileRef(page);
       if (page.format === 'openapi') {
@@ -978,6 +1006,11 @@ async function buildPack(
         extraSources: [],
       });
     }
+  }
+
+  const strippedWarning = strippedElementsWarning(stripped);
+  if (strippedWarning !== undefined) {
+    renderWarnings.push(strippedWarning);
   }
 
   // Convert documents before links are rewritten, so links to a converted

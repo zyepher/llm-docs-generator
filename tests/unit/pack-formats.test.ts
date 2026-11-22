@@ -231,6 +231,11 @@ describe('syncPacks: reStructuredText, HTML, and OpenAPI pages', () => {
         'docs/guide/quickstart.rst': `${QUICKSTART}\n.. include:: ../shared/snippet.rst\n`,
         'docs/api/client.html':
           '<title>Client</title><h1>Client</h1><script>x()</script><p>Hi.</p>',
+        'docs/api/a.html': '<h1>A</h1><style>p{}</style><style>a{}</style><p>A.</p>',
+        'docs/api/b.html': '<h1>B</h1><script>b()</script><p>B.</p>',
+        'docs/api/c.html': '<h1>C</h1><template><p>t</p></template><p>C.</p>',
+        'docs/api/d.html': '<h1>D</h1><p>Nothing stripped.</p>',
+        'docs/api/e.html': '<h1>E</h1><script>e()</script><p>E.</p>',
       }
     );
     const report = await syncPacks(root, undefined);
@@ -239,7 +244,7 @@ describe('syncPacks: reStructuredText, HTML, and OpenAPI pages', () => {
     expect(manifest.warnings).toEqual([
       '1 unresolvable relative link was converted to plain text.',
       'Parsed with lower-confidence static rendered HTML fallback; JavaScript was not rendered or executed.',
-      'docs/api/client.html: Stripped 1 <script> element before parsing.',
+      'Stripped 6 elements (3 <script>, 2 <style>, 1 <template>) from 5 HTML pages before parsing: docs/api/a.html, docs/api/b.html, docs/api/c.html, and 2 more.',
       'docs/guide/quickstart.rst line 13: Unsupported RST include directive not executed: ../shared/snippet.rst',
     ]);
     expect(report.packs[0]?.warnings).toEqual(expect.arrayContaining(manifest.warnings));
