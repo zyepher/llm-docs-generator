@@ -54,6 +54,11 @@ export interface PackStatusInput {
   recipeChanged: boolean;
   /** Project-relative POSIX path of the built pack's index.md; null when it was never built. */
   indexPath: string | null;
+  /**
+   * The built pack's `recipe.readFirst` as project-relative targets (a
+   * `#fragment` kept), in recipe order; empty when it marks none.
+   */
+  readFirst: string[];
   /** llm-docs.json lists the pack. */
   inConfig: boolean;
 }
@@ -67,6 +72,8 @@ export interface PackStatus {
   /** What the lockfiles resolve for the bound dependency (packs with a dependency only). */
   lockfile?: DependencyVersionLookup;
   indexPath: string | null;
+  /** Project-relative read-first targets of the built pack, in recipe order (spec 4.8). */
+  readFirst: string[];
   /** When the pack's version of its bound dependency was released, when known. */
   publishedAt: string | null;
   /** Set when that release is newer than the model's training data, or close to it. */
@@ -122,6 +129,8 @@ const DEFAULT_RECENT_DAYS = 180;
 const DEFAULT_NEAR_CUTOFF_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const BRIEF_MAX_DEPENDENCIES = 8;
+/** Read-first paths a brief row names; the index links the rest. */
+const BRIEF_MAX_READ_FIRST = 2;
 
 /** First instant after the cutoff month (`YYYY-MM` means through the end of that month). */
 function cutoffEnd(cutoff: string): number {
@@ -260,6 +269,7 @@ export function computeStatus(input: ComputeStatusInput): StatusReport {
         state,
         ...(lookup === undefined ? {} : { lockfile: lookup }),
         indexPath: pack.indexPath,
+        readFirst: pack.readFirst,
         publishedAt,
         releaseWindow: publishedAt === null ? null : windowOf(publishedAt),
         nextStep: packNextStep(pack, state, lookup),
@@ -388,31 +398,77 @@ function packStateReason(pack: PackStatus): string | undefined {
   }
 }
 
+/** A brief row, and the shorter form it takes before any row is dropped for the budget. */
+interface BriefRow {
+  full: string;
+  short: string;
+}
+
 /** One item of the brief; rows past `maxRows`, or past the character budget, become a count. */
 interface BriefSection {
   heading: string;
-  rows: string[];
+  rows: BriefRow[];
   maxRows: number;
   footer: string[];
 }
 
-function renderSection(section: BriefSection, shown: number): string[] {
+/** The section with its first `shown` rows, the last `shortened` of those in their short form. */
+function renderSection(section: BriefSection, shown: number, shortened: number): string[] {
   const hidden = section.rows.length - shown;
   return [
     section.heading,
-    ...section.rows.slice(0, shown),
+    ...section.rows
+      .slice(0, shown)
+      .map((row, index) => (index >= shown - shortened ? row.short : row.full)),
     ...(hidden > 0 ? [`- and ${hidden} more (run \`llm-docs status\`)`] : []),
     ...section.footer,
   ];
 }
 
 /**
+ * The shapes a section takes as the budget tightens, widest first: every row
+ * whole, then rows shortened from the last one up, then rows dropped from the
+ * last one up (all of them short by then).
+ */
+function sectionCandidates(section: BriefSection): string[][] {
+  const wanted = Math.min(section.rows.length, section.maxRows);
+  const candidates: string[][] = [];
+
+  for (let shortened = 0; shortened <= wanted; shortened += 1) {
+    candidates.push(renderSection(section, wanted, shortened));
+  }
+  for (let shown = wanted - 1; shown >= 0; shown -= 1) {
+    candidates.push(renderSection(section, shown, shown));
+  }
+
+  return candidates;
+}
+
+function sameRow(text: string): BriefRow {
+  return { full: text, short: text };
+}
+
+/**
+ * The read-first paths a brief row names: fragments dropped (the agent opens
+ * files), repeats merged, the first two in recipe order. A path that block
+ * escaping would alter is left out rather than shown altered, since an altered
+ * path leads nowhere; the index still links it.
+ */
+function briefReadFirst(targets: readonly string[]): string[] {
+  const paths = targets
+    .map((target) => target.replace(/#.*$/, ''))
+    .filter((path) => path.split('/').every((segment) => escapeBlockText(segment) === segment));
+  return [...new Set(paths)].slice(0, BRIEF_MAX_READ_FIRST);
+}
+
+/**
  * The first three items of the session-start text (spec 7.2): packs that need
  * a rebuild with the fix; built packs whose library version is newer than the
- * model's training data (or close to it), with where their pages are; and
- * direct dependencies in that window without a pack, at most 8. Newest
- * first. Empty when there is nothing to say. Over `maxChars`, text goes from
- * the bottom up: the last item's rows first, a cut list ending with how many
+ * model's training data (or close to it), with where their pages are (their
+ * read-first pages, then the index); and direct dependencies in that window
+ * without a pack, at most 8. Newest first. Empty when there is nothing to
+ * say. Over `maxChars`, text goes from the bottom up: the last item's rows
+ * first (read-first paths before whole rows), a cut list ending with how many
  * more there are, and an item that cannot keep even its heading is dropped
  * with everything below it. The hook appends the pack list after this.
  */
@@ -427,7 +483,7 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
   if (rebuild.length > 0) {
     sections.push({
       heading: 'Pinned docs packs that need a rebuild:',
-      rows: rebuild,
+      rows: rebuild.map(sameRow),
       maxRows: rebuild.length,
       footer: [],
     });
@@ -459,7 +515,15 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
         : `Pinned docs for libraries released in the last ${report.recentDays} days. Your training data may predate these versions: read the pinned pages before writing code against them. Newest first:`,
       rows: pinned.map(({ pack, version, publishedAt, window }) => {
         const tag = WINDOW_TAG[window];
-        return `- ${escapeBlockText(pack.title)} ${escapeBlockText(version)} (released ${releaseDay(publishedAt)}${tag ? `, ${tag}` : ''}): \`${pack.indexPath}\``;
+        const lead = `- ${escapeBlockText(pack.title)} ${escapeBlockText(version)} (released ${releaseDay(publishedAt)}${tag ? `, ${tag}` : ''}): `;
+        const short = `${lead}\`${pack.indexPath}\``;
+        const readFirst = briefReadFirst(pack.readFirst);
+        return readFirst.length === 0
+          ? sameRow(short)
+          : {
+              full: `${lead}read ${readFirst.map((path) => `\`${path}\``).join(' and ')} first, then \`${pack.indexPath}\``,
+              short,
+            };
       }),
       maxRows: pinned.length,
       footer: [],
@@ -480,7 +544,9 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
         : `Recently released dependencies (your training data may predate them), released in the last ${report.recentDays} days with no pinned docs, newest first:`,
       rows: flagged.map(({ release, tag }) => {
         const suffix = tag ? `, ${tag}` : '';
-        return `- ${escapeBlockText(release.name)} ${escapeBlockText(release.version)} (${release.ecosystem}, released ${releaseDay(release.publishedAt)}${suffix})`;
+        return sameRow(
+          `- ${escapeBlockText(release.name)} ${escapeBlockText(release.version)} (${release.ecosystem}, released ${releaseDay(release.publishedAt)}${suffix})`
+        );
       }),
       maxRows: BRIEF_MAX_DEPENDENCIES,
       footer: [
@@ -493,20 +559,18 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
 
   for (const section of sections) {
     const prefix = lines.length === 0 ? [] : [...lines, ''];
-    const wanted = Math.min(section.rows.length, section.maxRows);
-    let shown = wanted;
-    let candidate = [...prefix, ...renderSection(section, shown)];
+    const candidates = sectionCandidates(section).map((rendered) => [...prefix, ...rendered]);
+    const fit = candidates.findIndex(
+      (candidate) => candidate.join('\n').length <= options.maxChars
+    );
+    const chosen = candidates[fit];
 
-    while (candidate.join('\n').length > options.maxChars && shown > 0) {
-      shown -= 1;
-      candidate = [...prefix, ...renderSection(section, shown)];
-    }
-
-    if (candidate.join('\n').length > options.maxChars) {
+    if (chosen === undefined) {
       break;
     }
-    lines = candidate;
-    if (shown < wanted) {
+    lines = chosen;
+    // A section that had to shrink leaves no room for the items below it.
+    if (fit > 0) {
       break;
     }
   }
@@ -577,7 +641,7 @@ export function formatStatusHuman(report: StatusReport): string {
     lines.push('Packs:');
     lines.push(
       ...table([
-        ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'NEXT'],
+        ['ID', 'VERSION', 'DEPENDENCY', 'LOCKFILE', 'STATE', 'RELEASED', 'READ FIRST', 'NEXT'],
         ...report.packs.map((pack) => [
           pack.id,
           pack.version ?? '-',
@@ -585,6 +649,7 @@ export function formatStatusHuman(report: StatusReport): string {
           lockfileSummary(pack),
           pack.state,
           packReleased(pack),
+          pack.readFirst.length === 0 ? '-' : String(pack.readFirst.length),
           pack.nextStep ?? '-',
         ]),
       ]).map((line) => `  ${line}`)
@@ -717,6 +782,9 @@ async function packStatusInput(
     versionPinned: config?.version !== undefined,
     recipeChanged,
     indexPath: manifest === undefined ? null : `${loaded.packsDirRelative}/${pack.id}/index.md`,
+    readFirst: (manifest?.recipe.readFirst ?? []).map(
+      (target) => `${loaded.packsDirRelative}/${pack.id}/${target}`
+    ),
     inConfig: pack.inConfig,
   };
 }
