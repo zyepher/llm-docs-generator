@@ -52,6 +52,7 @@ Results will be published here with the date, the model, the Claude Code version
 
 - **It only helps with libraries you pin.** For other new libraries, the session note lists them and suggests pinning their docs.
 - **Saved docs are copies of someone else's work.** Check each library's license before you commit or share them. The tool records the license it finds and warns when it finds none.
+- **It fetches without logging in.** A private repository or a site behind a login cannot be fetched. Put those docs in a folder inside your project and pin that folder.
 - **Docs take space.** Expect a few hundred kilobytes to a few megabytes per library.
 - **It is not on npm yet.** Version 3 is distributed through this repository. The plugin includes the tool, so installing the plugin is all you need.
 - **Claude Code and Cursor are supported.** Codex reads the list in `AGENTS.md`, but the plugin is untested there.
