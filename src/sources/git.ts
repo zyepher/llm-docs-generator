@@ -321,15 +321,15 @@ export async function assertRepositoryAllowed(repoUrl: URL): Promise<void> {
 }
 
 /**
- * Create a repository at `checkout` and fetch only `refspec`'s commit
+ * Create a repository at `checkout` and fetch only the refspecs' commits
  * (shallow, blobless: trees but no file contents, no tags, no submodules).
- * Returns the fetched commit.
+ * Returns the first refspec's commit.
  */
 export async function fetchCommit(
   git: GitRunner,
   checkout: string,
   repo: string,
-  refspec: string
+  refspecs: readonly [string, ...string[]]
 ): Promise<string> {
   await mkdir(checkout);
   await git(['init', '--quiet', '--template=', checkout]);
@@ -344,7 +344,7 @@ export async function fetchCommit(
       '--no-tags',
       '--no-recurse-submodules',
       'origin',
-      refspec,
+      ...refspecs,
     ],
     { cwd: checkout }
   );
@@ -354,7 +354,7 @@ export async function fetchCommit(
 
   if (!COMMIT_PATTERN.test(commit)) {
     throw new GitError(
-      `git fetch of ${redactUrl(repo)} at ${refspec} returned no commit; check that the ref still exists upstream, then sync again.`
+      `git fetch of ${redactUrl(repo)} at ${refspecs[0]} returned no commit; check that the ref still exists upstream, then run the command again.`
     );
   }
 
@@ -380,7 +380,7 @@ export async function acquireGit(
   const git = await createGitRunner(context.workDir, repoUrl);
   const checkout = join(context.workDir, 'checkout');
   const resolved = await resolveRef(git, source.repo, source.ref);
-  const commit = await fetchCommit(git, checkout, source.repo, resolved.refspec);
+  const commit = await fetchCommit(git, checkout, source.repo, [resolved.refspec]);
 
   const sparse = !paths.includes('.');
   if (sparse) {

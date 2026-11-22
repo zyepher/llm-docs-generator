@@ -33,6 +33,11 @@ import { isSkippedTraversalDirectory } from '../utils/traversal.js';
 
 const DOC_DIRECTORY_LIMIT = 10;
 const CHANGE_DOCUMENT_LIMIT = 20;
+/** Matched tags whose commits are fetched to read their dates; exact forms come first. */
+const DATED_TAG_LIMIT = 10;
+/** A release is tagged and published within days; a wider gap suggests another release's tag. */
+const TAG_PUBLISH_GAP_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/;
 const NAME_PATTERN = /^@?[A-Za-z0-9][A-Za-z0-9._~/-]*$/;
 
@@ -50,6 +55,14 @@ export interface TagMatch {
   /** How the tag names the version; every form but `suffix` is exact. */
   form: TagForm;
   commit: string;
+}
+
+export interface DatedTagMatch extends TagMatch {
+  /**
+   * The commit's committer date (ISO 8601), not its author or tag date; null
+   * when it was not read, which a warning explains.
+   */
+  committerDate: string | null;
 }
 
 export interface MarkdownDirectory {
@@ -83,7 +96,7 @@ export type RepositoryEvidence =
   | { status: 'refused'; declared: string; reason: string };
 
 export type TagEvidence =
-  | { status: 'matched'; tagCount: number; matches: TagMatch[] }
+  | { status: 'matched'; tagCount: number; matches: DatedTagMatch[] }
   | { status: 'no-match'; tagCount: number }
   | { status: 'unreachable'; error: string }
   | { status: 'skipped'; reason: string };
@@ -614,7 +627,8 @@ export async function discoverPackage(
     }
 
     const matches = version === null ? [] : matchVersionTags(tags, version, tagName, directory);
-    if (version === null || matches.length === 0) {
+    const [first] = matches;
+    if (version === null || first === undefined) {
       result.tags = { status: 'no-match', tagCount: tags.size };
       result.docDirectories = skipped(
         version === null
@@ -624,56 +638,166 @@ export async function discoverPackage(
       return result;
     }
 
-    result.tags = { status: 'matched', tagCount: tags.size, matches };
-    const listed = matches.find((match) => match.form !== 'suffix');
+    const checkout = join(workDir, 'repository');
+    const fetched = await fetchTagCommits(git, checkout, normalized.url, [
+      first,
+      ...matches.slice(1, DATED_TAG_LIMIT),
+    ]);
+    const committerDates =
+      fetched.status === 'fetched' ? fetched.committerDates : new Map<string, string>();
+    result.tags = {
+      status: 'matched',
+      tagCount: tags.size,
+      matches: matches.map((match) => ({
+        ...match,
+        committerDate: committerDates.get(match.commit) ?? null,
+      })),
+    };
+    if (fetched.status === 'failed') {
+      warnings.push(
+        `No committer date was read because the commits of the tags matching ${version} could not be fetched (${fetched.error}); run discover again once the repository is reachable.`
+      );
+    } else {
+      const undated = result.tags.matches.filter((match) => match.committerDate === null);
+      if (undated.length > 0) {
+        warnings.push(
+          `${undated.length} of the ${matches.length} tags matching ${version} have committerDate null because their commits were not fetched (only the first ${DATED_TAG_LIMIT} tags' commits are), so they were not compared with the publish date.`
+        );
+      }
+    }
 
+    // matchVersionTags puts exact forms first, so the listed tag is the first fetched.
+    const listed = first.form === 'suffix' ? undefined : first;
     if (listed === undefined) {
       result.docDirectories = skipped(
         `Only tags that end in ${version} matched (${matches.map((match) => match.tag).join(', ')}); none has an exact form, so none was listed. Pass the one you mean to 'llm-docs add --git <repo> --ref <tag>'.`
       );
-      return result;
-    }
-    if (matches.length > 1) {
-      warnings.push(
-        `${matches.length} tags match ${version}; the directory listing uses ${listed.tag}, the first exact form.`
-      );
+    } else {
+      if (matches.length > 1) {
+        warnings.push(
+          `${matches.length} tags match ${version}; the directory listing uses ${listed.tag}, the first exact form.`
+        );
+      }
+      const listing =
+        fetched.status === 'failed' ? fetched : await listTree(git, checkout, fetched.commit);
+      if (listing.status === 'failed') {
+        result.docDirectories = { status: 'failed', tag: listed.tag, error: listing.error };
+      } else {
+        const { commit, tree } = listing;
+        const tag = listed.tag;
+        result.docDirectories = { status: 'listed', tag, commit, ...rankMarkdownDirectories(tree) };
+        result.changeDocuments = { status: 'listed', tag, commit, ...findChangeDocuments(tree) };
+      }
     }
 
-    const listing = await listTagTree(git, join(workDir, 'repository'), normalized.url, listed.tag);
-    if (listing.status === 'failed') {
-      result.docDirectories = listing;
-      return result;
-    }
-    const { tag, commit, tree } = listing;
-    result.docDirectories = { status: 'listed', tag, commit, ...rankMarkdownDirectories(tree) };
-    result.changeDocuments = { status: 'listed', tag, commit, ...findChangeDocuments(tree) };
+    warnings.push(...tagDateWarnings(result));
     return result;
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
 }
 
-async function listTagTree(
+/**
+ * Fetch the tags' commits in one shallow, blobless fetch and read each
+ * commit's committer date, keyed by commit. Returns the first tag's commit.
+ */
+async function fetchTagCommits(
   git: GitRunner,
   checkout: string,
   repo: string,
-  tag: string
+  tags: readonly [TagMatch, ...TagMatch[]]
 ): Promise<
-  | { status: 'listed'; tag: string; commit: string; tree: TreeEntry[] }
-  | { status: 'failed'; tag: string; error: string }
+  | { status: 'fetched'; commit: string; committerDates: Map<string, string> }
+  | { status: 'failed'; error: string }
 > {
+  const [first, ...rest] = tags;
   try {
-    const commit = await fetchCommit(git, checkout, repo, `refs/tags/${tag}`);
-    const tree = parseTree(
-      await git(['ls-tree', '-r', '-z', '--full-tree', commit], { cwd: checkout })
+    const commit = await fetchCommit(git, checkout, repo, [
+      `refs/tags/${first.tag}`,
+      ...rest.map((match) => `refs/tags/${match.tag}`),
+    ]);
+    // --ignore-missing: a tag moved since ls-remote leaves its old commit unfetched and undated.
+    const log = await git(
+      [
+        'log',
+        '--no-walk',
+        '--ignore-missing',
+        '--format=%H %cI',
+        ...new Set(tags.map((match) => match.commit)),
+      ],
+      { cwd: checkout }
     );
-    return { status: 'listed', tag, commit, tree };
+    const committerDates = new Map<string, string>();
+    for (const line of log.split('\n')) {
+      const [sha, date] = line.trim().split(' ');
+      if (sha !== undefined && date !== undefined) {
+        committerDates.set(sha, date);
+      }
+    }
+    return { status: 'fetched', commit, committerDates };
   } catch (error) {
     if (!(error instanceof GitError)) {
       throw error;
     }
-    return { status: 'failed', tag, error: errorMessage(error) };
+    return { status: 'failed', error: errorMessage(error) };
   }
+}
+
+async function listTree(
+  git: GitRunner,
+  checkout: string,
+  commit: string
+): Promise<
+  { status: 'listed'; commit: string; tree: TreeEntry[] } | { status: 'failed'; error: string }
+> {
+  try {
+    const tree = parseTree(
+      await git(['ls-tree', '-r', '-z', '--full-tree', commit], { cwd: checkout })
+    );
+    return { status: 'listed', commit, tree };
+  } catch (error) {
+    if (!(error instanceof GitError)) {
+      throw error;
+    }
+    return { status: 'failed', error: errorMessage(error) };
+  }
+}
+
+/**
+ * One warning per tag whose commit is more than TAG_PUBLISH_GAP_DAYS from the
+ * registry's publish date for the version: such a tag may be another
+ * package's release from the same repository, for example under the
+ * package's former name. Nothing is compared when either date is unknown.
+ */
+export function tagDateWarnings(discovery: PackageDiscovery): string[] {
+  const { package: pkg, registry, repository, tags, docDirectories } = discovery;
+  if (
+    registry.status !== 'found' ||
+    registry.metadata.publishedAt === null ||
+    repository.status !== 'ok' ||
+    tags.status !== 'matched'
+  ) {
+    return [];
+  }
+
+  const publishedAt = registry.metadata.publishedAt;
+  const warnings: string[] = [];
+
+  for (const { tag, committerDate } of tags.matches) {
+    if (committerDate === null) {
+      continue;
+    }
+    const days = Math.abs(Date.parse(committerDate) - Date.parse(publishedAt)) / DAY_MS;
+    if (Number.isNaN(days) || days <= TAG_PUBLISH_GAP_DAYS) {
+      continue;
+    }
+    const listedHere = docDirectories.status === 'listed' && docDirectories.tag === tag;
+    warnings.push(
+      `Tag ${tag} was committed on ${committerDate.slice(0, 10)} but ${registry.source} published ${pkg.name} ${registry.metadata.version} on ${publishedAt.slice(0, 10)}, ${Math.round(days)} days apart, so the tag${listedHere ? ' (and the docDirectories and changeDocuments listed at it)' : ''} may belong to another package from this repository, such as one under a former name. Check the package manifest at ${tag} before pinning it with 'llm-docs add --git ${repository.url} --ref ${tag}'.`
+    );
+  }
+
+  return warnings;
 }
 
 /** The stderr summary: one line per piece of evidence. */
@@ -720,7 +844,12 @@ export function describePackageDiscovery(result: PackageDiscovery): string[] {
   switch (tags.status) {
     case 'matched':
       lines.push(
-        `  tags: ${tags.matches.map((match) => `${match.tag} (${match.form})`).join(', ')}`
+        `  tags: ${tags.matches
+          .map(
+            (match) =>
+              `${match.tag} (${match.form}, ${match.committerDate === null ? 'committer date not read' : `committed ${match.committerDate}`})`
+          )
+          .join(', ')}`
       );
       break;
     case 'no-match':
