@@ -50,7 +50,21 @@ The agent finds the official docs for your version, saves them under `agent-docs
 We measure it instead of claiming it. The [evaluation](evals/README.md) gives the same coding tasks to the same agent three ways: without `llm-docs`, with saved docs, and with saved docs plus the session note. The agent can search the web in all three. There are 16 tasks. Twelve use library changes released after the model's training data ends, and in seven of those the old code still compiles, so nothing tells the agent to look. Four use old, well-known versions, to check that the tool does no harm.
 
 <!-- EVAL-RESULTS -->
-Results will be published here with the date, the model, the Claude Code version, and the number of runs.
+Results from 22 November 2026: Claude Opus 5.5 in Claude Code 2.1.330, five runs of each task in each setup, 240 sessions. The run was interrupted once and resumed about two hours later.
+
+| Setup | Tasks passed | Opened the saved docs | Searched the web | Mean cost per session (list price) |
+|---|---|---|---|---|
+| Without `llm-docs` | 79 of 80 | no docs saved | 0 of 80 | $0.25 |
+| With saved docs | 80 of 80 | 80 of 80 | 0 of 80 | $0.29 |
+| With saved docs and the session note | 80 of 80 | 80 of 80 | 0 of 80 | $0.31 |
+
+**On these tasks it made no measurable difference to the result.** The agent passed 79 of 80 without `llm-docs`, including 59 of the 60 runs that depend on changes made after its training data ends. The one failure was a SvelteKit 3 task: the agent finished with code that used type names version 3 no longer exports. That is the mistake the tool exists to prevent, but one run in 80 is within chance, so we do not count it as evidence.
+
+**Why the agent managed on its own.** In every setup it can read the installed packages, and in 11 of the 12 new-version tasks the package's own type definitions or bundled docs state the change. It never searched the web.
+
+**What the saved docs changed.** With docs saved, the agent opened them in every session. Those sessions cost 13 to 20 percent more and took about as many steps.
+
+**What this does not tell you.** Every task here uses a TypeScript library, which ships its types inside the package. The eval has not been run on languages where an installed package carries no such record, on language versions themselves, on smaller models, or on work the agent cannot check by running it. Those are the cases the tool is built for, and they are not measured yet. The [evaluation notes](evals/README.md) describe the method and its other limits.
 
 ### Good to know
 
