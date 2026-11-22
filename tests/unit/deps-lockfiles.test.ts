@@ -350,6 +350,51 @@ describe('Cargo, Go, pub, and SwiftPM', () => {
     ]);
   });
 
+  it('resolves a go.work workspace the way minimal version selection does, never preferring a lower direct version', async () => {
+    const uuid = { ecosystem: 'go', name: 'github.com/google/uuid' } as const;
+    const modules = {
+      'm1/go.mod':
+        'module example.com/m1\n\ngo 1.22\n\nrequire (\n\tgithub.com/google/uuid v1.3.0\n\texample.com/m2 v0.0.0\n)\n',
+      'm2/go.mod':
+        'module example.com/m2\n\ngo 1.22\n\nrequire github.com/google/uuid v1.6.0-rc.1 // indirect\nrequire golang.org/x/sync v0.7.0\n',
+      'm3/go.mod': 'module example.com/m3\n\ngo 1.22\n\nrequire github.com/google/uuid v1.6.0\n',
+    };
+    const workspace = await scanDependencies(
+      await makeProject({ ...modules, 'go.work': 'go 1.22\n\nuse (\n\t./m1\n\t./m2\n)\n' })
+    );
+
+    // Go builds v1.6.0-rc.1 for every module of the workspace; m3 is outside it.
+    expect(summarize(workspace)).toEqual([
+      'github.com/google/uuid@v1.6.0 direct',
+      'github.com/google/uuid@v1.6.0-rc.1 direct',
+      'github.com/google/uuid@v1.6.0-rc.1 transitive',
+      'golang.org/x/sync@v0.7.0 direct',
+    ]);
+    expect(workspace.warnings).toEqual([
+      'Skipped 1 non-registry dependency (workspace): m1/go.mod: example.com/m2 (workspace).',
+    ]);
+
+    const separate = await scanDependencies(await makeProject(modules));
+    expect(findDependencyVersion(separate, uuid)).toEqual({
+      kind: 'conflict',
+      versions: [
+        { version: 'v1.3.0', lockfile: 'm1/go.mod' },
+        { version: 'v1.6.0', lockfile: 'm3/go.mod' },
+        { version: 'v1.6.0-rc.1', lockfile: 'm2/go.mod' },
+      ],
+    });
+
+    const replaced = await scanDependencies(
+      await makeProject({
+        'm1/go.mod': modules['m1/go.mod'],
+        'm2/go.mod': modules['m2/go.mod'],
+        'go.work': 'go 1.22\n\nuse ./m1\nuse ./m2\n\nreplace github.com/google/uuid => ./fork\n',
+      })
+    );
+    expect(findDependencyVersion(replaced, uuid).kind).toBe('missing');
+    expect(replaced.warnings[0]).toMatch(/m1\/go\.mod: github\.com\/google\/uuid \(replaced\)/);
+  });
+
   it('reads pubspec.lock, keeping hosted pub.dev packages only', async () => {
     const scan = await scanFixture('pub-app');
 

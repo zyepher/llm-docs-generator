@@ -431,7 +431,10 @@ export function findDependencyVersion(
       normalizeDependencyName(dependency.ecosystem, dependency.name) === wanted
   );
   const direct = matches.filter((dependency) => dependency.direct);
-  const relevant = direct.length > 0 ? direct : matches;
+  // A Go build selects one version per module, the highest any requirement
+  // names (parseGoMod already applies that inside a workspace), so a direct
+  // requirement in one module never outranks another module's version.
+  const relevant = direct.length > 0 && ref.ecosystem !== 'go' ? direct : matches;
 
   if (relevant.length === 0) {
     return {
@@ -1386,18 +1389,52 @@ function unquoteGoToken(token: string): string {
   return token.replace(/^"(.*)"$/, '$1').replace(/^`(.*)`$/, '$1');
 }
 
-/**
- * `go.mod` require directives, block and single-line forms. A module named on
- * the left of a `replace` directive (any version, or the exact version given)
- * is skipped: the build uses the replacement, not the registry release.
- */
-async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
-  const result = createLockfileResult();
-  const requires: { path: string; version: string; indirect: boolean }[] = [];
-  const replaced: { path: string; version: string | undefined }[] = [];
+interface GoRequirement {
+  path: string;
+  version: string;
+  indirect: boolean;
+}
+
+interface GoReplacement {
+  path: string;
+  /** Absent: every version of the path is replaced. */
+  version: string | undefined;
+}
+
+/** What one `go.mod` or `go.work` says: they share one syntax of directives and `(` blocks. */
+interface GoFile {
+  module: string | undefined;
+  requires: GoRequirement[];
+  replaced: GoReplacement[];
+  uses: string[];
+}
+
+function parseGoFile(text: string): GoFile {
+  const file: GoFile = { module: undefined, requires: [], replaced: [], uses: [] };
   let block: string | undefined;
 
-  for (const rawLine of context.text.split(/\r?\n/)) {
+  const handle = (directive: string, body: string, comment: string): void => {
+    const [first, second] = body.split(/\s+/).map(unquoteGoToken);
+
+    if (directive === 'module' && first) {
+      file.module = first;
+    } else if (directive === 'use' && first) {
+      file.uses.push(first);
+    } else if (directive === 'require' && first && second) {
+      file.requires.push({
+        path: first,
+        version: second,
+        indirect: /(?:^|;)\s*indirect\b/.test(comment.trim()),
+      });
+    } else if (directive === 'replace') {
+      const [path, version] = (body.split('=>')[0] ?? '').trim().split(/\s+/).map(unquoteGoToken);
+      if (path) {
+        file.replaced.push({ path, version });
+      }
+    }
+  };
+
+  for (const rawLine of text.split(/\r?\n/)) {
     const commentIndex = rawLine.indexOf('//');
     const comment = commentIndex >= 0 ? rawLine.slice(commentIndex + 2) : '';
     const line = (commentIndex >= 0 ? rawLine.slice(0, commentIndex) : rawLine).trim();
@@ -1409,10 +1446,9 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
     if (block !== undefined) {
       if (line === ')') {
         block = undefined;
-        continue;
+      } else {
+        handle(block, line, comment);
       }
-
-      handleGoDirective(block, line, comment);
       continue;
     }
 
@@ -1426,32 +1462,126 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
     const directiveMatch = /^(\w+)\s+(.+)$/.exec(line);
 
     if (directiveMatch?.[1] !== undefined && directiveMatch[2] !== undefined) {
-      handleGoDirective(directiveMatch[1], directiveMatch[2], comment);
+      handle(directiveMatch[1], directiveMatch[2], comment);
     }
   }
 
-  function handleGoDirective(directive: string, body: string, comment: string): void {
-    if (directive === 'require') {
-      const [path, version] = body.split(/\s+/).map(unquoteGoToken);
+  return file;
+}
 
-      if (path && version) {
-        requires.push({ path, version, indirect: /(?:^|;)\s*indirect\b/.test(comment.trim()) });
-      }
-    } else if (directive === 'replace') {
-      const [left] = body.split('=>');
-      const [path, version] = (left ?? '').trim().split(/\s+/).map(unquoteGoToken);
+const GO_VERSION_PATTERN = /^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 
-      if (path) {
-        replaced.push({ path, version });
-      }
+/** Semantic version order for Go module versions; undefined when either is not one. */
+function compareGoVersions(a: string, b: string): number | undefined {
+  const left = GO_VERSION_PATTERN.exec(a);
+  const right = GO_VERSION_PATTERN.exec(b);
+
+  if (left === null || right === null) {
+    return undefined;
+  }
+
+  for (const index of [1, 2, 3]) {
+    const difference = Number(left[index]) - Number(right[index]);
+    if (difference !== 0) {
+      return difference;
     }
   }
 
-  for (const requirement of requires) {
+  const [leftPre, rightPre] = [left[4], right[4]];
+  if (leftPre === undefined || rightPre === undefined) {
+    return leftPre === rightPre ? 0 : leftPre === undefined ? 1 : -1;
+  }
+
+  const leftParts = leftPre.split('.');
+  const rightParts = rightPre.split('.');
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index++) {
+    const [x, y] = [leftParts[index], rightParts[index]];
+    if (x === undefined || y === undefined) {
+      return x === undefined ? -1 : 1;
+    }
+    const numeric = /^\d+$/.test(x) && /^\d+$/.test(y);
+    const difference = numeric ? Number(x) - Number(y) : compareStringsByCodeUnit(x, y);
+    if (difference !== 0) {
+      return numeric ? difference : /^\d+$/.test(x) ? -1 : /^\d+$/.test(y) ? 1 : difference;
+    }
+  }
+  return 0;
+}
+
+/**
+ * The workspace a module belongs to: the nearest `go.work` at or above its
+ * directory (inside the project) that `use`s it, with the go.mod of every
+ * module it uses. Go stops at the nearest go.work, and so does this.
+ */
+async function readGoWorkspace(
+  context: LockfileContext
+): Promise<{ modules: GoFile[]; replaced: GoReplacement[] } | undefined> {
+  for (let directory = context.directory; ; directory = dirname(directory)) {
+    const text = await readTextIfExists(join(directory, 'go.work'));
+
+    if (text !== undefined) {
+      const work = parseGoFile(text);
+      const used = work.uses.map((use) => resolve(directory, ...use.split('/')));
+
+      if (!used.includes(context.directory)) {
+        return undefined;
+      }
+
+      const modules: GoFile[] = [];
+      for (const moduleDirectory of used) {
+        const moduleText = await readTextIfExists(join(moduleDirectory, 'go.mod'));
+        if (moduleText !== undefined) {
+          modules.push(parseGoFile(moduleText));
+        }
+      }
+      return { modules, replaced: work.replaced };
+    }
+
+    if (directory === context.projectRoot || dirname(directory) === directory) {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * `go.mod` require directives, block and single-line forms. Inside a
+ * `go.work` workspace, each requirement resolves the way the toolchain's
+ * minimal version selection does: to the highest version any module of the
+ * workspace requires (direct or indirect), so a lower direct requirement
+ * never wins. When two versions cannot be ordered, the module keeps its own,
+ * and the lookup reports the conflict. A module named on the left of a
+ * `replace` directive in the go.mod, or in the workspace's go.work or any of
+ * its modules (any version, or the exact version selected), is skipped: the
+ * build uses the replacement, not the registry release. A requirement on
+ * another module of the workspace is the workspace's own code.
+ */
+async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
+  const result = createLockfileResult();
+  const own = parseGoFile(context.text);
+  const workspace = await readGoWorkspace(context);
+  const modules = workspace?.modules ?? [own];
+  const replaced = [...(workspace?.replaced ?? []), ...modules.flatMap((file) => file.replaced)];
+  const workspaceModules = new Set(
+    workspace === undefined ? [] : modules.flatMap((file) => (file.module ? [file.module] : []))
+  );
+
+  for (const requirement of own.requires) {
+    if (workspaceModules.has(requirement.path)) {
+      result.skipped.push({ name: requirement.path, reason: 'workspace' });
+      continue;
+    }
+
+    let version = requirement.version;
+    for (const other of modules.flatMap((file) => file.requires)) {
+      if (other.path === requirement.path && (compareGoVersions(other.version, version) ?? 0) > 0) {
+        version = other.version;
+      }
+    }
+
     const isReplaced = replaced.some(
       (entry) =>
         entry.path === requirement.path &&
-        (entry.version === undefined || entry.version === requirement.version)
+        (entry.version === undefined || entry.version === version)
     );
 
     if (isReplaced) {
@@ -1463,7 +1593,7 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
     result.dependencies.push({
       ecosystem: 'go',
       name: requirement.path,
-      version: requirement.version,
+      version,
       direct: !requirement.indirect,
       dev: false,
       lockfile: context.lockfile,
@@ -1473,7 +1603,6 @@ async function parseGoMod(context: LockfileContext): Promise<LockfileResult> {
 
   return result;
 }
-
 // ============================================================================
 // pub (Dart, Flutter)
 // ============================================================================
