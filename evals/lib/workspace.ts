@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { errorMessage, isRecord } from '../../src/utils/guards.js';
 import { sha256File, sha256Hex } from '../../src/utils/hash.js';
 import { readJsonFile } from '../../src/utils/json.js';
-import { CACHE_DIR, type CheckSpec, type EvalCase, listFiles } from './cases.js';
+import { type Arm, CACHE_DIR, type CheckSpec, type EvalCase, listFiles } from './cases.js';
 import { runProcess } from './proc.js';
+import type { TranscriptSummary } from './transcript.js';
 
 const TEMPLATE_STAMP = '.eval-template.json';
 
@@ -211,6 +212,159 @@ async function runCommand(
     durationMs: result.durationMs,
     detail: passed ? reason : `${reason}\n${output.slice(-4000)}`,
   };
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Arm assertions                                                                             */
+/* ------------------------------------------------------------------------------------------ */
+
+/** What the agent was given, read from the workspace just before the session starts. */
+export interface WorkspaceFacts {
+  agentDocsDir: boolean;
+  llmDocsJson: boolean;
+  agentsMd: boolean;
+  packIndex: boolean;
+  packManifest: boolean;
+  managedBlock: boolean;
+}
+
+export async function inspectWorkspace(dir: string, packId: string): Promise<WorkspaceFacts> {
+  const agentsPath = join(dir, 'AGENTS.md');
+  const agentsText = existsSync(agentsPath) ? await readFile(agentsPath, 'utf8') : '';
+  return {
+    agentDocsDir: existsSync(join(dir, 'agent-docs')),
+    llmDocsJson: existsSync(join(dir, 'llm-docs.json')),
+    agentsMd: existsSync(agentsPath),
+    packIndex: existsSync(join(dir, 'agent-docs', packId, 'index.md')),
+    packManifest: existsSync(join(dir, 'agent-docs', packId, 'manifest.json')),
+    managedBlock:
+      agentsText.includes('<!-- BEGIN llm-docs') && agentsText.includes('<!-- END llm-docs -->'),
+  };
+}
+
+export interface ArmAssertion {
+  name: string;
+  passed: boolean;
+  /** The evidence: what was found, or what is missing. */
+  detail: string;
+}
+
+export interface ArmExpectation {
+  model: string;
+  packId: string;
+  /** `name` from the plugin's `.claude-plugin/plugin.json`; null outside the plugin arm. */
+  pluginName: string | null;
+}
+
+/**
+ * Proves a session ran the arm it claims, from the workspace the agent was given and what the
+ * session reported about itself. A run that fails any assertion measured a different arm and is
+ * never graded.
+ */
+export function assertArm(
+  arm: Arm,
+  facts: WorkspaceFacts,
+  transcript: Pick<TranscriptSummary, 'session' | 'sessionStartHooks'>,
+  expected: ArmExpectation
+): ArmAssertion[] {
+  const out: ArmAssertion[] = [];
+  const check = (name: string, passed: boolean, pass: string, fail: string): void => {
+    out.push({ name, passed, detail: passed ? pass : fail });
+  };
+  const session = transcript.session;
+  const pack = `agent-docs/${expected.packId}`;
+
+  if (arm === 'baseline') {
+    check(
+      'no agent-docs/',
+      !facts.agentDocsDir,
+      'agent-docs/ absent',
+      'agent-docs/ is present in a baseline workspace'
+    );
+    check(
+      'no llm-docs.json',
+      !facts.llmDocsJson,
+      'llm-docs.json absent',
+      'llm-docs.json is present in a baseline workspace'
+    );
+    check(
+      'no AGENTS.md',
+      !facts.agentsMd,
+      'AGENTS.md absent',
+      'AGENTS.md is present in a baseline workspace'
+    );
+  } else {
+    check('pack index', facts.packIndex, `${pack}/index.md present`, `${pack}/index.md is missing`);
+    check(
+      'pack manifest',
+      facts.packManifest,
+      `${pack}/manifest.json present`,
+      `${pack}/manifest.json is missing`
+    );
+    check(
+      'managed block',
+      facts.managedBlock,
+      'AGENTS.md has the llm-docs managed block',
+      facts.agentsMd ? 'AGENTS.md has no llm-docs managed block markers' : 'AGENTS.md is missing'
+    );
+  }
+
+  const model = session?.model ?? null;
+  check(
+    'model',
+    model === expected.model,
+    `session model ${expected.model}`,
+    session === null
+      ? 'session reported no system/init event'
+      : `session model is ${String(model)}, not ${expected.model}`
+  );
+  const mcp = session?.mcpServers ?? [];
+  check(
+    'no MCP servers',
+    session !== null && mcp.length === 0,
+    'no MCP servers',
+    `MCP servers: ${mcp.join(', ') || 'unknown (no init event)'}`
+  );
+
+  const plugins = (session?.plugins ?? []).map((plugin) => plugin.name);
+  // Hook events do not name their plugin. The baseline and pack arms assert that no SessionStart
+  // hook runs at all, so in the plugin arm every SessionStart hook is the plugin's.
+  const hooks = transcript.sessionStartHooks;
+  if (arm === 'plugin') {
+    const name = expected.pluginName ?? '';
+    check(
+      'plugin loaded',
+      plugins.length === 1 && plugins[0] === name,
+      `plugin ${name} loaded`,
+      plugins.includes(name)
+        ? `other plugins loaded besides ${name}: ${plugins.filter((p) => p !== name).join(', ')}`
+        : `plugin ${name} did not load${session !== null && session.pluginErrors.length > 0 ? ` (${session.pluginErrors.join('; ')})` : ''}`
+    );
+    const finished = hooks.filter((hook) => hook.outcome === 'success');
+    const withOutput = finished.filter((hook) => hook.output.length > 0).length;
+    check(
+      'plugin hook ran',
+      hooks.length > 0 && finished.length === hooks.length,
+      `${finished.length} SessionStart hook(s) ran, ${withOutput} with output`,
+      hooks.length === 0
+        ? 'plugin hook did not run'
+        : `plugin hook did not finish: ${hooks.map((hook) => hook.outcome ?? 'no response').join(', ')}`
+    );
+  } else {
+    check(
+      'no plugins',
+      session !== null && plugins.length === 0,
+      'no plugins beyond the built-in ones',
+      `plugins loaded: ${plugins.join(', ') || 'unknown (no init event)'}`
+    );
+    check(
+      'no SessionStart hook',
+      hooks.length === 0,
+      'no SessionStart hook ran',
+      `${hooks.length} SessionStart hook(s) ran`
+    );
+  }
+  return out;
 }
 
 /** Copies the hidden graders into the workspace and runs every check in order. */

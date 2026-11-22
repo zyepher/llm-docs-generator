@@ -129,17 +129,53 @@ npm run eval -- prepare-packs --llm-docs dist/cli.js
 # 3. See the run matrix and an estimated cost before spending anything.
 npm run eval -- plan --runs 5
 
-# 4. Run. Results land in evals/results/<timestamp>/.
+# 4. Prove the pipeline end to end on one case, once per arm. Note your usage meter before
+#    and after. Results land in evals/results/smoke-<timestamp>/.
+npm run eval -- smoke --plugin-dir plugin
+
+# 5. Run. Results land in evals/results/<timestamp>/.
 npm run eval -- run --runs 5 --plugin-dir plugin \
   --max-budget-usd-per-run 3 --max-total-usd 150
 ```
 
 Options for `run`: `--cases <globs>` (comma-separated, `*` wildcards), `--arms
-baseline,pack,plugin`, `--runs N`, `--model <id>` (default `claude-opus-5-5`), `--concurrency N`
-(default 2), `--max-budget-usd-per-run X` (passed to `claude --max-budget-usd`, default 3),
-`--max-total-usd Y` (no new run starts once spent plus the in-flight caps would pass it),
-`--plugin-dir <path>` (required for the plugin arm), `--effort <level>`, `--resume <results dir>`
-(skips runs already recorded there, retries infrastructure errors), `--keep-workspaces`.
+baseline,pack,plugin`, `--runs N`, `--model <id>` (default `claude-opus-5-5`; pass a full model
+id, because every arm asserts that the session's `system/init` event reports exactly this
+string), `--concurrency N` (default 2),
+`--max-budget-usd-per-run X` (passed to `claude --max-budget-usd`, default 3), `--max-total-usd Y`
+(no new run starts once spent plus the in-flight caps would pass it), `--plugin-dir <path>`
+(required for the plugin arm), `--effort <level>`, `--resume <results dir>` (see below),
+`--keep-workspaces`.
+
+`smoke` takes the same options except `--cases`, `--runs`, and `--concurrency`: it runs one case
+(`--case <id>`, default `zod-4-6`) once per arm with exactly the `run` invocation, one session at
+a time. For every session it prints the outcome, cost, turns, wall time, whether docs were
+consulted, the SessionStart hook output (plugin arm), and every arm assertion with pass or fail.
+It exits 1 if any session could not run or any assertion failed, so a green smoke check is the
+proof that a full run will measure what its arms claim. `plan` describes it too.
+
+### Running out of quota, and resuming
+
+On a subscription with extra usage off, a long run can hit the plan's usage limit partway. The
+runner never grades such a session (see **Could not run** below), and on the first session that
+ends with a usage limit, an authentication failure, or a billing error it stops:
+
+- no new run starts; runs already in flight finish and are recorded (usually as infra errors for
+  the same reason);
+- `results.json` and `summary.md` are written;
+- it prints what happened, how many planned runs have a graded result, the reset time when Claude
+  Code reported one, and the exact command to continue (the same options plus
+  `--resume <results dir>`);
+- it exits with code 4 (0 is done, 1 is a failed smoke check, 2 a usage error, 3 a crash, 130 an
+  interrupt).
+
+A rate limit (a short throttle, not the plan quota) or an overload does not stop the run: the
+affected run is retried in place after 30 seconds and again after 120 seconds, and only then
+recorded as an infra error. `attempts` in the row says how many sessions it took.
+
+`--resume <results dir>` reruns exactly the runs that have no row or an infra-error row there, in
+the original order (repeat first, then case, then arm). Pass the same `--cases`, `--arms`,
+`--runs`, and `--model` as the first segment, which the printed command does for you.
 
 Each run gets a fresh workspace under the OS temp directory
 (`llm-docs-evals/<timestamp>/<case>-<arm>-<n>`), a copy of the cached `node_modules`, and, for
@@ -167,26 +203,60 @@ with stdin from `/dev/null`, its own process group, and the case's wall timeout.
 `evals/results/<timestamp>/` holds:
 
 - `summary.md`: pass rate per arm overall, per case kind, and per case; mean and total cost, mean
-  turns, docs-consulted rate, and web-use rate per arm; one line per run.
-- `results.json`: the same aggregates plus one row per run with every check's result and output
-  tail, cost, turns, duration, tool call counts, the `agent-docs/` paths the agent touched, web
-  searches and fetches, permission denials, the SessionStart hook output, and the session's
-  model, tools, MCP servers, and plugins as reported by Claude Code (use these to confirm the
-  arms really differed only in the treatment).
+  turns, docs-consulted rate, and web-use rate per arm; one line per run; and, when the run was
+  resumed or stopped, a table of segments with each one's wall-clock window.
+- `results.json`: the same aggregates, the segments, and one row per run with the session
+  outcome, attempts, every arm assertion with its evidence, every check's result and output tail,
+  cost, turns, duration, tool call counts, the `agent-docs/` paths the agent touched, web
+  searches and fetches, permission denials, each SessionStart hook's outcome and output, and the
+  session's model, tools, MCP servers, and plugins as reported by Claude Code.
 - `runs/<run id>/`: `transcript.jsonl`, `stderr.log`, `run.json`, and `files.json` mapping every
   file the agent created or changed to its content (a map, not loose copies, so test files the
   agent wrote never reach the repository's own test runner).
 
 Definitions:
 
-- **Pass**: every check passed. Agent outcomes such as hitting the turn cap or the budget cap are
-  graded as they stand, not excluded.
+- **Pass**: every check passed, in a run that is not an infra error.
+- **Outcome**: how the session ended, decided in one place (`classifyOutcome` in
+  `lib/transcript.ts`) from the stream's structured fields (`result.subtype`, `terminal_reason`,
+  `is_error`, `api_error_status`, the error code on Claude Code's API-error message, and
+  `rate_limit_event`), falling back to Claude Code's documented message text only where those
+  cannot tell two cases apart (a 429 is both the plan quota and a short throttle). These are
+  graded as they stand: `completed`, `turn-cap`, `budget-cap`, `timeout` (the case's wall
+  timeout), and `ended-early` (Claude Code stopped the turn for a reason of the session's own
+  making, such as an overflowing context; the reason is recorded, and excluding it would hide a
+  treatment that causes it).
+- **Could not run**: the service or the account ended the session, not the agent: `usage-limit`,
+  `rate-limit`, `overloaded`, `auth`, `billing`, `network`, `model-unavailable`,
+  `startup-failure`, `no-result` (the process ended without a result), or `api-error` (any other
+  API error). Any session that ended on an API error counts, whatever it did before, so a session
+  with no turns and no changes is never a fail. A session killed at the wall timeout while Claude
+  Code was still retrying the API counts too. These are never graded.
+- **Arm assertions**: before grading, every run proves it ran its arm, from the workspace as it
+  was handed to the agent and from the session's `system/init` and hook events:
+  - `baseline`: no `agent-docs/`, no `llm-docs.json`, no `AGENTS.md`;
+  - `pack` and `plugin`: `agent-docs/<pack>/index.md` and `manifest.json` exist and `AGENTS.md`
+    holds both managed block markers;
+  - `baseline` and `pack`: no plugin loaded besides Claude Code's built-in ones (reported with
+    `path: "builtin"`), and no SessionStart hook ran;
+  - `plugin`: exactly the plugin named in `<plugin-dir>/.claude-plugin/plugin.json` loaded, and at
+    least one SessionStart hook started and finished with outcome `success`. Hook events do not
+    name their plugin; since the other arms prove no SessionStart hook runs without the plugin,
+    every SessionStart hook in this arm is the plugin's. A hook that ran and printed nothing (the
+    llm-docs hook says nothing when it has nothing to say) passes and is shown as "ran, no
+    output"; a hook that never started, or started and never reported back, fails;
+  - every arm: the session reports the requested model and no MCP servers.
+
+  A failed assertion makes the run an infra error named after it, for example
+  `arm-invalid: plugin hook did not run`.
 - **Docs consulted**: a Read, Grep, Glob, or Bash call named a path under `agent-docs/`.
 - **Web used**: at least one WebSearch or WebFetch call. Claude Code 2.1 reads pages through its
   `web-fetch` subagent rather than a top-level WebFetch tool, so launching that subagent counts as
   a fetch (its own nested fetch is not counted twice).
-- **Infra error**: the run could not be carried out (workspace setup failed, `claude` did not
-  start, interrupted). These rows are excluded from rates and retried by `--resume`.
+- **Infra error**: the run could not be carried out or did not measure its arm (workspace setup
+  failed, `claude` did not start, the session could not run, an arm assertion failed,
+  interrupted). These rows are never graded, are excluded from every rate, and are retried by
+  `--resume`.
 
 `evals/results/` is git-ignored. Published numbers go into the project README by hand, with the
 date, model, Claude Code version, and run count.
@@ -213,4 +283,22 @@ date, model, Claude Code version, and run count.
   the account is billed.
 - **The plugin hook** reads release dates from a cache that `prepare-packs` warms (via
   `llm-docs status`) and that every arm shares through `LLM_DOCS_CACHE_DIR`; with a cold cache
-  the hook could say less.
+  the hook could say less. The hook always exits 0 and logs its own errors to `hook.log` in that
+  cache, so a hook that failed inside and printed nothing looks the same in the stream as one
+  that had nothing to say; check `hook.log` when the plugin arm's hook output is empty.
+- **Resumed runs are later in time.** A run stopped by a usage limit and continued with `--resume`
+  executes its remaining cells hours or days after the first part, so service drift no longer
+  touches all arms alike for those cells. Ordering keeps the damage small (the remaining cells
+  run in plan order, so every arm of a repeat is usually in the same segment), and `summary.md`
+  lists the wall-clock window of each segment so a reader can see it. When it matters, rerun the
+  whole matrix in one sitting.
+- **Usage limits are classified from documentation, not observation.** The outcome tests use
+  transcripts recorded from real sessions for a completed run, an unknown model, and a rejected
+  credential; the usage-limit, rate-limit, overload, billing, and network cases follow the shapes
+  in the Agent SDK types and https://code.claude.com/docs/en/errors.md, because they cannot be
+  triggered on purpose. A usage limit is recognized by a `rate_limit_event` with status
+  `rejected` or by the documented "You've hit your ... limit" wording. If Claude Code changes
+  both, the first real usage limit would be classified as `rate-limit` or `api-error`: still
+  never graded, but retried and recorded as an infra error instead of stopping the run. The
+  smoke check prints each session's outcome, so read the first stopped run's `transcript.jsonl`
+  when in doubt.
