@@ -26,7 +26,7 @@ When a run has both config errors and runtime failures across several packs, it 
 
 ### Project
 
-`init`, `add`, `sync`, `refresh`, `verify`, `status`, `guides stamp`, and `migrate` take `--project <dir>` to name the project root. Without it, they use the nearest directory at or above the working directory that holds `llm-docs.json`. `status --project <dir>` starts that upward search at `<dir>` instead of using it as is. `init`, `add`, and `migrate` create `llm-docs.json` when no project is found: at the git top-level directory, else in the working directory. `discover`, `capabilities`, and `hook session-start` do not read a project and take no `--project`.
+`init`, `add`, `sync`, `refresh`, `verify`, `status`, `guides stamp`, and `migrate` take `--project <dir>` to name the project root. Without it, they use the nearest directory at or above the working directory that holds `llm-docs.json`. `status --project <dir>` is no exception: it reports on `<dir>` as given, and with no `llm-docs.json` there it analyses that directory's dependencies. `init`, `add`, and `migrate` create `llm-docs.json` when no project is found: at the git top-level directory, else in the working directory. `discover`, `capabilities`, and `hook session-start` do not read a project and take no `--project`.
 
 ## `init`
 
@@ -161,7 +161,7 @@ Joins the dependency scan, the packs, release dates, and the model's training cu
 - Direct dependencies released after the cutoff, or within `hook.nearCutoffDays` before it, that have no pack, each with a `discover` command as the next step.
 - With no cutoff, direct dependencies released in the last 180 days instead.
 
-It works in a directory with no `llm-docs.json`, where it reports dependencies only.
+It works in a directory with no `llm-docs.json`, where it reports dependencies only. Without `--project`, it finds the project the way the session-start hook does, so `status --brief` prints the note a session started in the same directory gets. With `--project <dir>`, `<dir>` is the project root.
 
 Pack states:
 

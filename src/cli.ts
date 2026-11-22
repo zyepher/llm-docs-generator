@@ -1391,9 +1391,12 @@ function buildProgram(): Command {
         brief?: boolean;
       }
     ) => {
-      // The same project rule as the hook, so --brief prints what a session there would get.
-      const start = resolve(options.project ?? process.cwd());
-      const projectRoot = (await findProjectRoot(start)) ?? start;
+      // --project is the root, as for every other command. Without it, the hook's discovery
+      // from the working directory, so --brief prints what a session there would get.
+      const projectRoot =
+        options.project !== undefined
+          ? resolve(options.project)
+          : ((await findProjectRoot(process.cwd())) ?? resolve(process.cwd()));
       const status = await gatherProjectStatus(
         { projectRoot, loaded: await loadProjectConfigIfPresent(projectRoot) },
         {

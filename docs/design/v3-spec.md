@@ -71,8 +71,9 @@ explicitly named index (`llms.txt`) lists after an explicit planner-written filt
 The project root is the nearest ancestor of the working directory containing `llm-docs.json`.
 Commands that create config (`init`, `add`, `migrate`) use that project when one exists, else
 the git top-level directory when inside a git repository, else the working directory.
-`--project <dir>` names the root on every command that reads a project (section 5);
-`status --project <dir>` starts the upward search at `<dir>`.
+`--project <dir>` names the root, as given, on every command that reads a project (section 5),
+`status` included: with no `llm-docs.json` there, `status` analyses that directory's
+dependencies.
 
 ### 2.2 `llm-docs.json`
 
@@ -756,8 +757,12 @@ Joins the dependency scan, the packs, release dates, and the cutoff:
   released in the last 180 days instead, as the hook does.
 - Without `--model`, the model id comes from `ANTHROPIC_MODEL` and the Claude Code settings
   files, as in the hook (7.2).
-- Works in a directory with no `llm-docs.json` (dependency analysis only), using the same
-  project discovery as the hook. `--cutoff` must be `YYYY-MM` (exit 2 otherwise).
+- Works in a directory with no `llm-docs.json` (dependency analysis only). Without
+  `--project`, it finds the project as the hook does from its `cwd` (the nearest ancestor of the
+  working directory holding `llm-docs.json`, else the working directory), so `status --brief` run
+  there prints what a session there is told. `--project <dir>` is the project root as given, as
+  on every other command: with no `llm-docs.json` in `<dir>`, the dependency analysis runs for
+  `<dir>`. `--cutoff` must be `YYYY-MM` (exit 2 otherwise).
 - `--brief`: the text the hook injects (7.2) for the harness detected from the environment,
   on stdout, and nothing when there is nothing to say. It takes precedence over `--json` and
   prints even when the hook is turned off. `--json`: the full structure.

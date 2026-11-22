@@ -833,6 +833,27 @@ describe('llm-docs v3 CLI', () => {
       'llm-docs: --cutoff must be a YYYY-MM month (for example 2026-06), got "2026-6".\n'
     );
 
+    // --project names the project root as given, as for every other command; without it,
+    // status discovers the project from the working directory as the hook does.
+    const sub = join(root, 'sub', 'dir');
+    await mkdir(sub, { recursive: true });
+    const literal = await runCli(
+      root,
+      ['status', '--project', 'sub/dir', '--model', 'claude-opus-5-5', '--json'],
+      env
+    );
+    expect(literal.code).toBe(0);
+    expect(JSON.parse(literal.stdout)).toMatchObject({
+      packs: [],
+      afterCutoff: [],
+      directDependencies: 0,
+    });
+    expect(await runCli(sub, ['status', '--model', 'claude-opus-5-5', '--brief'], env)).toEqual({
+      code: 0,
+      stdout: `${brief}\n`,
+      stderr: '',
+    });
+
     const payload = JSON.stringify({
       cwd: root,
       hook_event_name: 'SessionStart',
@@ -854,6 +875,11 @@ describe('llm-docs v3 CLI', () => {
       });
 
     expect(await hook(payload)).toEqual({
+      code: 0,
+      stdout: `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: brief } })}\n`,
+      stderr: '',
+    });
+    expect(await hook(JSON.stringify({ cwd: sub, model: 'claude-opus-5-5' }), {}, sub)).toEqual({
       code: 0,
       stdout: `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: brief } })}\n`,
       stderr: '',
