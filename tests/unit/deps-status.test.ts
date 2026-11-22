@@ -18,6 +18,7 @@ import {
   type GatherStatusOptions,
   type PackStatusInput,
   type StatusCutoff,
+  projectRelativeMessage,
 } from '../../src/deps/status.js';
 import { syncPacks } from '../../src/pack/build.js';
 import { ALLOW_TEMP_SOURCES_ENV } from '../../src/sources/acquire.js';
@@ -1211,5 +1212,27 @@ describe('gatherProjectStatus', () => {
       'Dependency scan stopped at its time limit; lockfiles not read by then were left out.'
     );
     expect(requests).toEqual([]);
+  });
+});
+
+describe('projectRelativeMessage', () => {
+  it('writes paths under the project relative to it, with forward slashes on every platform', () => {
+    expect(
+      projectRelativeMessage(
+        'C:\\work\\app\\agent-docs\\demo\\guides is a symbolic link; replace C:\\work\\app\\agent-docs\\demo\\guides with a real directory',
+        'C:\\work\\app',
+        '\\'
+      )
+    ).toBe(
+      'agent-docs/demo/guides is a symbolic link; replace agent-docs/demo/guides with a real directory'
+    );
+    expect(
+      projectRelativeMessage(
+        '/work/app/agent-docs/demo/guides is a symbolic link',
+        '/work/app',
+        '/'
+      )
+    ).toBe('agent-docs/demo/guides is a symbolic link');
+    expect(projectRelativeMessage('no path here', '/work/app', '/')).toBe('no path here');
   });
 });

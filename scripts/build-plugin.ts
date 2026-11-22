@@ -48,7 +48,27 @@ const MARKETPLACE_MANIFESTS = [
 async function machinePaths(): Promise<string[]> {
   const paths = [REPO_ROOT, homedir(), tmpdir()];
   const real = await Promise.all(paths.map((path) => realpath(path).catch(() => path)));
-  return [...new Set([...paths, ...real])].filter((path) => path.length > 1);
+  return [...new Set([...paths, ...real])].filter(isMachineSpecific);
+}
+
+/**
+ * A path names this machine only when it is deeper than a directory every
+ * machine has: `/tmp`, `/root`, and `/home/runner` are literals the CLI's own
+ * source may contain (it lists `/tmp` as a temp root), while a checkout or a
+ * per-user temp directory is at least three segments deep.
+ */
+export function isMachineSpecific(path: string): boolean {
+  return (
+    path.split(/[\\/]+/).filter((segment) => segment !== '' && !/^[A-Za-z]:$/.test(segment))
+      .length >= 3
+  );
+}
+
+/** Whether `text` holds `path` as a directory prefix (followed by a separator), in either slash style. */
+export function containsMachinePath(text: string, path: string): boolean {
+  return [path, path.replaceAll('\\', '/')].some((form) =>
+    ['/', '\\'].some((separator) => text.includes(`${form}${separator}`))
+  );
 }
 
 /** The bundle, and the root folder of every package in node_modules that put code in it. */
@@ -80,7 +100,7 @@ async function bundleCli(): Promise<{ bundle: Buffer; packageDirs: string[] }> {
     const text = bundle.toString('utf-8');
 
     for (const path of await machinePaths()) {
-      if (text.includes(path) || text.includes(path.replaceAll('\\', '/'))) {
+      if (containsMachinePath(text, path)) {
         throw new Error(`The bundle contains the machine path ${path}; it must be portable.`);
       }
     }

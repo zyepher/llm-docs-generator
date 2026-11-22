@@ -1123,6 +1123,23 @@ async function packStatusInput(
 }
 
 /** packOfflineStaleness as status reports it, or `unfinished` once `signal` aborts. */
+/** `message` with every path under `projectRoot` written project-relative, with `/` separators. */
+export function projectRelativeMessage(
+  message: string,
+  projectRoot: string,
+  separator: string = sep
+): string {
+  const prefix = `${projectRoot}${separator}`;
+  return message
+    .split(prefix)
+    .map((part, index) =>
+      index === 0 || separator === '/'
+        ? part
+        : part.replace(/^[^\s;,'"]+/, (path) => path.split(separator).join('/'))
+    )
+    .join('');
+}
+
 async function offlineStalenessWithin(
   loaded: LoadedProjectConfig,
   resolved: Awaited<ReturnType<typeof resolvePackRecipe>>,
@@ -1131,10 +1148,11 @@ async function offlineStalenessWithin(
   const check = packOfflineStaleness(loaded, resolved).then(
     (stale): OfflineStaleness | undefined =>
       stale === undefined ? undefined : { kind: 'stale', ...stale },
-    // Project-relative paths, so the reason fits the note's line.
+    // Project-relative POSIX paths, so the reason fits the note's line and reads the same
+    // on every platform.
     (error: unknown): OfflineStaleness => ({
       kind: 'refused',
-      message: errorMessage(error).split(`${loaded.projectRoot}${sep}`).join(''),
+      message: projectRelativeMessage(errorMessage(error), loaded.projectRoot),
     })
   );
   if (signal === undefined) {

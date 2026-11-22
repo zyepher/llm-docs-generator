@@ -168,6 +168,22 @@ describe('writeTextFileSafely', () => {
     expect(await readdir(dir)).toEqual(['manifest.json']);
   });
 
+  it('retries the final rename while another process briefly holds the destination', async () => {
+    const dir = await makeTempDir();
+    const path = join(dir, 'held.txt');
+    await writeFile(path, 'previous\n');
+    // What Windows answers while a reader, an indexer, or a scanner has the file open.
+    for (const code of ['EPERM', 'EBUSY', 'EACCES']) {
+      vi.mocked(rename).mockRejectedValueOnce(Object.assign(new Error(code), { code }));
+    }
+
+    await writeTextFileSafely(path, 'next\n');
+
+    expect(await readFile(path, 'utf-8')).toBe('next\n');
+    expect(await readdir(dir)).toEqual(['held.txt']);
+    expect(vi.mocked(rename)).toHaveBeenCalledTimes(4);
+  });
+
   it('never exposes a partially written file to a concurrent reader', async () => {
     const dir = await makeTempDir();
     const path = join(dir, 'big.txt');

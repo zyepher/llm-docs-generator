@@ -66,6 +66,7 @@ import {
 import { supportedSourceTypes } from './sources/acquire.js';
 import { CONVERTER_INSTALL_HINTS } from './sources/convert.js';
 import { errorMessage, isRecord } from './utils/guards.js';
+import { shellQuote } from './utils/shell-quote.js';
 import { redactUrl } from './utils/url-credentials.js';
 
 const CLI_NAME = 'llm-docs';
@@ -318,15 +319,6 @@ function commandEntry(name: CommandName): CommandEntry {
   return entry;
 }
 
-/** An argument as a POSIX shell (and cmd.exe, for plain Windows paths) reads it back. */
-function shellQuote(value: string): string {
-  const plain = process.platform === 'win32' ? /^[\w@%+=:,./\\-]+$/ : /^[\w@%+=:,./-]+$/;
-  if (plain.test(value)) {
-    return value;
-  }
-  return /["$`!\\]/.test(value) ? `'${value.replaceAll("'", `'\\''`)}'` : `"${value}"`;
-}
-
 /** The command's summary as its description, and its examples after the options in --help. */
 function describeCommand(command: Command, name: CommandName): Command {
   const { summary, examples } = commandEntry(name);
@@ -334,7 +326,7 @@ function describeCommand(command: Command, name: CommandName): Command {
   if (examples.length > 0) {
     const lines = examples.flatMap((example) => [
       `  # ${example.note}`,
-      `  llm-docs ${example.argv.map(shellQuote).join(' ')}`,
+      `  llm-docs ${example.argv.map((value) => shellQuote(value)).join(' ')}`,
     ]);
     command.addHelpText('after', `\nExamples:\n${lines.join('\n')}`);
   }

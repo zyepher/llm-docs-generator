@@ -137,11 +137,33 @@ export async function writeTextFileSafely(path: string, content: string): Promis
     }
 
     await assertSafeReplaceTarget(path);
-    await rename(tempPath, path);
+    await renameWithRetry(tempPath, path);
     tempFileCreated = false;
   } finally {
     if (tempFileCreated) {
       await rm(tempPath, { force: true });
+    }
+  }
+}
+
+const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+/**
+ * rename(), retried with backoff on the codes Windows returns while another
+ * process (a reader, an indexer, a virus scanner) holds the destination open.
+ * About three seconds in total; any other error, or the last attempt's, is thrown.
+ */
+export async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error ? String(error.code) : '';
+      if (!RETRYABLE_RENAME_CODES.has(code) || attempt >= 7) {
+        throw error;
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 * 2 ** attempt));
     }
   }
 }

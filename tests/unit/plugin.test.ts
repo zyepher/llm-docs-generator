@@ -14,7 +14,11 @@ import {
   staleCutoffTableWarning,
   type Capabilities,
 } from '../../scripts/check-plugin.js';
-import { thirdPartyNotices } from '../../scripts/build-plugin.js';
+import {
+  containsMachinePath,
+  isMachineSpecific,
+  thirdPartyNotices,
+} from '../../scripts/build-plugin.js';
 import { runSessionStartHook } from '../../src/agent/hook.js';
 import { runHookProcess } from '../helpers/hook-process.js';
 import { isRecord } from '../../src/utils/guards.js';
@@ -188,6 +192,34 @@ describe('the package registry rule', () => {
       'docs/install.md:4',
     ]);
     expect(problems[0]).toMatch(/GitHub Release asset llm-docs\.mjs instead\.$/);
+  });
+});
+
+describe('the bundle portability guard', () => {
+  it('treats only paths deeper than a system directory as machine-specific', () => {
+    for (const generic of ['/tmp', '/private/tmp', '/root', '/home/runner', 'C:\\Temp']) {
+      expect(isMachineSpecific(generic), generic).toBe(false);
+    }
+    for (const specific of [
+      '/home/runner/work/llm-docs-generator/llm-docs-generator',
+      '/var/folders/ab/cdef/T',
+      '/Users/dev/code',
+      'C:\\Users\\runneradmin\\AppData\\Local\\Temp',
+    ]) {
+      expect(isMachineSpecific(specific), specific).toBe(true);
+    }
+  });
+
+  it('finds a machine path only as a directory prefix, in either slash style', () => {
+    const checkout = 'C:\\Users\\dev\\llm-docs';
+    expect(containsMachinePath('load("C:\\Users\\dev\\llm-docs\\src\\cli.ts")', checkout)).toBe(
+      true
+    );
+    expect(containsMachinePath('load("C:/Users/dev/llm-docs/src/cli.ts")', checkout)).toBe(true);
+    expect(containsMachinePath('see /Users/dev/code-samples for more', '/Users/dev/code')).toBe(
+      false
+    );
+    expect(containsMachinePath('roots = ["/tmp", "/var/tmp"]', '/Users/dev/code')).toBe(false);
   });
 });
 

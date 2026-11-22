@@ -11,17 +11,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import {
-  copyFile,
-  lstat,
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  rename,
-  rm,
-  rmdir,
-} from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rm, rmdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 
@@ -62,7 +52,12 @@ import {
 } from '../utils/fs-path.js';
 import { errorMessage, isFileNotFoundError } from '../utils/guards.js';
 import { sha256Prefixed } from '../utils/hash.js';
-import { readRegularFile, RefusedFileError, writeTextFileSafely } from '../utils/safe-write.js';
+import {
+  readRegularFile,
+  RefusedFileError,
+  renameWithRetry,
+  writeTextFileSafely,
+} from '../utils/safe-write.js';
 import { compareStringsByCodeUnit } from '../utils/sort.js';
 import { estimateTokenCount } from '../utils/text-metrics.js';
 import { redactUrl } from '../utils/url-credentials.js';
@@ -199,27 +194,6 @@ async function isRealDirectory(path: string): Promise<boolean> {
       return false;
     }
     throw error;
-  }
-}
-
-const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
-
-/**
- * rename with bounded retries: Windows reports EPERM or EBUSY while an
- * indexer or antivirus briefly holds a file in the directory.
- */
-async function renameWithRetry(from: string, to: string): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(from, to);
-      return;
-    } catch (error) {
-      const code = error instanceof Error && 'code' in error ? String(error.code) : '';
-      if (!RETRYABLE_RENAME_CODES.has(code) || attempt >= 7) {
-        throw error;
-      }
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 * 2 ** attempt));
-    }
   }
 }
 
