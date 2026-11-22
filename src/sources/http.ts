@@ -63,34 +63,84 @@ export class HttpRequestError extends Error {
 // Redaction
 // ---------------------------------------------------------------------------
 
-const SENSITIVE_QUERY_KEY =
-  /^(?:access[_-]?token|token|auth|authorization|key|api[_-]?key|secret|client[_-]?secret|password|passwd|sig|signature|code|x-amz-[a-z-]+|x-goog-[a-z-]+)$/i;
+/**
+ * A parameter is a credential when its name, lowercased with separators
+ * removed, contains one of these stems (`sig` covers `signature`), starts
+ * with a cloud provider's signing prefix, or is exactly `code` (an OAuth
+ * authorization code; matching it inside `encode` or `zipcode` would mostly
+ * be noise). The match is broad on purpose: a list of names always misses
+ * one, and `keyword` or `author` shown as `***` costs nothing.
+ */
+const CREDENTIAL_STEMS = [
+  'token',
+  'secret',
+  'password',
+  'passwd',
+  'pwd',
+  'key',
+  'sig',
+  'auth',
+  'credential',
+  'session',
+  'jwt',
+];
+const CREDENTIAL_PREFIXES = ['xamz', 'xgoog'];
+
+function decodeName(name: string): string {
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+function isCredentialName(name: string): boolean {
+  const normalized = decodeName(name)
+    .toLowerCase()
+    .replace(/[\s._-]+/g, '');
+  return (
+    normalized === 'code' ||
+    CREDENTIAL_STEMS.some((stem) => normalized.includes(stem)) ||
+    CREDENTIAL_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+  );
+}
 
 /**
- * A URL safe to print: userinfo replaced by `***` and the values of
- * credential-looking query parameters replaced by `***`.
+ * `name=value` in a query, a fragment (OAuth implicit flows put tokens
+ * there), or a path parameter (`;jsessionid=`), found in the text as
+ * written so nothing else in the URL is re-encoded.
+ */
+const URL_PARAMETER = /([?&#;])([^=&#;?\s]+)=([^&#;?\s]*)/g;
+
+/** Names of the credential-looking parameters a URL carries. */
+function credentialParameters(url: URL): string[] {
+  return [...`${url.pathname}${url.search}${url.hash}`.matchAll(URL_PARAMETER)]
+    .map((match) => match[2] ?? '')
+    .filter(isCredentialName);
+}
+
+/**
+ * A URL safe to print: userinfo replaced by `***`, and the value of every
+ * credential-looking parameter in the query, the fragment, or the path
+ * replaced by `***`. Text that is not a URL gets the same treatment.
  */
 export function redactUrl(value: string | URL): string {
-  let url: URL;
+  let text: string;
 
   try {
-    url = new URL(String(value));
-  } catch {
-    return String(value).replace(/\/\/[^/@\s]*@/, '//***@');
-  }
-
-  if (url.username !== '' || url.password !== '') {
-    url.username = '***';
-    url.password = '';
-  }
-
-  for (const key of [...url.searchParams.keys()]) {
-    if (SENSITIVE_QUERY_KEY.test(key)) {
-      url.searchParams.set(key, '***');
+    const url = new URL(String(value));
+    if (url.username !== '' || url.password !== '') {
+      url.username = '***';
+      url.password = '';
     }
+    text = url.href;
+  } catch {
+    text = String(value).replace(/\/\/[^/@\s]*@/, '//***@');
   }
 
-  return url.href;
+  return text.replace(URL_PARAMETER, (match, separator: string, name: string) =>
+    isCredentialName(name) ? `${separator}${name}=***` : match
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -801,6 +851,13 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
         parsed = new URL(url);
       } catch {
         throw new HttpPolicyError(`Refusing ${redactUrl(url)}: not a valid URL.`);
+      }
+      // Only the requested URL: a server may legitimately redirect to a presigned one.
+      const credentials = credentialParameters(parsed);
+      if (credentials.length > 0) {
+        throw new HttpPolicyError(
+          `Refusing ${redactUrl(parsed)}: it carries a credential (${credentials.join(', ')}). llm-docs records the URLs it fetches in pack manifests and output, so credentials are never allowed in them; remove the parameter from the URL.`
+        );
       }
       parsed.hash = '';
       // A function, not a narrowed property read: the signal can abort during any await.

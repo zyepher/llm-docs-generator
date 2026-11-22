@@ -171,6 +171,37 @@ describe('redactUrl', () => {
     );
     expect(redactUrl('not a url https://u:p@host/x')).toBe('not a url https://***@host/x');
   });
+
+  it.each([
+    'private_token',
+    'access_key',
+    'jwt',
+    'session',
+    'id_token',
+    'refresh_token',
+    'github_token',
+    'auth_token',
+    'X-Goog-Credential',
+    'X-Amz-Date',
+    'Client-Secret',
+    'apiKey',
+    'passwd',
+    'code',
+  ])('hides the value of a %s parameter in the query and the fragment', (name) => {
+    expect(redactUrl(`https://example.com/a?page=2&${name}=s3cr3t&lang=en`)).toBe(
+      `https://example.com/a?page=2&${name}=***&lang=en`
+    );
+    expect(redactUrl(`https://example.com/cb#${name}=s3cr3t&state=1`)).toBe(
+      `https://example.com/cb#${name}=***&state=1`
+    );
+  });
+
+  it('hides a path parameter session id and keeps ordinary parameters as written', () => {
+    expect(redactUrl('https://example.com/a;jsessionid=s3cr3t?q=a%20b#intro')).toBe(
+      'https://example.com/a;jsessionid=***?q=a%20b#intro'
+    );
+    expect(redactUrl('not a url ?access_token=s3cr3t&x=1')).toBe('not a url ?access_token=***&x=1');
+  });
 });
 
 describe('createHttpClient policy', () => {
@@ -186,6 +217,8 @@ describe('createHttpClient policy', () => {
     ['ftp://example.com/x', /only https:\/\/ URLs are fetched/],
     ['file:///etc/passwd', /only https:\/\/ URLs are fetched/],
     ['https://user:secret@example.com/', /credentials in URLs are not allowed/],
+    ['https://example.com/docs.md?private_token=secret', /carries a credential \(private_token\)/],
+    ['https://example.com/docs.md#access_token=secret', /carries a credential \(access_token\)/],
   ])('refuses %s before connecting', async (url, message) => {
     const resolver = async () => {
       throw new Error('the resolver must not run');
@@ -269,6 +302,7 @@ describe('createHttpClient requests', () => {
         '/to-creds': 'https://user:pw@example.com/',
         '/to-file': 'file:///etc/passwd',
         '/loop': '/loop',
+        '/to-signed': '/object?X-Amz-Signature=sig1&X-Amz-Credential=cred1',
       };
       const target = routes[request.url ?? ''];
       if (target !== undefined) {
@@ -294,6 +328,9 @@ describe('createHttpClient requests', () => {
     await expect(http.get(`${origin}/to-creds`, LIMIT)).rejects.toThrow(/credentials in URLs/);
     await expect(http.get(`${origin}/to-file`, LIMIT)).rejects.toThrow(/only https:\/\//);
     await expect(http.get(`${origin}/loop`, LIMIT)).rejects.toThrow(/redirected more than 5 times/);
+    // A server may redirect to a presigned URL: only the requested URL is held to the rule.
+    const signed = await http.get(`${origin}/to-signed`, LIMIT);
+    expect(signed.finalUrl).toBe(`${origin}/object?X-Amz-Signature=sig1&X-Amz-Credential=cred1`);
   });
 
   it('aborts a body over the byte cap, with or without Content-Length, or truncates on request', async () => {
@@ -324,11 +361,15 @@ describe('createHttpClient requests', () => {
   });
 
   it('times out a request that never answers', async () => {
-    const { origin } = await serve(() => {
-      // Never respond.
+    const { origin } = await serve((request, response) => {
+      // A redirect to a presigned-style URL that then never answers: the error redacts it.
+      if (request.url === '/start') {
+        response.writeHead(302, { location: '/slow?token=hunter2' });
+        response.end();
+      }
     });
     const http = client({ allowPrivateNetwork: true, totalTimeoutMs: 200, retries: 0 });
-    await expect(http.get(`${origin}/slow?token=hunter2`, LIMIT)).rejects.toThrow(
+    await expect(http.get(`${origin}/start`, LIMIT)).rejects.toThrow(
       /GET http:\/\/127\.0\.0\.1:\d+\/slow\?token=\*\*\* failed: timed out after 200 ms/
     );
   });
