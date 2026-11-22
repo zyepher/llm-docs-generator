@@ -3,23 +3,54 @@
   "pack": {
     "title": "MCP TypeScript SDK",
     "description": "Official Model Context Protocol SDK for TypeScript (server and client packages)",
-    "dependency": { "ecosystem": "npm", "name": "@modelcontextprotocol/server" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "@modelcontextprotocol/server"
+    },
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/modelcontextprotocol/typescript-sdk",
         "ref": "v{version}",
-        "paths": ["docs"],
-        "include": ["**/*.md"]
+        "paths": [
+          "docs",
+          "packages/client/CHANGELOG.md",
+          "packages/codemod/CHANGELOG.md",
+          "packages/core-internal/CHANGELOG.md",
+          "packages/core/CHANGELOG.md",
+          "packages/middleware/express/CHANGELOG.md",
+          "packages/middleware/fastify/CHANGELOG.md",
+          "packages/middleware/hono/CHANGELOG.md",
+          "packages/middleware/node/CHANGELOG.md",
+          "packages/server-legacy/CHANGELOG.md",
+          "packages/server/CHANGELOG.md",
+          "skills/mcp-typescript-sdk-upgrade-to-v2/SKILL.md",
+          "test/conformance/CHANGELOG.md",
+          "test/e2e/CHANGELOG.md",
+          "test/helpers/CHANGELOG.md",
+          "test/integration/CHANGELOG.md"
+        ],
+        "include": [
+          "**/*.md"
+        ]
       },
       {
         "type": "git",
         "repo": "https://github.com/modelcontextprotocol/typescript-sdk",
         "ref": "v{version}",
-        "paths": ["skills/mcp-typescript-sdk-upgrade-to-v2/references"],
-        "include": ["**/*.md"],
+        "paths": [
+          "skills/mcp-typescript-sdk-upgrade-to-v2/references"
+        ],
+        "include": [
+          "**/*.md"
+        ],
         "mount": "upgrade-to-v2-references"
       }
+    ],
+    "readFirst": [
+      "pages/docs/migration/upgrade-to-v2.md",
+      "pages/skills/mcp-typescript-sdk-upgrade-to-v2/SKILL.md",
+      "pages/upgrade-to-v2-references/auth.md"
     ]
   }
 }

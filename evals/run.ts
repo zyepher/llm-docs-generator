@@ -18,11 +18,20 @@ import {
   lintCase,
   listFiles,
   loadCases,
+  PACK_CACHE_DIR,
+  PREPARED_STAMP,
   RESULTS_DIR,
   STRATA,
   STRATUM_CHECKS,
 } from './lib/cases.js';
 import { installSignalHandlers, isShuttingDown, runProcess } from './lib/proc.js';
+import {
+  type CaseRule,
+  evaluateCase,
+  READ_FIRST_CACHE_DIR,
+  ruleProblems,
+  writeRule,
+} from './lib/read-first-rule.js';
 import {
   buildAggregates,
   isRunRow,
@@ -59,9 +68,15 @@ Commands:
                  Install each fixture once, then prove the checks discriminate: the fixture alone
                  fails, every solution*/ passes, every wrong-*/ fails, and naive/ (post-cutoff
                  cases) fails the way the case's stratum says. Also proves the suppression scan
-                 on tests/fixtures/evals/suppressions.
+                 on tests/fixtures/evals/suppressions, and that every pack.json follows the
+                 read-first rule (needs prepare-packs first).
   prepare-packs  --llm-docs <cli entry> [--cases <globs>]
                  Build each case's docs pack with the llm-docs CLI into .cache/packs/<id>.
+  read-first-rule [--cases <globs>] [--write] [--refresh]
+                 Compute each pack's readFirst from discover's change documents and the prepared
+                 pack's pages (evals/README.md states the rule), print the table, and exit 1 when
+                 a pack.json differs. --write updates pack.json; --refresh refetches the evidence
+                 cached in .cache/read-first/. selftest runs the same check.
   plan           [--cases] [--arms] [--runs N] [--model M] [--max-budget-usd-per-run X]
                  [--assume-usd-per-run LOW-HIGH]
                  Print the run matrix and an estimated cost range.
@@ -80,9 +95,7 @@ Commands:
 `;
 
 const DEFAULT_MODEL = 'claude-opus-5-5';
-const PACK_CACHE_DIR = join(CACHE_DIR, 'packs');
 const LLM_DOCS_CACHE_DIR = join(CACHE_DIR, 'llm-docs-cache');
-const PREPARED_STAMP = '.prepared.json';
 
 /**
  * Tools every arm may use without a prompt. Web tools are included in every arm on purpose: the
@@ -283,6 +296,18 @@ async function selftest(argv: string[]): Promise<number> {
     }
     templates.set(evalCase.id, await ensureTemplate(evalCase, log));
   }
+
+  const ruleFailures: string[] = [];
+  for (const evalCase of cases) {
+    const problems = ruleProblems(evalCase, await evaluateCase(evalCase, false));
+    ruleFailures.push(...problems.map((problem) => `${evalCase.id}: ${problem}`));
+  }
+  log(
+    ruleFailures.length === 0
+      ? 'ok   every pack.json follows the read-first rule'
+      : 'BAD  read-first rule'
+  );
+  failures.push(...ruleFailures);
 
   const firstTemplate = templates.values().next().value;
   if (firstTemplate !== undefined) {
@@ -526,6 +551,69 @@ async function assertPacksPrepared(cases: EvalCase[]): Promise<void> {
   if (problems.length > 0) {
     throw new UsageError(problems.join('\n'));
   }
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* read-first-rule                                                                            */
+/* ------------------------------------------------------------------------------------------ */
+
+function ruleRow(evalCase: EvalCase, rule: CaseRule): string {
+  if (rule.status === 'cannot-apply') {
+    return `| \`${evalCase.id}\` | cannot apply: ${rule.reason} | | | | |`;
+  }
+  const { evidence, output } = rule;
+  const code = (paths: string[]): string =>
+    paths.length === 0 ? 'none' : paths.map((path) => `\`${path}\``).join(', ');
+  const source =
+    evidence.via === 'discover'
+      ? `discover at \`${evidence.ref}\``
+      : `${evidence.repo} at \`${evidence.ref.slice(0, 12)}\``;
+  const listed = `${evidence.documents.length}${evidence.more > 0 ? ` (+${evidence.more} unlisted)` : ''}`;
+  const pages = rule.pagesProblem === null ? String(output.candidates.length) : '?';
+  return `| \`${evalCase.id}\` | ${source} | ${listed} | ${pages} | ${code(output.additions)} | ${code(output.readFirst)} |`;
+}
+
+async function readFirstRule(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      cases: { type: 'string' },
+      write: { type: 'boolean', default: false },
+      refresh: { type: 'boolean', default: false },
+    },
+  });
+  const cases = await loadCases(values.cases);
+  const rows = [
+    '| Case | Evidence | Change documents | Candidates (pages) | Added to taken paths | Read first |',
+    '|---|---|---|---|---|---|',
+  ];
+  let unresolved = 0;
+  for (const evalCase of cases) {
+    const rule = await evaluateCase(evalCase, values.refresh);
+    rows.push(ruleRow(evalCase, rule));
+    const problems = ruleProblems(evalCase, rule);
+    const wrote = values.write ? await writeRule(evalCase, rule) : 'nothing';
+    if (wrote === 'readFirst') {
+      log(`${evalCase.id}: wrote readFirst into pack.json`);
+    } else if (wrote === 'paths') {
+      unresolved += 1;
+      log(`${evalCase.id}: added the change documents to the taken paths; prepare its pack again`);
+    } else if (problems.length > 0) {
+      unresolved += 1;
+      log(`${evalCase.id}: ${problems.join('; ')}`);
+    }
+  }
+  process.stdout.write(`${rows.join('\n')}\n`);
+  log(`evidence cached in ${relative(process.cwd(), READ_FIRST_CACHE_DIR)} (--refresh refetches)`);
+  if (unresolved > 0) {
+    log(
+      values.write
+        ? `${unresolved} case(s) still differ: prepare-packs for them, then read-first-rule --write again`
+        : `${unresolved} case(s) differ from the read-first rule`
+    );
+    return 1;
+  }
+  return 0;
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -1440,6 +1528,8 @@ async function main(): Promise<number> {
       return selftest(rest);
     case 'prepare-packs':
       return preparePacks(rest);
+    case 'read-first-rule':
+      return readFirstRule(rest);
     case 'plan':
       return plan(rest);
     case 'run':

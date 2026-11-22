@@ -3,15 +3,28 @@
   "pack": {
     "title": "date-fns",
     "description": "Modern JavaScript date utility library",
-    "dependency": { "ecosystem": "npm", "name": "date-fns" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "date-fns"
+    },
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/date-fns/date-fns",
         "ref": "v{version}",
-        "paths": ["README.md", "docs"],
-        "include": ["**/*.md"]
+        "paths": [
+          "README.md",
+          "docs",
+          "CHANGELOG.md"
+        ],
+        "include": [
+          "**/*.md"
+        ]
       }
+    ],
+    "readFirst": [
+      "pages/docs/upgradeGuide.md",
+      "pages/CHANGELOG.md"
     ]
   }
 }

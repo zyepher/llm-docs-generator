@@ -3,15 +3,29 @@
   "pack": {
     "title": "markdown-it",
     "description": "Markdown parser with CommonMark support, extensions, and syntax plugins",
-    "dependency": { "ecosystem": "npm", "name": "markdown-it" },
+    "dependency": {
+      "ecosystem": "npm",
+      "name": "markdown-it"
+    },
     "sources": [
       {
         "type": "git",
         "repo": "https://github.com/markdown-it/markdown-it",
         "ref": "{version}",
-        "paths": ["README.md", "CHANGELOG.md", "docs"],
-        "include": ["**/*.md"]
+        "paths": [
+          "README.md",
+          "CHANGELOG.md",
+          "docs"
+        ],
+        "include": [
+          "**/*.md"
+        ]
       }
+    ],
+    "readFirst": [
+      "pages/docs/4.0_migration.md",
+      "pages/docs/5.0_migration.md",
+      "pages/CHANGELOG.md"
     ]
   }
 }

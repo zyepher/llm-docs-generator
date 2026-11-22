@@ -117,9 +117,128 @@ TypeScript 6; one version everywhere keeps the toolchain out of the comparison).
 
 Each `pack.json` takes the docs from the library's own repository at the tag matching the pinned
 version, bound to the dependency so the lockfile decides the version, with two exceptions: the Hono
-website has no tags, so its pack is pinned to a commit, and `stripe-23` adds three
-`docs.stripe.com` API reference pages that serve Markdown but are not versioned (they matched
-23.1.0's API version when the case was written).
+website has no tags, so its pack is pinned to a commit (and to version 4.13.16, next to its
+dependency binding), and `stripe-23` adds three `docs.stripe.com` API reference pages that serve
+Markdown but are not versioned (they matched 23.1.0's API version when the case was written). Every
+pack's `readFirst`, and the change documents added to its taken paths, come from one mechanical
+rule, described next.
+
+## Read-first pages
+
+A recipe can mark up to five pages to read first (`packs.<id>.readFirst`). The pack index lists
+them at the top, and the session-start hook names the first two for a library newer than the
+model's training data. The plugin's `add-docs` skill tells a planner to always find the page that
+says what changed and mark it. An eval whose packs skip that step under-measures the product; an
+eval whose read-first pages were picked by someone who had read the tasks over-measures it. So
+every case's `readFirst` is the output of one rule, applied the same way to every case, controls
+included, and fixed without looking at any task.
+
+### The rule
+
+1. **Evidence.** Run `llm-docs discover --package npm:<name>@<version>` for the case's library at
+   its pinned version and take its `changeDocuments` at the matched tag. When the recipe takes no
+   source from that repository, list the change documents in the source the recipe does take, at
+   its pinned ref, with the same name patterns discover uses (`findChangeDocuments` in
+   `src/core/package-discovery.ts`). Only `hono-4-13` needs this: its pack reads the untagged
+   `honojs/website` at a commit, while discover's evidence is about `honojs/hono`.
+2. **Additions.** A change document outside every path the recipe takes from that repository is
+   added to the first such source's `paths`, as a single file, because a planner following the
+   skill includes it. Nothing that is not a change document by those name patterns is added.
+3. **Candidates** are the change documents that are pages in the built pack. One that a source's
+   `include` globs leave out is not a candidate.
+4. **Order.** Migration and upgrade guides first (patterns `migration`, `migrating`, `migrate`,
+   `upgrade`, `upgrading`), then `breaking`, then `whats-new`, then release notes
+   (`release-notes`, `releases`), then changelogs and history (`changelog`, `changes`, `history`).
+   The pattern is the one discover reports for the file. Within a group, a path that names the
+   pinned major version comes first (`v<major>` with no letter or digit before it, `<major>.x`, or
+   `-<major>`, each with no digit after the number), then shallower paths before deeper ones, then
+   code-unit order. Paths are repository paths.
+5. **Choice.** The first three candidates become `readFirst`, each a whole page.
+6. A case with no candidate gets no `readFirst`. (No case is in that state today.)
+
+**Why no fragments.** A read-first target may name one heading with `#fragment`. A fragment is the
+one part of a target that could be aimed at a task's answer, such as the `Linkification` section of
+a migration guide, so the eval never uses one. A whole page is what a planner who has not seen the
+task would mark.
+
+### The check
+
+The rule is code, `evals/lib/read-first-rule.ts`, run as `npm run eval -- read-first-rule`. It
+computes every case's output from discover's JSON and the prepared pack's manifest, prints the
+table below, and exits 1 when a `pack.json` differs from it. With `--write` it updates each
+`pack.json`. Writing an addition removes `readFirst`, because a new path can move every page (the
+source's common root changes): prepare those packs again, then run `--write` once more. The
+committed values are its output, and the selftest runs the same check, so a `readFirst` edited by
+hand, a fragment, or a change document dropped from `paths` fails the selftest. The check reads
+the prepared packs' page lists, so run `prepare-packs` before `selftest`.
+
+The evidence is cached per case in `evals/.cache/read-first/<case>.json`: discover's JSON exactly
+as `llm-docs discover --package` prints it, and for `hono-4-13` the source listing. An entry is
+reused while the case's library and version (and, for a listing, the source's repository and ref)
+are unchanged, and fetched again otherwise. `npm run eval -- read-first-rule --refresh` refetches
+every entry; deleting the directory does the same on the next run. Like the rest of
+`evals/.cache/`, it is git-ignored, so a fresh clone fetches the evidence once (registry and git,
+no model quota).
+
+### What the rule chose
+
+The answer page is the page that states what the task needs: the one the case's `notes` cite, or,
+where the notes cite only `node_modules`, the pack page that states the change (marked "found by
+search"). Where several pages state it, each is listed. (a) means it is a read-first page, (b) in
+the pack but not read-first, (c) not in the pack.
+
+| Case | `readFirst`, in order | Added to taken paths | Answer page |
+|---|---|---|---|
+| `stripe-23` | `pages/CHANGELOG.md` | none | `pages/CHANGELOG.md` (a); `pages/api/checkout/sessions/create.md`, `pages/api/subscriptions/pause.md` (b, found by search) |
+| `mcp-sdk-v2` | `pages/docs/migration/upgrade-to-v2.md`, `pages/skills/mcp-typescript-sdk-upgrade-to-v2/SKILL.md`, `pages/upgrade-to-v2-references/auth.md` | `packages/{client,codemod,core,core-internal,server,server-legacy}/CHANGELOG.md`, `packages/middleware/{express,fastify,hono,node}/CHANGELOG.md`, `test/{conformance,e2e,helpers,integration}/CHANGELOG.md`, `skills/mcp-typescript-sdk-upgrade-to-v2/SKILL.md` | `pages/docs/servers/logging-progress-cancellation.md`, `pages/upgrade-to-v2-references/protocol-ctx.md` (b, found by search; the read-first `SKILL.md` maps `extra.*` to `ctx.mcpReq.*` in one table row but does not say how to report progress) |
+| `sveltekit-3` | `pages/documentation/docs/60-appendix/35-migrating-to-sveltekit-3.md`, `.../30-migrating-to-sveltekit-2.md`, `.../40-migrating.md` | `packages/adapter-{auto,bun,cloudflare,netlify,node,static,vercel}/CHANGELOG.md`, `packages/{enhanced-img,package}/CHANGELOG.md`, `packages/kit/CHANGELOG.md`, `packages/kit/CHANGELOG-pre-1.md` | `.../35-migrating-to-sveltekit-3.md` (a); `pages/documentation/docs/30-advanced/20-hooks.md` (b); both found by search |
+| `zod-4-6` | `pages/docs-v3/MIGRATION.md`, `pages/docs/content/v4/changelog.md`, `pages/docs-v3/CHANGELOG.md` | `packages/docs-v3/CHANGELOG.md`, `packages/docs-v3/MIGRATION.md` | `pages/docs/content/blog/zod-4-6.md`, `pages/docs/content/api.md` (b, found by search) |
+| `effect-4` | `pages/migration/v3-to-v4.md`, `pages/MIGRATION.md`, `pages/migration/cause.md` | `packages/{effect,opentelemetry,vitest}/CHANGELOG.md`, `packages/ai/anthropic/CHANGELOG.md` | `pages/migration/v3-to-v4.md` (a); `pages/migration/error-handling.md` (b); both found by search |
+| `hono-4-13` | `pages/guides/migrating-to-v5.md` | `docs/guides/migrating-to-v5.md` | `pages/middleware/builtin/method-not-allowed.md`, `pages/api/routing.md` (b, found by search) |
+| `zod-4-6-datetime` | as `zod-4-6` | as `zod-4-6` | `pages/docs/content/blog/zod-4-5.md`, `pages/docs/content/api.md` (b) |
+| `sveltekit-3-redirect` | as `sveltekit-3` | as `sveltekit-3` | `.../35-migrating-to-sveltekit-3.md` (a); `pages/packages/kit/CHANGELOG.md` (b, in the pack only because the rule added it) |
+| `effect-4-partition` | as `effect-4` | as `effect-4` | `pages/migration/v3-to-v4.md` (a); `pages/packages/effect/CHANGELOG.md` (b, in the pack only because the rule added it) |
+| `mcp-sdk-v2-tools` | as `mcp-sdk-v2` | as `mcp-sdk-v2` | `pages/upgrade-to-v2-references/behavioral-changes.md`, `pages/docs/clients/calling.md` (b); `pages/packages/server/CHANGELOG.md` (b, in the pack only because the rule added it) |
+| `markdown-it-15` | `pages/docs/migration/migration_v15.md`, `pages/docs/migration/migration_v4.md`, `pages/docs/migration/migration_v5.md` | none | `pages/docs/migration/migration_v15.md` (a); `pages/CHANGELOG.md` (b, the fourth candidate) |
+| `i18next-27` | `pages/CHANGELOG.md` | none | `pages/CHANGELOG.md` (a) |
+| `ctrl-stripe-14` | `pages/CHANGELOG.md` | none | control |
+| `ctrl-zod-3` | `pages/MIGRATION.md`, `pages/CHANGELOG.md` | `CHANGELOG.md`, `MIGRATION.md` | control |
+| `ctrl-markdown-it-13` | `pages/docs/4.0_migration.md`, `pages/docs/5.0_migration.md`, `pages/CHANGELOG.md` | none | control |
+| `ctrl-date-fns-2` | `pages/docs/upgradeGuide.md`, `pages/CHANGELOG.md` | `CHANGELOG.md` | control |
+
+`...` stands for `pages/documentation/docs/60-appendix`. Every case got read-first pages, and no
+answer page is outside its pack. Seven of the twelve post-cutoff cases have an answer page among
+the read-first pages (`stripe-23`, `sveltekit-3`, `effect-4`, `sveltekit-3-redirect`,
+`effect-4-partition`, `markdown-it-15`, `i18next-27`), four of them `type-invisible`. In the other
+five (`mcp-sdk-v2`, `zod-4-6`, `hono-4-13`, `zod-4-6-datetime`, `mcp-sdk-v2-tools`) every answer
+page is in the pack but not read-first.
+
+Read this table as an upper bound on what read-first can explain: in a case marked (b) or (c) for
+every answer page, any pack advantage cannot come from the read-first list pointing at the answer.
+
+### What applying the rule exactly does
+
+These are consequences of the rule, kept because adjusting them case by case is exactly the
+tuning the rule exists to prevent:
+
+- **A guide for another major.** The only change document in the Hono website at the pinned
+  commit is `docs/guides/migrating-to-v5.md`, the guide to Hono v5's breaking changes (a release
+  candidate when the commit was made). So the Hono 4.13.16 pack's one read-first page describes a
+  later major than the one installed, and none of its sections is about the 4.13 features the
+  task needs. In `zod-4-6` and `zod-4-6-datetime` the first page is the Zod 3 migration guide
+  (`packages/docs-v3/MIGRATION.md`), because migration guides outrank changelogs and Zod 4's own
+  guide is named `changelog.mdx`. The controls get old guides too: `ctrl-markdown-it-13` marks the
+  4.0 and 5.0 migration guides.
+- **Other packages' changelogs.** In monorepos every listed changelog outside the taken folders is
+  added: the SvelteKit adapters' and `@sveltejs/package`'s, the MCP SDK's test helpers' and
+  middleware packages', and Effect's OpenTelemetry, Vitest, and Anthropic packages'. They are
+  pages in the pack arms only, and none of them is read-first.
+- **discover lists at most 20.** Effect has 49 change documents at `effect@4.1.2` and the MCP SDK
+  29 at `v2.4.0`; the rest are not seen, so not added. A full listing of both trees, ordered by the
+  same rule, chooses the same three pages.
+- **Paths moved.** Adding a file outside a source's folder moves that source's common root, so the
+  SvelteKit pages now sit under `pages/documentation/docs/`, Zod 4's under `pages/docs/content/`,
+  and the MCP SDK's `docs/` under `pages/docs/`.
 
 ## Layout of a case
 
@@ -164,15 +283,20 @@ All commands run from the repository root. `npm run eval -- <command>` is the sa
 `npx tsx evals/run.ts <command>`.
 
 ```sh
-# 1. Prove every case is gradable: fixture alone fails, every solution*/ passes, every wrong-*/
+# 1. Build the packs with the llm-docs CLI (v3: init, sync, verify, status).
+npm run eval -- prepare-packs --llm-docs dist/cli.js
+
+# 2. Prove every case is gradable: fixture alone fails, every solution*/ passes, every wrong-*/
 #    fails, naive/ fails the way the case's stratum says (type-visible: typecheck fails;
-#    type-invisible: typecheck passes and behaviour fails; nothing else may fail), and the
-#    suppression scan flags exactly what tests/fixtures/evals/suppressions/expected.json lists.
-#    Needs network for npm only; templates are cached per lockfile.
+#    type-invisible: typecheck passes and behaviour fails; nothing else may fail), the
+#    suppression scan flags exactly what tests/fixtures/evals/suppressions/expected.json lists,
+#    and every pack.json follows the read-first rule (against the packs from step 1).
+#    Needs network for npm, and for the read-first evidence until it is cached; templates are
+#    cached per lockfile.
 npm run eval -- selftest
 
-# 2. Build the packs with the llm-docs CLI (v3: init, sync, verify, status).
-npm run eval -- prepare-packs --llm-docs dist/cli.js
+# The read-first rule on its own: print its table, or --write it into every pack.json.
+npm run eval -- read-first-rule
 
 # 3. See the run matrix and an estimated cost before spending anything.
 npm run eval -- plan --runs 5
@@ -363,7 +487,14 @@ date, model, Claude Code version, and run count.
   `llm-docs status`) and that every arm shares through `LLM_DOCS_CACHE_DIR`; with a cold cache
   the hook could say less. The hook always exits 0 and logs its own errors to `hook.log` in that
   cache, so a hook that failed inside and printed nothing looks the same in the stream as one
-  that had nothing to say; check `hook.log` when the plugin arm's hook output is empty.
+  that had nothing to say; check `hook.log` when the plugin arm's hook output is empty. A busy
+  machine is enough to cause that: the hook's 1.5 second deadline counts from process start,
+  including loading the bundled CLI. With a load average near 100, runs of the hook on prepared
+  `hono-4-13` and `mcp-sdk-v2-tools` workspaces took 1.0 to 1.7 seconds, and two of them printed
+  nothing (`hook.log`: "stdin did not end within 0 ms", then "missed its 1500 ms deadline"). For a
+  post-cutoff case the hook always has something to say, so an empty hook output there means the
+  plugin arm ran without its treatment; the arm assertion still passes it. Run on a quiet machine
+  and read the hook output in the smoke check.
 - **Resumed runs are later in time.** A run stopped by a usage limit and continued with `--resume`
   executes its remaining cells hours or days after the first part, so service drift no longer
   touches all arms alike for those cells. Ordering keeps the damage small (the remaining cells
