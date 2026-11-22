@@ -18,7 +18,7 @@
 
 import { lookup as dnsLookup } from 'node:dns/promises';
 import type { LookupAddress, LookupOptions } from 'node:dns';
-import { BlockList, isIP } from 'node:net';
+import { isIP } from 'node:net';
 
 import { Agent, request } from 'undici';
 
@@ -97,78 +97,225 @@ export function redactUrl(value: string | URL): string {
 // Address policy
 // ---------------------------------------------------------------------------
 
-type AddressFamily = 'ipv4' | 'ipv6';
-
-/** Special-purpose ranges (IANA registries) that docs never live on. */
-const SPECIAL_RANGES: ReadonlyArray<readonly [string, number, AddressFamily, string]> = [
-  ['0.0.0.0', 8, 'ipv4', 'an unspecified ("this network") address'],
-  ['10.0.0.0', 8, 'ipv4', 'a private address'],
-  ['100.64.0.0', 10, 'ipv4', 'a carrier-grade NAT address'],
-  ['127.0.0.0', 8, 'ipv4', 'a loopback address'],
-  ['169.254.0.0', 16, 'ipv4', 'a link-local address (cloud metadata lives here)'],
-  ['172.16.0.0', 12, 'ipv4', 'a private address'],
-  ['192.0.0.0', 24, 'ipv4', 'an IETF protocol assignment address'],
-  ['192.0.2.0', 24, 'ipv4', 'a documentation address'],
-  ['192.168.0.0', 16, 'ipv4', 'a private address'],
-  ['198.18.0.0', 15, 'ipv4', 'a benchmarking address'],
-  ['198.51.100.0', 24, 'ipv4', 'a documentation address'],
-  ['203.0.113.0', 24, 'ipv4', 'a documentation address'],
-  ['224.0.0.0', 4, 'ipv4', 'a multicast address'],
-  ['240.0.0.0', 4, 'ipv4', 'a reserved address'],
-  ['::', 128, 'ipv6', 'an unspecified address'],
-  ['::1', 128, 'ipv6', 'a loopback address'],
-  // IPv4-compatible (deprecated); IPv4-mapped addresses are judged by their IPv4 part.
-  ['::', 96, 'ipv6', 'an IPv4-compatible address'],
-  ['64:ff9b::', 96, 'ipv6', 'a NAT64 address'],
-  ['64:ff9b:1::', 48, 'ipv6', 'a NAT64 address'],
-  ['100::', 64, 'ipv6', 'a discard-only address'],
-  ['2001::', 32, 'ipv6', 'a Teredo tunnel address'],
-  ['2001:db8::', 32, 'ipv6', 'a documentation address'],
-  ['2002::', 16, 'ipv6', 'a 6to4 tunnel address'],
-  ['fc00::', 7, 'ipv6', 'a unique-local address'],
-  ['fe80::', 10, 'ipv6', 'a link-local address'],
-  ['fec0::', 10, 'ipv6', 'a site-local address'],
-  ['ff00::', 8, 'ipv6', 'a multicast address'],
+/**
+ * The blocks no docs fetch may reach: `[prefix, source name, description]`.
+ *
+ * Built from the IANA IPv4 and IPv6 Special-Purpose Address Registries, both
+ * last updated 2025-10-09 (https://www.iana.org/assignments/iana-ipv4-special-registry/
+ * and .../iana-ipv6-special-registry/): every block whose "Globally Reachable"
+ * is False, and every terminated block. A block that is not globally reachable
+ * is refused whole even where the registry carves globally reachable anycast
+ * services out of it (192.0.0.0/24, 2001::/23): docs never live there. Rows
+ * whose name cites an RFC are not in those registries: multicast (in IANA's
+ * multicast registries), the deprecated site-local range, and the IPv6 forms
+ * that carry an IPv4 address, refused whole, as the tunnels and translators
+ * they are (NAT64's well-known prefix is "Globally Reachable" in the registry,
+ * but a docs host behind one is an IPv4 host, reached by its IPv4 address).
+ */
+export const SPECIAL_ADDRESS_BLOCKS: ReadonlyArray<
+  readonly [prefix: string, name: string, description: string]
+> = [
+  ['0.0.0.0/8', '"This network"', 'an unspecified ("this network") address'],
+  ['0.0.0.0/32', '"This host on this network"', 'an unspecified ("this network") address'],
+  ['10.0.0.0/8', 'Private-Use', 'a private address'],
+  ['100.64.0.0/10', 'Shared Address Space', 'a carrier-grade NAT address'],
+  ['127.0.0.0/8', 'Loopback', 'a loopback address'],
+  ['169.254.0.0/16', 'Link Local', 'a link-local address (cloud metadata lives here)'],
+  ['172.16.0.0/12', 'Private-Use', 'a private address'],
+  ['192.0.0.0/24', 'IETF Protocol Assignments', 'an IETF protocol assignment address'],
+  ['192.0.0.0/29', 'IPv4 Service Continuity Prefix', 'an IETF protocol assignment address'],
+  ['192.0.0.8/32', 'IPv4 dummy address', 'an IETF protocol assignment address'],
+  ['192.0.0.170/32', 'NAT64/DNS64 Discovery', 'an IETF protocol assignment address'],
+  ['192.0.0.171/32', 'NAT64/DNS64 Discovery', 'an IETF protocol assignment address'],
+  ['192.0.2.0/24', 'Documentation (TEST-NET-1)', 'a documentation address'],
+  ['192.88.99.0/24', 'Deprecated (6to4 Relay Anycast)', 'a 6to4 relay address'],
+  ['192.88.99.2/32', '6a44-relay anycast address', 'a 6to4 relay address'],
+  ['192.168.0.0/16', 'Private-Use', 'a private address'],
+  ['198.18.0.0/15', 'Benchmarking', 'a benchmarking address'],
+  ['198.51.100.0/24', 'Documentation (TEST-NET-2)', 'a documentation address'],
+  ['203.0.113.0/24', 'Documentation (TEST-NET-3)', 'a documentation address'],
+  ['224.0.0.0/4', 'Multicast (RFC 5771)', 'a multicast address'],
+  ['240.0.0.0/4', 'Reserved', 'a reserved address'],
+  ['255.255.255.255/32', 'Limited Broadcast', 'a broadcast address'],
+  ['::/128', 'Unspecified Address', 'an unspecified address'],
+  ['::1/128', 'Loopback Address', 'a loopback address'],
+  ['::/96', 'IPv4-compatible (RFC 4291, deprecated)', 'an IPv4-compatible address'],
+  ['::ffff:0:0:0/96', 'IPv4-translated (RFC 2765)', 'an IPv4-translated address'],
+  ['64:ff9b::/96', 'IPv4-IPv6 Translat. (RFC 6052)', 'a NAT64 address'],
+  ['64:ff9b:1::/48', 'IPv4-IPv6 Translat.', 'a NAT64 address'],
+  ['100::/64', 'Discard-Only Address Block', 'a discard-only address'],
+  ['100:0:0:1::/64', 'Dummy IPv6 Prefix', 'a dummy address'],
+  ['2001::/23', 'IETF Protocol Assignments', 'an IETF protocol assignment address'],
+  ['2001::/32', 'TEREDO (RFC 4380)', 'a Teredo tunnel address'],
+  ['2001:2::/48', 'Benchmarking', 'a benchmarking address'],
+  ['2001:10::/28', 'Deprecated (previously ORCHID)', 'an ORCHID address'],
+  ['2001:db8::/32', 'Documentation', 'a documentation address'],
+  ['2002::/16', '6to4 (RFC 3056)', 'a 6to4 tunnel address'],
+  ['3fff::/20', 'Documentation', 'a documentation address'],
+  ['5f00::/16', 'Segment Routing (SRv6) SIDs', 'a segment routing address'],
+  ['fc00::/7', 'Unique-Local', 'a unique-local address'],
+  ['fe80::/10', 'Link-Local Unicast', 'a link-local address'],
+  ['fec0::/10', 'Site-Local (RFC 3879, deprecated)', 'a site-local address'],
+  ['ff00::/8', 'Multicast (RFC 4291)', 'a multicast address'],
 ];
 
-const RANGE_LISTS = SPECIAL_RANGES.map(([network, prefix, family, label]) => {
-  const list = new BlockList();
-  list.addSubnet(network, prefix, family);
-  return { list, label };
-});
+interface IpAddress {
+  family: 4 | 6;
+  value: bigint;
+}
 
-const LOOPBACK = new BlockList();
-LOOPBACK.addSubnet('127.0.0.0', 8, 'ipv4');
-LOOPBACK.addAddress('::1', 'ipv6');
+const IPV4_MASK = 0xffff_ffffn;
 
-function familyOf(address: string): AddressFamily | undefined {
+function parseIpv4(text: string): bigint {
+  return text.split('.').reduce((total, octet) => (total << 8n) | BigInt(octet), 0n);
+}
+
+function parseIp(text: string): IpAddress | undefined {
+  // A zone (`fe80::1%en0`) names an interface, not part of the address.
+  const address = text.replace(/%.*$/, '');
   const version = isIP(address);
-  return version === 4 ? 'ipv4' : version === 6 ? 'ipv6' : undefined;
+
+  if (version === 4) {
+    return { family: 4, value: parseIpv4(address) };
+  }
+  if (version !== 6) {
+    return undefined;
+  }
+
+  // A trailing dotted quad (`::ffff:1.2.3.4`) is the last two groups.
+  const hex = address.replace(/(\d+\.\d+\.\d+\.\d+)$/, (dotted) => {
+    const ipv4 = parseIpv4(dotted);
+    return `${(ipv4 >> 16n).toString(16)}:${(ipv4 & 0xffffn).toString(16)}`;
+  });
+  const [head = '', tail] = hex.split('::');
+  const left = head === '' ? [] : head.split(':');
+  const right = tail === undefined || tail === '' ? [] : tail.split(':');
+  const groups =
+    tail === undefined
+      ? left
+      : [...left, ...Array<string>(8 - left.length - right.length).fill('0'), ...right];
+
+  return {
+    family: 6,
+    value: groups.reduce((total, group) => (total << 16n) | BigInt(`0x${group}`), 0n),
+  };
+}
+
+function formatIpv4(value: bigint): string {
+  return [24n, 16n, 8n, 0n].map((shift) => (value >> shift) & 0xffn).join('.');
+}
+
+interface AddressBlock {
+  family: 4 | 6;
+  /** Bits to the right of the prefix. */
+  hostBits: bigint;
+  network: bigint;
+  reason: string;
+}
+
+function parseBlock([prefix, name, description]: readonly [string, string, string]): AddressBlock {
+  const [network = '', length = ''] = prefix.split('/');
+  const parsed = parseIp(network);
+  if (parsed === undefined) {
+    throw new Error(`Invalid special-purpose block ${prefix}.`);
+  }
+  const hostBits = BigInt((parsed.family === 4 ? 32 : 128) - Number(length));
+  return {
+    family: parsed.family,
+    hostBits,
+    network: parsed.value >> hostBits,
+    reason: `${description} (${prefix}: ${name})`,
+  };
+}
+
+/** Most specific first, so an address is described by the narrowest block holding it. */
+const BLOCKS = SPECIAL_ADDRESS_BLOCKS.map(parseBlock).sort((a, b) =>
+  a.hostBits < b.hostBits ? -1 : a.hostBits > b.hostBits ? 1 : 0
+);
+
+function inPrefix(value: bigint, network: bigint, hostBits: bigint): boolean {
+  return value >> hostBits === network;
+}
+
+function blockOf(address: IpAddress): AddressBlock | undefined {
+  return BLOCKS.find(
+    (block) =>
+      block.family === address.family && inPrefix(address.value, block.network, block.hostBits)
+  );
+}
+
+/** `::ffff:a.b.c.d`: the IPv4 address itself, as the operating system connects to it. */
+function ipv4Mapped(address: IpAddress): bigint | undefined {
+  return address.family === 6 && inPrefix(address.value, 0xffffn, 32n)
+    ? address.value & IPV4_MASK
+    : undefined;
+}
+
+/**
+ * The IPv4 addresses an IPv6 address carries: IPv4-compatible and -translated
+ * (RFC 4291, 2765), NAT64 (RFC 6052, the /48 form skipping its reserved
+ * octet), 6to4 (RFC 3056), and Teredo's server and inverted client (RFC 4380).
+ */
+function embeddedIpv4(value: bigint): bigint[] {
+  // `::` and `::1` are the unspecified and loopback addresses, not IPv4-compatible ones.
+  if ((value > 1n && inPrefix(value, 0n, 32n)) || inPrefix(value, 0xffff_0000n, 32n)) {
+    return [value & IPV4_MASK];
+  }
+  if (inPrefix(value, 0x64_ff9bn << 64n, 32n)) {
+    return [value & IPV4_MASK];
+  }
+  if (inPrefix(value, 0x64_ff9b_0001n, 80n)) {
+    return [(((value >> 64n) & 0xffffn) << 16n) | ((value >> 40n) & 0xffffn)];
+  }
+  if (inPrefix(value, 0x2002n, 112n)) {
+    return [(value >> 80n) & IPV4_MASK];
+  }
+  if (inPrefix(value, 0x2001_0000n, 96n)) {
+    return [(value >> 64n) & IPV4_MASK, ~value & IPV4_MASK];
+  }
+  return [];
 }
 
 /**
  * Why an IP address is not a public unicast address, or undefined when it is.
- * IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are judged by the IPv4 part.
+ * An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is judged by its IPv4 part;
+ * any other IPv6 form carrying an IPv4 address is refused, and names that
+ * address when it is itself special.
  */
 export function specialAddressReason(address: string): string | undefined {
-  const family = familyOf(address);
+  const parsed = parseIp(address);
 
-  if (family === undefined) {
+  if (parsed === undefined) {
     return 'not an IP address';
   }
 
-  for (const { list, label } of RANGE_LISTS) {
-    if (list.check(address, family)) {
-      return label;
+  const mapped = ipv4Mapped(parsed);
+  if (mapped !== undefined) {
+    return blockOf({ family: 4, value: mapped })?.reason;
+  }
+
+  const block = blockOf(parsed);
+  if (block === undefined || parsed.family === 4) {
+    return block?.reason;
+  }
+
+  for (const carried of embeddedIpv4(parsed.value)) {
+    const inner = blockOf({ family: 4, value: carried });
+    if (inner !== undefined) {
+      return `${block.reason} carrying ${formatIpv4(carried)}, ${inner.reason}`;
     }
   }
 
-  return undefined;
+  return block.reason;
 }
 
 function isLoopback(address: string): boolean {
-  const family = familyOf(address);
-  return family !== undefined && LOOPBACK.check(address, family);
+  const parsed = parseIp(address);
+  if (parsed === undefined) {
+    return false;
+  }
+  const ipv4 = parsed.family === 4 ? parsed.value : ipv4Mapped(parsed);
+  return ipv4 === undefined ? parsed.value === 1n : ipv4 >> 24n === 127n;
 }
 
 function hostOf(url: URL): string {
@@ -198,7 +345,7 @@ export function assertUrlAllowed(url: URL, allowPrivateNetwork: boolean): void {
 
   const host = hostOf(url);
 
-  if (familyOf(host) !== undefined) {
+  if (isIP(host) !== 0) {
     assertAddressAllowed(url, host, allowPrivateNetwork);
   }
 }

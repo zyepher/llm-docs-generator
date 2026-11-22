@@ -13,6 +13,7 @@ import {
   createHttpClient,
   HttpPolicyError,
   redactUrl,
+  SPECIAL_ADDRESS_BLOCKS,
   specialAddressReason,
   USER_AGENT,
   type HttpClient,
@@ -59,38 +60,108 @@ function client(options: Parameters<typeof createHttpClient>[0] = {}): HttpClien
 
 const LIMIT = { maxBytes: 1024 * 1024 };
 
+/** A CIDR block as numbers, computed here independently of the code under test. */
+function cidr(prefix: string): { family: 4 | 6; first: bigint; last: bigint; length: number } {
+  const [network = '', length = ''] = prefix.split('/');
+  const family = network.includes(':') ? 6 : 4;
+  const bits = family === 4 ? 32 : 128;
+  const value =
+    family === 4
+      ? network.split('.').reduce((total, octet) => (total << 8n) | BigInt(octet), 0n)
+      : expandIpv6(network);
+  const hostBits = BigInt(bits - Number(length));
+  const first = (value >> hostBits) << hostBits;
+  return { family, first, last: first + (1n << hostBits) - 1n, length: Number(length) };
+}
+
+function expandIpv6(address: string): bigint {
+  const [head = '', tail] = address.split('::');
+  const left = head === '' ? [] : head.split(':');
+  const right = tail === undefined || tail === '' ? [] : tail.split(':');
+  const groups =
+    tail === undefined
+      ? left
+      : [...left, ...Array<string>(8 - left.length - right.length).fill('0'), ...right];
+  return groups.reduce((total, group) => (total << 16n) | BigInt(`0x${group}`), 0n);
+}
+
+function formatAddress(family: 4 | 6, value: bigint): string {
+  if (family === 4) {
+    return [24n, 16n, 8n, 0n].map((shift) => (value >> shift) & 0xffn).join('.');
+  }
+  return [112n, 96n, 80n, 64n, 48n, 32n, 16n, 0n]
+    .map((shift) => ((value >> shift) & 0xffffn).toString(16))
+    .join(':');
+}
+
 describe('specialAddressReason', () => {
-  it.each([
-    ['127.0.0.1', 'a loopback address'],
-    ['10.1.2.3', 'a private address'],
-    ['172.20.0.1', 'a private address'],
-    ['192.168.1.1', 'a private address'],
-    ['169.254.169.254', 'a link-local address (cloud metadata lives here)'],
-    ['100.64.0.1', 'a carrier-grade NAT address'],
-    ['100.127.255.254', 'a carrier-grade NAT address'],
-    ['0.0.0.0', 'an unspecified ("this network") address'],
-    ['224.0.0.1', 'a multicast address'],
-    ['255.255.255.255', 'a reserved address'],
-    ['192.0.2.10', 'a documentation address'],
-    ['::', 'an unspecified address'],
-    ['::1', 'a loopback address'],
-    ['fe80::1', 'a link-local address'],
-    ['fd12:3456::1', 'a unique-local address'],
-    ['ff02::1', 'a multicast address'],
-    ['2001:db8::1', 'a documentation address'],
-    ['::ffff:127.0.0.1', 'a loopback address'],
-    ['::ffff:a9fe:a9fe', 'a link-local address (cloud metadata lives here)'],
-    ['::ffff:10.0.0.1', 'a private address'],
-  ])('refuses %s as %s', (address, reason) => {
-    expect(specialAddressReason(address)).toBe(reason);
+  const blocks = SPECIAL_ADDRESS_BLOCKS.map(([prefix]) => ({ prefix, ...cidr(prefix) }));
+  const moreSpecificHolds = (block: (typeof blocks)[number], value: bigint): boolean =>
+    blocks.some(
+      (other) =>
+        other.family === block.family &&
+        other.length > block.length &&
+        value >= other.first &&
+        value <= other.last
+    );
+
+  it.each(blocks)('refuses an address inside $prefix and names the block', (block) => {
+    const inside = moreSpecificHolds(block, block.last) ? block.first : block.last;
+    expect(specialAddressReason(formatAddress(block.family, inside))).toContain(
+      `(${block.prefix}:`
+    );
   });
 
-  it.each(['8.8.8.8', '100.128.0.1', '172.32.0.1', '2606:4700::1111', '::ffff:8.8.8.8'])(
-    'accepts the public address %s',
-    (address) => {
-      expect(specialAddressReason(address)).toBeUndefined();
+  it.each(blocks)('does not apply $prefix just outside it', (block) => {
+    const max = block.family === 4 ? (1n << 32n) - 1n : (1n << 128n) - 1n;
+    for (const outside of [block.first - 1n, block.last + 1n]) {
+      if (outside >= 0n && outside <= max) {
+        expect(specialAddressReason(formatAddress(block.family, outside)) ?? '').not.toContain(
+          `(${block.prefix}:`
+        );
+      }
     }
-  );
+  });
+
+  it.each([
+    // Ranges an earlier hand-written list treated as public.
+    ['2001:2::1', /benchmarking/],
+    ['3fff::1', /documentation/],
+    ['2001:10::1', /ORCHID/],
+    ['2001:20::1', /IETF protocol assignment/],
+    ['5f00::1', /segment routing/],
+    ['100:0:0:1::1', /dummy/],
+    ['192.88.99.1', /6to4 relay/],
+    // IPv4 carried inside IPv6: the IPv4 part is named.
+    ['::ffff:0:7f00:1', /IPv4-translated.*127\.0\.0\.1, a loopback address/],
+    ['::ffff:0:a9fe:a9fe', /169\.254\.169\.254, a link-local address/],
+    ['::7f00:1', /IPv4-compatible.*127\.0\.0\.1, a loopback address/],
+    ['64:ff9b::a00:1', /NAT64.*10\.0\.0\.1, a private address/],
+    ['64:ff9b:1:7f00:0:100::', /NAT64.*127\.0\.0\.1, a loopback address/],
+    ['2002:7f00:1::', /6to4.*127\.0\.0\.1, a loopback address/],
+    ['2001:0:7f00:1::', /Teredo.*127\.0\.0\.1, a loopback address/],
+    ['2001:0:808:808::80ff:fffe', /Teredo.*127\.0\.0\.1, a loopback address/],
+    // IPv4-mapped addresses are judged by their IPv4 part alone.
+    ['::ffff:127.0.0.1', /^a loopback address/],
+    ['::ffff:a9fe:a9fe', /^a link-local address \(cloud metadata lives here\)/],
+    ['::ffff:10.0.0.1', /^a private address/],
+  ])('refuses %s', (address, reason) => {
+    expect(specialAddressReason(address)).toMatch(reason);
+  });
+
+  it.each([
+    '8.8.8.8',
+    '1.1.1.1',
+    '100.128.0.1',
+    '172.32.0.1',
+    '192.0.1.255',
+    '2606:4700::1111',
+    '2a00:1450:4001::200e',
+    '::ffff:8.8.8.8',
+    '2606:4700::1%en0',
+  ])('accepts the public address %s', (address) => {
+    expect(specialAddressReason(address)).toBeUndefined();
+  });
 });
 
 describe('redactUrl', () => {
