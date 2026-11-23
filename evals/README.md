@@ -802,6 +802,19 @@ date, model, Claude Code version, and run count.
 - **The Dart and Rust packs hold only the change page.** Their recipes take one file (the SDK
   `CHANGELOG.md`, the Rust `RELEASES.md`), which is also the read-first page, so their `changes`,
   `pack`, and `plugin` arms hold the same page; only the note and the skills differ between them.
+- **A blocked type check decides some outcomes.** The agent may run `npx tsc`, but not every
+  command a project needs first. `sveltekit-3` type-checks only after `svelte-kit sync`, which is
+  not on the allowed list, so in most of its sessions the agent could not type-check and said so.
+  In the Sonnet run of 23 November 2026, the sessions that could not check their work passed 2 of
+  7 without pinned docs and 8 of 8 with them, and the sessions that could check passed every
+  time in every arm. Read a pass-rate difference on that case as a difference under "the agent
+  cannot verify its work", not as a difference on the task in general.
+- **`lang-py-base64url` was corrected after its first run.** Its hidden check also required an
+  empty signature to decode to empty bytes, which the task does not ask for. All 13 failures on
+  the case in the first Sonnet and Opus runs were that assertion, and none was the change the
+  case measures. The assertion was removed and the case run again on both models (every session
+  passed). The first run's rows for this case are not comparable and are left out of published
+  numbers.
 - **Web contamination.** Every answer is on the public web, which is the point of allowing web
   tools, but it also means the baseline can sometimes find the answer; that is a real competitor,
   not a flaw. Once these cases are published they can also leak into future training data, so

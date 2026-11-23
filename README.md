@@ -47,24 +47,28 @@ The agent finds the official docs for your version, saves them under `agent-docs
 
 ### Does it help?
 
-We measure it instead of claiming it. The [evaluation](evals/README.md) gives the same coding tasks to the same agent three ways: without `llm-docs`, with saved docs, and with saved docs plus the session note. The agent can search the web in all three. There are 16 tasks. Twelve use library changes released after the model's training data ends, and in seven of those the old code still compiles, so nothing tells the agent to look. Four use old, well-known versions, to check that the tool does no harm.
+We measure it instead of claiming it. The [evaluation](evals/README.md) gives the same coding tasks to the same agent with and without `llm-docs`. The agent can search the web in every setup. There are two kinds of task. Sixteen use a library: twelve rest on changes released after the model's training data ends, and four use old, well-known versions to check that the tool does no harm. Eight use a language version released after it ends: Python 3.15, Go 1.27, Dart 3.13, Rust 1.100, and Swift 6.4.
 
 <!-- EVAL-RESULTS -->
-Results from 22 November 2026: Claude Opus 5.5 in Claude Code 2.1.330, five runs of each task in each setup, 240 sessions. The run was interrupted once and resumed about two hours later.
+Results from 22 and 23 November 2026, in Claude Code 2.1.330. Each cell is sessions passed out of sessions run, on the tasks that rest on a new version.
 
-| Setup | Tasks passed | Opened the saved docs | Searched the web | Mean cost per session (list price) |
+| Model and tasks | Without `llm-docs` | Session note only | Note and what-changed pages | Note and full docs |
 |---|---|---|---|---|
-| Without `llm-docs` | 79 of 80 | no docs saved | 0 of 80 | $0.25 |
-| With saved docs | 80 of 80 | 80 of 80 | 0 of 80 | $0.29 |
-| With saved docs and the session note | 80 of 80 | 80 of 80 | 0 of 80 | $0.31 |
+| Claude Opus 5.5, new library versions | 59 of 60 | not run | not run | 60 of 60 |
+| Claude Opus 5.5, new language versions | 24 of 24 | 24 of 24 | 24 of 24 | 24 of 24 |
+| Claude Sonnet 5.5, new library versions | 56 of 60 | 56 of 60 | 58 of 60 | 59 of 60 |
+| Claude Sonnet 5.5, new language versions | 31 of 40 | 29 of 40 | 35 of 40 | 37 of 40 |
 
-**On these tasks it made no measurable difference to the result.** The agent passed 79 of 80 without `llm-docs`, including 59 of the 60 runs that depend on changes made after its training data ends. The one failure was a SvelteKit 3 task: the agent finished with code that used type names version 3 no longer exports. That is the mistake the tool exists to prevent, but one run in 80 is within chance, so we do not count it as evidence.
+- **The strongest model did not need it.** Opus passed 83 of 84 sessions without `llm-docs`. Without being told, it read the installed package before writing on every library task, and ran its own code on about nine language tasks in ten.
+- **A mid-tier model did better with saved docs on language changes.** Sonnet passed 72 of 80 language sessions with saved docs and 60 of 80 without, a gap that chance rarely produces. The clearest case needs new Go syntax: 10 of 10 with docs, 3 of 10 without.
+- **On libraries the gap was small.** Sonnet passed 117 of 120 with saved docs and 112 of 120 without, which is within chance. But all seven failures caused by a version change were in sessions without docs, and five of them were on a task where the agent could not run the type check. Where it could check its own code, it did not need the docs.
+- **The what-changed pages did almost as well as the full docs.** On Sonnet, 93 of 100 against 96 of 100.
+- **The session note alone changed what the agent did, not whether it passed.** With the note, Sonnet read installed code and tested its work more often on library tasks, and passed no more often than with nothing.
+- **Docs cannot fix what nobody documented.** One Go 1.27 change is missing from the release notes. Sonnet failed it 15 times in 20, with or without docs. Opus passed it every time, by testing.
+- **It did no harm on old versions.** Every control session passed in every setup.
+- **It costs more.** Sessions with `llm-docs` cost between a tenth and two thirds more, which is a few cents each.
 
-**Why the agent managed on its own.** In every setup it can read the installed packages, and in 11 of the 12 new-version tasks the package's own type definitions or bundled docs state the change. It never searched the web.
-
-**What the saved docs changed.** With docs saved, the agent opened them in every session. Those sessions cost 13 to 20 percent more and took about as many steps.
-
-**What this does not tell you.** Every task here uses a TypeScript library, which ships its types inside the package. The eval has not been run on languages where an installed package carries no such record, on language versions themselves, on smaller models, or on work the agent cannot check by running it. Those are the cases the tool is built for, and they are not measured yet. The [evaluation notes](evals/README.md) describe the method and its other limits.
+**What this does not tell you.** These are small tasks, three to five runs each, with two models in one coding agent. Most of the language changes were public on development branches before the models' training data ends, so a model may already know them. One language task was run again after a flaw in its check was fixed, and the Opus library sessions used an earlier wording of the session note. The [evaluation notes](evals/README.md) describe the method, every case, and the other limits.
 
 ### Good to know
 
