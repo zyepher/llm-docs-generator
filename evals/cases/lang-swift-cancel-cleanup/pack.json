@@ -1,0 +1,43 @@
+{
+  "id": "swift",
+  "pack": {
+    "title": "Swift",
+    "description": "The Swift changelog, the language guide pages on concurrency and statements, and two evolution proposals",
+    "dependency": {
+      "ecosystem": "toolchain",
+      "name": "swift"
+    },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/swiftlang/swift",
+        "ref": "swift-{version}.0-RELEASE",
+        "paths": [
+          "CHANGELOG.md"
+        ]
+      },
+      {
+        "type": "git",
+        "repo": "https://github.com/swiftlang/swift-book",
+        "ref": "swift-{version}-fcs",
+        "paths": [
+          "TSPL.docc/LanguageGuide/Concurrency.md",
+          "TSPL.docc/ReferenceManual/Statements.md",
+          "TSPL.docc/RevisionHistory/RevisionHistory.md"
+        ]
+      },
+      {
+        "type": "git",
+        "repo": "https://github.com/swiftlang/swift-evolution",
+        "ref": "58a97fabc7233f58af6b8a1e8d3d5a25fb4f7060",
+        "paths": [
+          "proposals/0504-task-cancellation-shields.md",
+          "proposals/0493-defer-async.md"
+        ]
+      }
+    ],
+    "readFirst": [
+      "pages/CHANGELOG.md"
+    ]
+  }
+}

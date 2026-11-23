@@ -1,0 +1,19 @@
+{
+  "id": "lang-py-argparse",
+  "title": "A legacy command line rebuilt with argparse",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "types",
+  "toolchain": "python",
+  "versionFiles": [
+    ".python-version"
+  ],
+  "library": {
+    "name": "python",
+    "version": "3.15",
+    "released": "2026-10-09"
+  },
+  "notes": "Python 3.15.0 (2026-10-09). Release note, Doc/whatsnew/3.15.rst at v3.15.0, Porting to Python 3.15: 'If a short option and a single-dash long option are passed to :meth:`argparse.ArgumentParser.add_argument`, *dest* is now inferred from the single-dash long option. For example, in ``add_argument('-f', '-foo')``, *dest* is now ``'foo'`` instead of ``'f'``. Pass an explicit *dest* argument to preserve the old behavior.' The naive parser declares `add_argument(\"-i\", \"-input\")` and reads `a.i`, `a.o`, `a.q`, `a.s`: on 3.15.2 reading the namespace raises AttributeError ('Namespace' object has no attribute 'i'); on 3.14 it passes. On disk: /opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/argparse.py:1805-1824, with the comment \"single-dash long option: '-foo' -> 'foo'\". Exposure risk: moderate (gh-138697 merged 2025-11-20).",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

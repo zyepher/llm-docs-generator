@@ -1,0 +1,6 @@
+name: asset_pipeline
+description: Build steps for our static assets.
+publish_to: none
+
+environment:
+  sdk: ^3.13.0

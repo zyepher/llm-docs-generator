@@ -1,0 +1,19 @@
+{
+  "id": "lang-go-generic-method",
+  "title": "A Map step for a generic list",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "types",
+  "toolchain": "go",
+  "versionFiles": [
+    "go.mod"
+  ],
+  "library": {
+    "name": "go",
+    "version": "1.27",
+    "released": "2026-08-19"
+  },
+  "notes": "Go 1.27.0 (2026-08-19). Release note, _content/doc/go1.27.md in golang/website: 'Go 1.27 now supports [generic methods](/issue/77273): a [method declaration](/ref/spec#Method_declarations) may declare its own [type parameters](/ref/spec#Type_parameter_declarations).' The naive answer adds a package-level `Map[T, U any](l *List[T], f func(T) U)` because methods cannot have type parameters, so the hidden test, which chains `.Filter(...).Map(...)` as a method, fails to compile ('Map undefined (type *List[int] has no field or method Map)'). Before 1.27 the method form is a syntax error ('method must have no type parameters' with go1.26.0), and on 1.27 with go.mod at go 1.26 it is 'generic method requires go1.27 or later', so the fixture's go.mod says go 1.27. On disk: /opt/homebrew/Cellar/go/1.27.4/libexec/doc/go_spec.html:3086 ('a generic method [Go 1.27]'), and `go doc math/rand/v2 Rand.N` prints `func (r *Rand) N[Int intType](n Int) Int`. Exposure risk: moderate (the go_spec.html subtitle 'Language version go1.27 (May 26, 2026)' was public before the cutoff).",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

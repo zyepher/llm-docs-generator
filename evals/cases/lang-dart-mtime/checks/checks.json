@@ -1,0 +1,13 @@
+{
+  "checks": [
+    {
+      "name": "behaviour",
+      "command": [
+        "dart",
+        "run",
+        "check.dart"
+      ],
+      "timeoutSeconds": 300
+    }
+  ]
+}

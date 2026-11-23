@@ -1,0 +1,32 @@
+{
+  "id": "go",
+  "pack": {
+    "title": "Go",
+    "description": "The Go release notes and the language specification",
+    "dependency": {
+      "ecosystem": "toolchain",
+      "name": "go"
+    },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/golang/website",
+        "ref": "0eef789c9f9a7cc074eab1b3fb2d96baea282546",
+        "paths": [
+          "_content/doc/go{version}.md"
+        ]
+      },
+      {
+        "type": "git",
+        "repo": "https://github.com/golang/go",
+        "ref": "go{version}.0",
+        "paths": [
+          "doc/go_spec.html"
+        ]
+      }
+    ],
+    "readFirst": [
+      "pages/go1.27.md"
+    ]
+  }
+}

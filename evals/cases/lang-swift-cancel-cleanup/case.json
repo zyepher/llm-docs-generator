@@ -1,0 +1,19 @@
+{
+  "id": "lang-swift-cancel-cleanup",
+  "title": "An upload that always closes its connection",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "types",
+  "toolchain": "swift",
+  "versionFiles": [
+    ".swift-version"
+  ],
+  "library": {
+    "name": "swift",
+    "version": "6.4",
+    "released": "2026-09-14"
+  },
+  "notes": "Swift 6.4.0 (2026-09-14; swift-book tag swift-6.4-fcs, RevisionHistory.md, '2026-09-14 - Updated for Swift 6.4.'). Release notes, CHANGELOG.md at swift-6.4.2-RELEASE: '[SE-0504][]: Introduced Task Cancellation Shields which temporarily prevent the observation of task cancellation in a given scope. This functionality is intended for use with cleanup actions which may otherwise not have run to completion (since their implementation may have been checking for cancellation and returning early). It may also be used within `defer` blocks to conveniently express such guaranteed-to-run-to-completion cleanups.' and '[SE-0493][]: `defer` statements now support `async` calls. The isolation of the body of the `defer` statement is always the same as the isolation of its enclosing scope.' The naive version wraps the sends in do/catch and awaits `close()` on both paths; `close()` gives up when the task is cancelled, so after cancellation the connection is still open. The researcher measured that the pre-6.4 workaround, awaiting `Task.detached { await connection.close() }.value`, also passes, and a fire-and-forget `defer { Task { await connection.close() } }` fails. The check is timing-based (sleeps of 5 to 30 ms). That pre-6.4 compilers reject `await` in `defer` rests on SE-0493; no older Swift is installed. On disk: /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/swift/_Concurrency.swiftmodule/arm64e.x1-apple-macos.swiftinterface:3259 declares `withTaskCancellationShield` (label `operation:`, available from macOS 27.0, so Package.swift targets macOS 27). The Swift book at swift-6.4-fcs documents neither feature. Exposure risk: moderate to high (SE-0493 accepted 2025-11-04; SE-0504 accepted 2026-02-11).",
+  "maxTurns": 30,
+  "timeoutSeconds": 1500
+}

@@ -1,0 +1,19 @@
+{
+  "id": "lang-go-json-field",
+  "title": "Config loading that tells operators which setting is wrong",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "none",
+  "toolchain": "go",
+  "versionFiles": [
+    "go.mod"
+  ],
+  "library": {
+    "name": "go",
+    "version": "1.27",
+    "released": "2026-08-19"
+  },
+  "notes": "Go 1.27.0 (2026-08-19). Release note, _content/doc/go1.27.md in golang/website (pinned by commit, the repository has no tags): 'The [`encoding/json`](/pkg/encoding/json) package is now backed by the v2 implementation. Marshaling and unmarshaling behavior is preserved, but the exact text of error messages may differ.' The notes do not mention that `UnmarshalTypeError.Field` now holds the full path to the value, with array indexes and map keys (`servers.1.port`, `limits.mem`; go1.26.0 gave `servers.port` and `limits`). The naive Load looks up `Help[te.Field]`, which silently misses for a wrong-typed array element or map value: the error names `servers.1.port` and `limits.mem` and has no help text. It passes with GOTOOLCHAIN=go1.26.0, and with GOEXPERIMENT=nojsonv2 on 1.27.4. On disk, only indirectly: /opt/homebrew/Cellar/go/1.27.4/libexec/src/encoding/json/v2_decode.go:128 ('the full path from root node to the value', where the old decode.go said 'the full path from root node to the field, include embedded struct') and /opt/homebrew/Cellar/go/1.27.4/libexec/api/go1.27.txt:87-92 (UnmarshalTypeError gains Err and Unwrap). Nothing states the new path format. Exposure risk: low (`internal/buildcfg: enable JSONv2 as baseline` 2026-05-18, v2 behind GOEXPERIMENT since 2025-04; the Field change is not described anywhere the researcher found).",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

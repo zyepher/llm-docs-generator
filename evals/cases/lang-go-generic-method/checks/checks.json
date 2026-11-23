@@ -1,0 +1,16 @@
+{
+  "checks": [
+    {
+      "name": "behaviour",
+      "command": [
+        "go",
+        "test",
+        "-count=1",
+        "-run",
+        "^TestMapMethodChains$",
+        "./coll"
+      ],
+      "timeoutSeconds": 300
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "rust",
+  "pack": {
+    "title": "Rust",
+    "description": "The Rust release notes",
+    "dependency": {
+      "ecosystem": "toolchain",
+      "name": "rust"
+    },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/rust-lang/rust",
+        "ref": "{version}.0",
+        "paths": [
+          "RELEASES.md"
+        ]
+      }
+    ],
+    "readFirst": [
+      "pages/RELEASES.md"
+    ]
+  }
+}

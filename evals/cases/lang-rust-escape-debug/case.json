@@ -1,0 +1,19 @@
+{
+  "id": "lang-rust-escape-debug",
+  "title": "Escaping values in single-line log records",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "types",
+  "toolchain": "rust",
+  "versionFiles": [
+    "rust-toolchain.toml"
+  ],
+  "library": {
+    "name": "rust",
+    "version": "1.100",
+    "released": "2026-11-12"
+  },
+  "notes": "Rust 1.100.0 (2026-11-12). Release note, RELEASES.md at 1.100.0, Compatibility Notes: '[Always escape grapheme extenders in `str::escape_debug`](https://github.com/rust-lang/rust/pull/158303)'. The naive version is `format!(\"{key}=\\\"{}\\\"\", value.escape_debug())`, which now escapes every combining mark and virama, not only a leading one: `Zoe\\u{308}` and Devanagari `\\u{915}\\u{94d}\\u{937}\\u{93f}` come out with `\\u{...}` escapes. Its old behaviour is shown from source at tag 1.99.0 (library/core/src/str/mod.rs escapes only the first char with ESCAPE_ALL), not by running an older compiler. A `{:?}`-based answer already escaped every grapheme extender before this release, so it fails on any version. On disk: /opt/homebrew/Cellar/rust/1.100.0/lib/rustlib/src/rust/library/core/src/str/mod.rs:3150 shows the new one-line implementation; no note says it changed. Exposure risk: none (PR 158303 merged 2026-08-31).",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

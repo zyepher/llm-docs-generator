@@ -1,0 +1,32 @@
+{
+  "id": "python",
+  "pack": {
+    "title": "Python",
+    "description": "What changed in the Python release, and the standard library reference pages",
+    "dependency": {
+      "ecosystem": "toolchain",
+      "name": "python"
+    },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/python/cpython",
+        "ref": "v{version}.0",
+        "paths": [
+          "Doc/whatsnew/{version}.rst",
+          "Doc/library/datetime.rst",
+          "Doc/library/argparse.rst",
+          "Doc/library/base64.rst",
+          "Doc/library/re.rst",
+          "Doc/library/json.rst",
+          "Doc/library/pathlib.rst",
+          "Doc/library/logging.rst",
+          "Doc/library/unicodedata.rst"
+        ]
+      }
+    ],
+    "readFirst": [
+      "pages/whatsnew/3.15.md"
+    ]
+  }
+}

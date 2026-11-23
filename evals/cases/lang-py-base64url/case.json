@@ -1,0 +1,19 @@
+{
+  "id": "lang-py-base64url",
+  "title": "Validating a padded base64url signature header",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "docs",
+  "toolchain": "python",
+  "versionFiles": [
+    ".python-version"
+  ],
+  "library": {
+    "name": "python",
+    "version": "3.15",
+    "released": "2026-10-09"
+  },
+  "notes": "Python 3.15.0 (2026-10-09). Release note, Doc/whatsnew/3.15.rst at v3.15.0, Porting to Python 3.15: 'Padding of input no longer required in :func:`base64.urlsafe_b64decode`. Pass a new argument ``padded=True`` or use :func:`base64.b64decode` with argument ``altchars=b'-_'`` (this works with older Python versions) to make padding required.' The naive decoder relies on `base64.urlsafe_b64decode` raising for bad input: on 3.15.2 it silently accepts unpadded values such as `aGk` (returning b'hi'); on 3.14 it rejects them. On disk: `help(base64.urlsafe_b64decode)` shows `urlsafe_b64decode(s, *, padded=False)` and 'If padded is false, padding in input is not required.' (/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/base64.py:167 and :176). Exposure risk: moderate (gh-73613 merged 2026-04-04).",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

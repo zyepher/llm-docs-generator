@@ -1,0 +1,1 @@
+We're replacing the legacy `imgconv` binary with a Python script and must keep its exact command line: `-i`/`-input FILE` and `-o`/`-output FILE` (both required), `-q`/`-quality N` (an int, default 85) and `-s`/`-strip` (a flag). Write `parse(argv: list[str]) -> dict` in `cli.py` using argparse, returning a dict with keys `input`, `output`, `quality` and `strip`.

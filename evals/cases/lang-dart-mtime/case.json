@@ -1,0 +1,19 @@
+{
+  "id": "lang-dart-mtime",
+  "title": "Finding changed files for an asset pipeline",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "types",
+  "toolchain": "dart",
+  "versionFiles": [
+    "pubspec.yaml"
+  ],
+  "library": {
+    "name": "dart",
+    "version": "3.13",
+    "released": "2026-08-12"
+  },
+  "notes": "Dart 3.13.0 (2026-08-12; CHANGELOG.md at tag 3.13.7 says 'Released on: 2026-08-12', at 3.13.0 it still reads 'Unreleased'). Release note, CHANGELOG.md at 3.13.0, dart:io: '**Behavioral change**: File access and modification timestamps (`File.lastModified`, `FileStat`, `lastAccessed`, `lastModified`, `setLastAccessed`, `setLastModified`) now preserve microsecond precision instead of truncating or rounding to millisecond accuracy. See SDK issue [#42444][].' The naive version stores `modified.millisecondsSinceEpoch` in the manifest and tests `modified.isAfter(DateTime.fromMillisecondsSinceEpoch(prev))`, which is now true for every file on every run, so a second run with nothing touched reports both files. That it passed on Dart 3.12 is shown only by a simulation (timestamps truncated to milliseconds inside naive); no older SDK is installed. On disk, barely: /opt/homebrew/share/flutter/bin/cache/dart-sdk/lib/io/file_system_entity.dart:137-139 and 174-176 build the DateTime with fromMicrosecondsSinceEpoch; no doc comment mentions precision. Exposure risk: very low (dart-lang/sdk issue 42444 fix referenced 2026-06-18, closed 2026-06-22).",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

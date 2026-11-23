@@ -1,0 +1,1 @@
+`Sources/Transfer/Connection.swift` is our existing network connection actor. Write `func upload(_ chunks: [String], over connection: Connection) async throws` that sends the chunks in order and rethrows any send error. Whatever happens during the upload, the connection must be fully closed (that is, `close()` has finished) by the time `upload` returns. Don't change `Connection`.

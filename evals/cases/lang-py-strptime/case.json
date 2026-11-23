@@ -1,0 +1,19 @@
+{
+  "id": "lang-py-strptime",
+  "title": "A parser for BSD syslog lines",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "types",
+  "toolchain": "python",
+  "versionFiles": [
+    ".python-version"
+  ],
+  "library": {
+    "name": "python",
+    "version": "3.15",
+    "released": "2026-10-09"
+  },
+  "notes": "Python 3.15.0 (2026-10-09). Release note, Doc/whatsnew/3.15.rst at v3.15.0, section Removed > datetime: ':meth:`~datetime.datetime.strptime` now raises :exc:`ValueError` when the format string contains ``%d`` (day of month) without a year directive. This has been deprecated since Python 3.13.' The naive parser does `datetime.strptime(m[\"ts\"], \"%b %d %H:%M:%S\").replace(year=year)`, the textbook way: on 3.15.2 it raises ValueError on every line, and on 3.14 it passes (the DeprecationWarning is not printed for code in an imported module). The check parses two syslog lines and compares the dict exactly; it leaves out Feb 29 so that naive passes on 3.14. On disk: /opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/_strptime.py:483-490 contains the raise, and the error message itself explains the fix. Exposure risk: moderate to high (GH-144570 merged 2026-04-15; the 3.13 DeprecationWarning text already said 'The default behavior will change in Python 3.15').",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

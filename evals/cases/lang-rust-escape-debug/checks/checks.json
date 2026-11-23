@@ -1,0 +1,12 @@
+{
+  "checks": [
+    {
+      "name": "behaviour",
+      "command": [
+        "sh",
+        "__eval__/check.sh"
+      ],
+      "timeoutSeconds": 300
+    }
+  ]
+}

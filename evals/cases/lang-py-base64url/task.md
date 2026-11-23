@@ -1,0 +1,1 @@
+Our webhook spec says the `X-Signature` header is URL-safe base64 with standard `=` padding. Write `decode_signature(value: str) -> bytes` in `signature.py` that returns the decoded bytes, and raises a `BadSignature(ValueError)` exception (define it) for any value that doesn't follow the spec. Standard library only.

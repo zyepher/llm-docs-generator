@@ -1,0 +1,1 @@
+`coll/list.go` has a generic `List[T]` with `Of`, `Items` and `Filter`. Add `Map` so callers can chain it like `Filter`, for example `coll.Of(1, 2, 3).Filter(isEven).Map(strconv.Itoa).Items()`, turning a `List[T]` into a `List` of another element type. Keep the order of elements and don't modify the receiver.

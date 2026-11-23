@@ -1,0 +1,13 @@
+{
+  "checks": [
+    {
+      "name": "behaviour",
+      "command": [
+        "python3",
+        "__eval__/check.py",
+        "signature.py"
+      ],
+      "timeoutSeconds": 300
+    }
+  ]
+}

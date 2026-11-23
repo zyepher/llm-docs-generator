@@ -1,0 +1,16 @@
+{
+  "checks": [
+    {
+      "name": "behaviour",
+      "command": [
+        "go",
+        "test",
+        "-count=1",
+        "-run",
+        "^TestWrongTypeNamesSettingWithHelp$",
+        "."
+      ],
+      "timeoutSeconds": 300
+    }
+  ]
+}
