@@ -4,6 +4,7 @@ import type { Arm, Stratum } from '../../evals/lib/cases.js';
 import {
   buildAggregates,
   type CaseFacts,
+  readRunRow,
   renderSummary,
   type RunRow,
   type SummaryMeta,
@@ -36,6 +37,9 @@ function row(caseId: string, stratum: Stratum, arm: Arm, repeat: number, passed:
     webSearches: 0,
     webFetches: 0,
     webTargets: [],
+    installedCodeRead: arm === 'baseline',
+    ownTestRuns: repeat === 1 ? 2 : 0,
+    typeCheckRuns: 1,
     toolCalls: {},
     permissionDenials: [],
     sessionStartHooks: [],
@@ -106,5 +110,48 @@ describe('results per stratum', () => {
     expect(summary).toContain('| invisible-case | type-invisible | none | 0/2 (0%) | 1/2 (50%) |');
     expect(summary).toContain('| control-case | control | docs | 2/2 (100%) | 2/2 (100%) |');
     expect(summary).not.toContain(String.fromCharCode(0x2014));
+  });
+});
+
+describe('installed code and own tests in the results', () => {
+  it('shows the share of runs that read installed code and ran their own test, and each run', () => {
+    const aggregates = buildAggregates(ROWS, ARMS);
+    expect(aggregates.overall.baseline).toMatchObject({
+      installedCodeReadRate: 1,
+      ownTestRate: 0.5,
+    });
+    expect(aggregates.overall.pack).toMatchObject({ installedCodeReadRate: 0, ownTestRate: 0.5 });
+    const summary = renderSummary(META, ROWS, aggregates);
+    expect(summary).toContain(
+      '| Arm | Mean cost | Total cost | Mean turns | Docs consulted | Read installed code | Ran its own test | Web used | Infra errors |'
+    );
+    expect(summary).toContain('| baseline | $1.00 | $6.00 | 3.0 | 0% | 100% | 50% | 0% | 0 |');
+    expect(summary).toContain(
+      '| Run | Outcome | Passed | Failed checks | Cost | Turns | Docs | Installed | Own tests | Web |'
+    );
+    expect(summary).toContain(
+      '| visible-case.baseline.1 | completed | yes | none | $1.00 | 3 | no | yes | 2 | no |'
+    );
+    expect(summary).toContain(
+      '| visible-case.pack.2 | completed | yes | none | $1.00 | 3 | yes | no | 0 | no |'
+    );
+  });
+
+  it('reads a row written before the measurements as no installed code read and no runs', () => {
+    const { installedCodeRead, ownTestRuns, typeCheckRuns, ...old } = row(
+      'visible-case',
+      'type-visible',
+      'baseline',
+      1,
+      true
+    );
+    expect([installedCodeRead, ownTestRuns, typeCheckRuns]).toEqual([true, 2, 1]);
+    expect(readRunRow(JSON.parse(JSON.stringify(old)))).toEqual({
+      ...old,
+      installedCodeRead: false,
+      ownTestRuns: 0,
+      typeCheckRuns: 0,
+    });
+    expect(readRunRow({ ...old, runId: 7 })).toBeNull();
   });
 });

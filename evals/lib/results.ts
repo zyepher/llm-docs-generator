@@ -35,6 +35,12 @@ export interface RunRow {
   webSearches: number;
   webFetches: number;
   webTargets: string[];
+  /** The session read installed code under `node_modules/` (`TranscriptSummary.installedCodeRead`). */
+  installedCodeRead: boolean;
+  /** Bash calls that ran `vitest` or `npm test`. */
+  ownTestRuns: number;
+  /** Bash calls that ran `tsc`. */
+  typeCheckRuns: number;
   toolCalls: Record<string, number>;
   permissionDenials: string[];
   sessionStartHooks: SessionStartHook[];
@@ -51,8 +57,12 @@ export interface RunRow {
   infraError: string | null;
 }
 
+/** A row as an earlier version of the harness may have written it, before the transcript measurements. */
+type StoredRunRow = Omit<RunRow, 'installedCodeRead' | 'ownTestRuns' | 'typeCheckRuns'> &
+  Partial<Pick<RunRow, 'installedCodeRead' | 'ownTestRuns' | 'typeCheckRuns'>>;
+
 /** Shallow shape check for rows read back from disk (resume, cost history). */
-export function isRunRow(value: unknown): value is RunRow {
+function isStoredRunRow(value: unknown): value is StoredRunRow {
   return (
     isRecord(value) &&
     typeof value.runId === 'string' &&
@@ -68,6 +78,22 @@ export function isRunRow(value: unknown): value is RunRow {
   );
 }
 
+/**
+ * A row read back from disk, or null when it is not one. A row written before the transcript
+ * measurements existed reads as not having read installed code and having run nothing.
+ */
+export function readRunRow(value: unknown): RunRow | null {
+  if (!isStoredRunRow(value)) {
+    return null;
+  }
+  return {
+    ...value,
+    installedCodeRead: value.installedCodeRead === true,
+    ownTestRuns: typeof value.ownTestRuns === 'number' ? value.ownTestRuns : 0,
+    typeCheckRuns: typeof value.typeCheckRuns === 'number' ? value.typeCheckRuns : 0,
+  };
+}
+
 export interface Aggregate {
   runs: number;
   passed: number;
@@ -75,6 +101,10 @@ export interface Aggregate {
   meanCostUsd: number | null;
   totalCostUsd: number;
   docsConsultedRate: number | null;
+  /** Share of graded runs that read installed code. */
+  installedCodeReadRate: number | null;
+  /** Share of graded runs that ran their own test at least once. */
+  ownTestRate: number | null;
   webUseRate: number | null;
   meanTurns: number | null;
   infraErrors: number;
@@ -97,6 +127,8 @@ export function aggregate(rows: RunRow[]): Aggregate {
     meanCostUsd: mean(costs),
     totalCostUsd: costs.reduce((sum, cost) => sum + cost, 0),
     docsConsultedRate: rate((row) => row.docsConsulted),
+    installedCodeReadRate: rate((row) => row.installedCodeRead),
+    ownTestRate: rate((row) => row.ownTestRuns > 0),
     webUseRate: rate((row) => row.webUsed),
     meanTurns: mean(turns),
     infraErrors: rows.length - valid.length,
@@ -252,27 +284,29 @@ export function renderSummary(meta: SummaryMeta, rows: RunRow[], aggregates: Agg
   lines.push('## Behaviour by arm');
   lines.push('');
   lines.push(
-    '| Arm | Mean cost | Total cost | Mean turns | Docs consulted | Web used | Infra errors |'
+    '| Arm | Mean cost | Total cost | Mean turns | Docs consulted | Read installed code | Ran its own test | Web used | Infra errors |'
   );
-  lines.push('|---|---|---|---|---|---|---|');
+  lines.push('|---|---|---|---|---|---|---|---|---|');
   for (const arm of arms) {
     const agg = aggregates.overall[arm];
     if (!agg) {
       continue;
     }
     lines.push(
-      `| ${arm} | ${usd(agg.meanCostUsd)} | ${usd(agg.totalCostUsd)} | ${agg.meanTurns === null ? 'n/a' : agg.meanTurns.toFixed(1)} | ${pct(agg.docsConsultedRate)} | ${pct(agg.webUseRate)} | ${agg.infraErrors} |`
+      `| ${arm} | ${usd(agg.meanCostUsd)} | ${usd(agg.totalCostUsd)} | ${agg.meanTurns === null ? 'n/a' : agg.meanTurns.toFixed(1)} | ${pct(agg.docsConsultedRate)} | ${pct(agg.installedCodeReadRate)} | ${pct(agg.ownTestRate)} | ${pct(agg.webUseRate)} | ${agg.infraErrors} |`
     );
   }
   lines.push('');
   lines.push('## Runs');
   lines.push('');
-  lines.push('| Run | Outcome | Passed | Failed checks | Cost | Turns | Docs | Web |');
-  lines.push('|---|---|---|---|---|---|---|---|');
+  lines.push(
+    '| Run | Outcome | Passed | Failed checks | Cost | Turns | Docs | Installed | Own tests | Web |'
+  );
+  lines.push('|---|---|---|---|---|---|---|---|---|---|');
   for (const row of rows) {
     const failed = row.checks.filter((check) => !check.passed).map((check) => check.name);
     lines.push(
-      `| ${row.runId} | ${row.infraError === null ? describeOutcome(row.outcome) : `infra error: ${row.infraError.slice(0, 120).replace(/[|\n]/g, ' ')}`} | ${row.passed ? 'yes' : 'no'} | ${failed.join(', ') || 'none'} | ${usd(row.costUsd)} | ${row.numTurns ?? 'n/a'} | ${row.docsConsulted ? 'yes' : 'no'} | ${row.webUsed ? `${row.webSearches}s/${row.webFetches}f` : 'no'} |`
+      `| ${row.runId} | ${row.infraError === null ? describeOutcome(row.outcome) : `infra error: ${row.infraError.slice(0, 120).replace(/[|\n]/g, ' ')}`} | ${row.passed ? 'yes' : 'no'} | ${failed.join(', ') || 'none'} | ${usd(row.costUsd)} | ${row.numTurns ?? 'n/a'} | ${row.docsConsulted ? 'yes' : 'no'} | ${row.installedCodeRead ? 'yes' : 'no'} | ${row.ownTestRuns} | ${row.webUsed ? `${row.webSearches}s/${row.webFetches}f` : 'no'} |`
     );
   }
   lines.push('');

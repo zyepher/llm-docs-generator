@@ -54,6 +54,15 @@ export interface TranscriptSummary {
   webSearches: number;
   webFetches: number;
   webTargets: string[];
+  /**
+   * A Read, Grep, or Glob call's path or pattern, or a Bash command, named a path under
+   * `node_modules/` that is not a `package.json` file and not under `node_modules/.bin/`.
+   */
+  installedCodeRead: boolean;
+  /** Bash calls whose command runs `vitest` or `npm test`. */
+  ownTestRuns: number;
+  /** Bash calls whose command runs `tsc`. */
+  typeCheckRuns: number;
   sessionStartHooks: SessionStartHook[];
   parseErrors: number;
 }
@@ -136,6 +145,31 @@ function docsPathsIn(input: Record<string, unknown>): string[] {
   return found;
 }
 
+/**
+ * Whether a tool input names installed code: a path under `node_modules/`, except a `package.json`
+ * (reading only a version number there is not reading code) and the launchers in
+ * `node_modules/.bin/`.
+ */
+function namesInstalledCode(input: Record<string, unknown>): boolean {
+  return ['file_path', 'path', 'pattern', 'glob', 'command'].some((key) =>
+    [...(stringField(input, key) ?? '').matchAll(/node_modules\/[^\s"'`();|&<>]+/g)].some(
+      ([path]) =>
+        !/(^|\/)node_modules\/\.bin(\/|$)/.test(path) && !/(^|\/)package\.json$/.test(path)
+    )
+  );
+}
+
+/**
+ * Whether a shell command runs `program` (a regular expression source): as a command, at the
+ * start or after `;`, `&`, `|`, or `(`, past any `VAR=value` and an `npx` with its flags, by name or
+ * by a path to it. A mention elsewhere, such as `cat vitest.config.ts`, does not count.
+ */
+function runsProgram(command: string, program: string): boolean {
+  return new RegExp(
+    `(?:^|[;&|(])\\s*(?:\\w+=\\S*\\s+)*(?:npx\\s+(?:-\\S+\\s+)*)?(?:\\S*/)?${program}(?=$|[\\s;&|)])`
+  ).test(command);
+}
+
 function assistantText(message: unknown): string {
   if (!isRecord(message) || !Array.isArray(message.content)) {
     return '';
@@ -160,6 +194,9 @@ export function summarizeTranscript(jsonl: string): TranscriptSummary {
     webSearches: 0,
     webFetches: 0,
     webTargets: [],
+    installedCodeRead: false,
+    ownTestRuns: 0,
+    typeCheckRuns: 0,
     sessionStartHooks: [],
     parseErrors: 0,
   };
@@ -257,6 +294,16 @@ export function summarizeTranscript(jsonl: string): TranscriptSummary {
         if (['Read', 'Grep', 'Glob', 'Bash'].includes(name)) {
           for (const path of docsPathsIn(input)) {
             docsPaths.add(path);
+          }
+          summary.installedCodeRead ||= namesInstalledCode(input);
+        }
+        if (name === 'Bash') {
+          const command = stringField(input, 'command') ?? '';
+          if (runsProgram(command, 'vitest') || runsProgram(command, 'npm\\s+test')) {
+            summary.ownTestRuns += 1;
+          }
+          if (runsProgram(command, 'tsc')) {
+            summary.typeCheckRuns += 1;
           }
         }
         if (name === 'WebSearch') {

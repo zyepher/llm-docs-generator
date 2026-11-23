@@ -472,7 +472,9 @@ and the case's wall timeout.
 
 - `summary.md`: pass rate per arm overall, per case kind, per stratum, and per case (with each
   case's stratum and whether the installed package documents the answer); mean and total cost,
-  mean turns, docs-consulted rate, and web-use rate per arm; one line per run; and, when the run
+  mean turns, docs-consulted rate, the share of runs that read installed code and that ran their
+  own test, and web-use rate per arm; one line per run, with whether it read installed code and
+  how many times it ran its own test; and, when the run
   was resumed or stopped, a table of segments with each one's wall-clock window. Read the
   `type-invisible` row first: it is where a pack has the most room to matter, and the
   `type-visible` and `control` rows show what happens where it has less.
@@ -480,8 +482,9 @@ and the case's wall timeout.
   stratum and `packageDocumentsAnswer` in `meta.cases`, the segments, and one row per run (with its
   case's `stratum`) with the session
   outcome, attempts, every arm assertion with its evidence, every check's result and output tail,
-  cost, turns, duration, tool call counts, the `agent-docs/` paths the agent touched, web
-  searches and fetches, permission denials, each SessionStart hook's outcome and output, and the
+  cost, turns, duration, tool call counts, the `agent-docs/` paths the agent touched,
+  `installedCodeRead`, `ownTestRuns`, and `typeCheckRuns` (below), web searches and fetches,
+  permission denials, each SessionStart hook's outcome and output, and the
   session's model, tools, MCP servers, and plugins as reported by Claude Code.
 - `runs/<run id>/`: `transcript.jsonl`, `stderr.log`, `run.json`, and `files.json` mapping every
   file the agent created or changed to its content (a map, not loose copies, so test files the
@@ -564,6 +567,23 @@ Definitions:
   pinned docs and have no pinned docs section; a control case's note may say anything, or
   nothing.
 - **Docs consulted**: a Read, Grep, Glob, or Bash call named a path under `agent-docs/`.
+- **Read installed code** (`installedCodeRead`): any Read, Grep, or Glob call's path or pattern,
+  or any Bash command, named a path under `node_modules/` that is not a `package.json` file and is
+  not under `node_modules/.bin/`. Reading only a version number from `package.json` does not
+  count. `summary.md` shows the share of graded runs where it is true.
+- **Ran its own test** (`ownTestRuns`): the number of Bash calls whose command runs `vitest` or
+  `npm test`, directly, through `npx`, or by a path to it, at the start of the command or after
+  `;`, `&`, `|`, or `(`. `summary.md` shows the share of graded runs with at least one.
+- **Type-check runs** (`typeCheckRuns`): the number of Bash calls whose command runs `tsc` in the
+  same sense. It is in `results.json` only.
+- These three measurements see tool calls, not what the agent understood: a Read of a `.d.ts`
+  file says nothing about whether the agent used what it read, and a Vitest run says nothing about
+  whether the test it ran checks the behaviour that changed. `installedCodeRead` only knows
+  `node_modules`: a library installed anywhere else, or code the agent reached another way, is not
+  seen, and a path named for another reason (a Grep pattern that mentions `node_modules/`, an
+  `ls`) counts as a read. A test or type check started through a package script that the command
+  does not name (`npm run check`) is not counted. A row written by an earlier version of the
+  harness has none of these fields and reads as `false` and `0`.
 - **Web used**: at least one WebSearch or WebFetch call. Claude Code 2.1 reads pages through its
   `web-fetch` subagent rather than a top-level WebFetch tool, so launching that subagent counts as
   a fetch (its own nested fetch is not counted twice).

@@ -47,8 +47,8 @@ import {
 } from './lib/read-first-rule.js';
 import {
   buildAggregates,
-  isRunRow,
   isSegment,
+  readRunRow,
   renderSummary,
   type RunRow,
   type Segment,
@@ -976,8 +976,9 @@ async function loadHistoricalRows(): Promise<RunRow[]> {
     }
     const data = await readJsonFile(file);
     if (isRecord(data) && Array.isArray(data.rows)) {
-      for (const row of data.rows) {
-        if (isRunRow(row)) {
+      for (const raw of data.rows) {
+        const row = readRunRow(raw);
+        if (row !== null) {
           rows.push(row);
         }
       }
@@ -1237,8 +1238,8 @@ async function readRows(resultsDir: string): Promise<Map<string, RunRow>> {
   for (const entry of await readdir(runsDir, { withFileTypes: true })) {
     const file = join(runsDir, entry.name, 'run.json');
     if (entry.isDirectory() && existsSync(file)) {
-      const row = await readJsonFile(file);
-      if (isRunRow(row)) {
+      const row = readRunRow(await readJsonFile(file));
+      if (row !== null) {
         rows.set(row.runId, row);
       }
     }
@@ -1298,6 +1299,9 @@ async function executeRun(
     webSearches: 0,
     webFetches: 0,
     webTargets: [],
+    installedCodeRead: false,
+    ownTestRuns: 0,
+    typeCheckRuns: 0,
     toolCalls: {},
     permissionDenials: [],
     sessionStartHooks: [],
@@ -1366,6 +1370,9 @@ async function executeRun(
       webSearches: summary.webSearches,
       webFetches: summary.webFetches,
       webTargets: summary.webTargets,
+      installedCodeRead: summary.installedCodeRead,
+      ownTestRuns: summary.ownTestRuns,
+      typeCheckRuns: summary.typeCheckRuns,
       toolCalls: summary.toolCalls,
       permissionDenials: summary.result?.permissionDenials ?? [],
       sessionStartHooks: summary.sessionStartHooks,

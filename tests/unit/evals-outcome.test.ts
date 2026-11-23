@@ -32,6 +32,60 @@ function outcomeOf(jsonl: string, end: ProcessEnd = ENDED): SessionOutcome {
   return classifyOutcome(summarizeTranscript(jsonl), end);
 }
 
+/** One assistant message per tool call, as the stream reports them. */
+function toolCalls(...calls: Array<[string, Record<string, unknown>]>): string {
+  return calls
+    .map(([name, input], index) =>
+      JSON.stringify({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: { content: [{ type: 'tool_use', id: `toolu_${index}`, name, input }] },
+      })
+    )
+    .join('\n');
+}
+
+describe('what the transcript says the agent did with installed code and tests', () => {
+  it('counts reading installed source, running tsc, and running vitest', () => {
+    const summary = summarizeTranscript(
+      toolCalls(
+        ['Read', { file_path: '/tmp/ws/node_modules/zod/v4/core/regexes.js' }],
+        ['Bash', { command: 'npx tsc --noEmit' }],
+        ['Bash', { command: 'npx vitest run' }],
+        ['Bash', { command: 'cat vitest.config.ts' }]
+      )
+    );
+    expect(summary).toMatchObject({ installedCodeRead: true, ownTestRuns: 1, typeCheckRuns: 1 });
+  });
+
+  it('does not count grepping a version number out of an installed package.json', () => {
+    const summary = summarizeTranscript(
+      toolCalls(['Grep', { pattern: '"version"', path: 'node_modules/zod/package.json' }])
+    );
+    expect(summary).toMatchObject({ installedCodeRead: false, ownTestRuns: 0, typeCheckRuns: 0 });
+  });
+
+  it('counts installed code named by a Glob, a Grep, or a Bash command, but not the .bin launchers', () => {
+    const read = (call: [string, Record<string, unknown>]): boolean =>
+      summarizeTranscript(toolCalls(call)).installedCodeRead;
+    expect(read(['Glob', { pattern: 'node_modules/zod/**/*.d.ts' }])).toBe(true);
+    expect(read(['Grep', { pattern: 'datetime', path: 'node_modules/zod/v4' }])).toBe(true);
+    expect(read(['Bash', { command: 'cat node_modules/hono/dist/types/hono.d.ts' }])).toBe(true);
+    expect(read(['Bash', { command: 'ls node_modules/.bin/tsc' }])).toBe(false);
+    expect(read(['Bash', { command: 'cat node_modules/zod/package.json; ls node_modules/' }])).toBe(
+      false
+    );
+    expect(read(['Read', { file_path: 'src/booking.ts' }])).toBe(false);
+  });
+
+  it('counts npm test as the agent running its own test', () => {
+    const summary = summarizeTranscript(
+      toolCalls(['Bash', { command: 'npm test -- --run' }], ['Bash', { command: 'ls src' }])
+    );
+    expect(summary).toMatchObject({ ownTestRuns: 1, typeCheckRuns: 0 });
+  });
+});
+
 describe('session outcome from observed Claude Code 2.1.330 transcripts', () => {
   it('grades a session that finished its turn', () => {
     expect(outcomeOf(fixture('observed-completed-plugin.jsonl'))).toEqual({ kind: 'completed' });
@@ -197,6 +251,9 @@ function rowFor(run: PlannedRun, outcome: SessionOutcome): RunRow {
     webSearches: 0,
     webFetches: 0,
     webTargets: [],
+    installedCodeRead: false,
+    ownTestRuns: 0,
+    typeCheckRuns: 0,
     toolCalls: {},
     permissionDenials: [],
     sessionStartHooks: [],
