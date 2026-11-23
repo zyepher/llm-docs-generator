@@ -63,7 +63,7 @@ Security:
 
 Evaluation:
 
-- An evaluation suite in `evals/` with 16 cases in three strata and three arms (baseline, pack, plugin), where the baseline agent has web search and fetch.
+- An evaluation suite in `evals/` with 16 cases in three strata and five arms (baseline, note, changes, pack, plugin), where the baseline agent has web search and fetch.
 
 ### Migrating from v2
 
