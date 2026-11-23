@@ -462,7 +462,7 @@ describe('the expected hook note', () => {
   });
 
   it('fails a note that lists the case library or the bound dependency with no pinned docs', () => {
-    const row = '- zod 4.6.7 (npm, released 2026-10-12, after cutoff)';
+    const row = '- `zod` 4.6.7 (npm, released 2026-10-12, after cutoff)';
     const zod: NoteExpectation = {
       kind: 'control',
       packId: 'zod',
@@ -475,14 +475,16 @@ describe('the expected hook note', () => {
       failures: [`the note says the case's own library has no pinned docs: "${row}"`],
       warnings: [],
     });
-    const server = '- modelcontextprotocol/server 2.4.0 (npm, released 2026-10-23, after cutoff)';
+    const server =
+      '- `@modelcontextprotocol/server` 2.4.0 (npm, released 2026-10-23, after cutoff)';
     expect(expectedNoteProblems(note([SDK_ROW], [server]), sdk).failures).toEqual([
       `the note says the case's own library has no pinned docs: "${server}"`,
     ]);
   });
 
   it('only warns about a library from the pack repository that the pack does not bind', () => {
-    const client = '- modelcontextprotocol/client 2.4.0 (npm, released 2026-10-23, after cutoff)';
+    const client =
+      '- `@modelcontextprotocol/client` 2.4.0 (npm, released 2026-10-23, after cutoff)';
     const tools = { ...sdk, library: '@modelcontextprotocol/client' };
     for (const expectation of [sdk, tools]) {
       expect(expectedNoteProblems(note([SDK_ROW], [client, TS_ROW]), expectation)).toEqual({

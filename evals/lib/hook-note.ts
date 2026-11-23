@@ -161,10 +161,10 @@ export function expectedNoteProblems(
   }
 
   for (const dependency of expectation.dependencies) {
-    // The hook escapes names for an agent file: `@` and backticks are dropped.
-    const shown = dependency.name.replace(/[`@]/g, '');
+    // The note prints a dependency name exactly, as a code span.
+    const shown = `- \`${dependency.name}\` `;
     const row = rows.find(
-      (candidate) => candidate.section === 'unpinned' && candidate.line.startsWith(`- ${shown} `)
+      (candidate) => candidate.section === 'unpinned' && candidate.line.startsWith(shown)
     );
     if (row === undefined) {
       continue;
