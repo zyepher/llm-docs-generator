@@ -128,6 +128,7 @@ describe('plugin skills and agent', () => {
   it('name each skill after its folder and mention only commands, flags, and checks the CLI has', async () => {
     expect((await readdir(join(pluginDir, 'skills'))).sort()).toEqual([
       'add-docs',
+      'check-installed',
       'llm-docs',
       'write-docs-guide',
     ]);

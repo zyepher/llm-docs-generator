@@ -1091,15 +1091,21 @@ context for the agent. Behavior:
      the title, version, the most recent of those release dates, whether it is after or near
      the cutoff, and the index path, under a heading that tells the agent its memory of these
      libraries predates these versions and that it must read the pinned pages before writing
-     code against them. This is what a fully adopted project is told at every session start.
+     code against them, and that closes with the installed-code habits: the installed code is
+     the authority, not memory, so read its installed types and source before writing against
+     it and run a small test of the behaviour relied on (a changed default still passes the
+     type check), with the `check-installed` skill named as the place that says where installed
+     code lives. This is what a fully adopted project is told at every session start.
      When the pack has read-first pages (4.8) the line names them before the index:
      ``- Hono 4.13.16 (released 2026-11-01, after cutoff): read `agent-docs/hono/pages/guide/migration.md` first, then `agent-docs/hono/index.md` ``.
      At most two paths, the first two in recipe order with fragments dropped and repeats
      merged; the index links the rest. A path that the 7.1 escaping would alter is left out
      rather than shown altered.
   3. Direct dependencies newer than the model's training cutoff (or within the near-cutoff
-     window) without a pack (a package a pack `covers` has one), most recent first, at most 8, with their release dates, and the
-     suggestion to read their docs or create a pack with the `add-docs` skill.
+     window) without a pack (a package a pack `covers` has one), most recent first, at most 8, with their release dates, closing
+     with the suggestion to pin docs with the `add-docs` skill for what installed code cannot
+     tell (what changed and why, a language version, a protocol, a hosted API). When item 2 is
+     absent, the installed-code habits come first in that close, so the note states them once.
   4. When packs exist and the managed block is missing from the agent file the harness reads,
      the pack list itself (so the hook covers projects that gitignore AGENTS.md). Codex and
      Cursor read `AGENTS.md`. Claude Code reads the project's `CLAUDE.md` and
@@ -1150,6 +1156,7 @@ plugin/
   bin/llm-docs.cmd                Windows wrapper
   bin/llm-docs.mjs                the whole CLI bundled into one file (generated, committed)
   THIRD_PARTY_NOTICES.md          license notices of the packages bundled into it (generated, committed)
+  skills/check-installed/SKILL.md read the installed version's types and source, test the behaviour that changed
   skills/add-docs/SKILL.md        planner playbook: decide source and version, write the recipe, sync, verify
   skills/write-docs-guide/SKILL.md  write a digest, fact-check it with the agent, stamp citations
   skills/llm-docs/SKILL.md        command reference and when to use which command

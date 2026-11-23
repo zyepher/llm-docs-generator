@@ -743,6 +743,11 @@ function briefReadFirst(targets: readonly string[]): string[] {
   return [...new Set(paths)].slice(0, BRIEF_MAX_READ_FIRST);
 }
 
+const INSTALLED_CODE_HABITS =
+  'For each one, the installed code is the authority, not your memory: read its installed types and source before you write against it, and run a small test of the behaviour you rely on, because a changed default still passes the type check. The `check-installed` skill says where installed code lives.';
+const PIN_WHAT_IS_NOT_INSTALLED =
+  'For what installed code cannot tell you (what changed and why, a language version, a protocol, a hosted API), pin docs with the `add-docs` skill.';
+
 /**
  * The first three items of the session-start text (spec 7.2): packs to fix,
  * each with its fix; built packs whose library version is newer than the
@@ -753,6 +758,11 @@ function briefReadFirst(targets: readonly string[]): string[] {
  * first (read-first paths before whole rows), a cut list ending with how many
  * more there are, and an item that cannot keep even its heading is dropped
  * with everything below it. The hook appends the pack list after this.
+ *
+ * Two footers close the list items: the pinned item ends with the installed-code
+ * habits (read the installed types and source, test the behaviour relied on), and
+ * the unpinned item ends with when to pin docs instead, preceded by the habits
+ * when there is no pinned item to carry them, so they appear once.
  */
 export function formatStatusBrief(report: StatusReport, options: FormatStatusBriefOptions): string {
   const sections: BriefSection[] = [];
@@ -829,7 +839,7 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
             };
       }),
       maxRows: pinned.length,
-      footer: [],
+      footer: [INSTALLED_CODE_HABITS],
     });
   }
 
@@ -855,9 +865,10 @@ export function formatStatusBrief(report: StatusReport, options: FormatStatusBri
         );
       }),
       maxRows: BRIEF_MAX_DEPENDENCIES,
-      footer: [
-        'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.',
-      ],
+      footer:
+        pinned.length > 0
+          ? [PIN_WHAT_IS_NOT_INSTALLED]
+          : [INSTALLED_CODE_HABITS, PIN_WHAT_IS_NOT_INSTALLED],
     });
   }
 

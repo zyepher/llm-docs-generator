@@ -285,16 +285,20 @@ describe('the expected hook note', () => {
     'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:';
   const UNPINNED =
     'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:';
-  const FOOTER =
-    'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.';
+  const HABITS =
+    'For each one, the installed code is the authority, not your memory: read its installed types and source before you write against it, and run a small test of the behaviour you rely on, because a changed default still passes the type check. The `check-installed` skill says where installed code lives.';
+  const PIN =
+    'For what installed code cannot tell you (what changed and why, a language version, a protocol, a hosted API), pin docs with the `add-docs` skill.';
   const SDK_ROW =
     '- MCP TypeScript SDK 2.4.0 (released 2026-10-23, after cutoff): read `agent-docs/mcp-typescript-sdk/pages/docs/migration/upgrade-to-v2.md` first, then `agent-docs/mcp-typescript-sdk/index.md`';
   const TS_ROW = '- typescript 6.0.3 (npm, released 2026-09-01, after cutoff)';
   const note = (pinned: string[], unpinned: string[]): string =>
     [
-      ...(pinned.length > 0 ? [HEAD, ...pinned] : []),
+      ...(pinned.length > 0 ? [HEAD, ...pinned, HABITS] : []),
       ...(pinned.length > 0 && unpinned.length > 0 ? [''] : []),
-      ...(unpinned.length > 0 ? [UNPINNED, ...unpinned, FOOTER] : []),
+      ...(unpinned.length > 0
+        ? [UNPINNED, ...unpinned, ...(pinned.length > 0 ? [] : [HABITS]), PIN]
+        : []),
     ].join('\n');
   const sdk: NoteExpectation = {
     kind: 'post-cutoff',

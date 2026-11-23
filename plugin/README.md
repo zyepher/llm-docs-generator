@@ -1,10 +1,11 @@
 # llm-docs plugin
 
-Your coding agent's knowledge of a library stops at its training data cutoff. Your lockfile does not. This plugin tells the agent, at the start of every session, which of your project's dependencies were released after (or shortly before) that cutoff and where the pinned docs for them live in your repository. It also gives the agent three skills and a fact-checking agent for pinning and maintaining those docs with the `llm-docs` CLI.
+Your coding agent's knowledge of a library stops at its training data cutoff. Your lockfile does not. This plugin tells the agent, at the start of every session, which of your project's dependencies were released after (or shortly before) that cutoff and where the pinned docs for them live in your repository. It also gives the agent four skills and a fact-checking agent for pinning and maintaining those docs with the `llm-docs` CLI.
 
 ## What it installs
 
 - A session-start hook runs `llm-docs hook session-start` from the bundled CLI and adds a short note to the agent's context. In Claude Code it runs again after `/clear`, after a compaction, and when a session is resumed or forked, because those drop the earlier note.
+- The `check-installed` skill teaches the agent to read the installed version's own types and source before writing against a library, and to test the behaviour that changed.
 - The `add-docs` skill teaches the agent to choose a source and version from evidence, write the recipe, build the pack, and verify it.
 - The `write-docs-guide` skill teaches it to write a project-specific digest of a pack that cites its pages, fact-check the digest, and stamp the citations.
 - The `llm-docs` skill is the command reference. It covers every command, the verify checks with their fixes, and how to read the session-start note.

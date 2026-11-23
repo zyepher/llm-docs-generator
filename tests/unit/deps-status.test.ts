@@ -522,8 +522,10 @@ describe('formatStatusBrief', () => {
     source: 'table',
     assumed: false,
   };
-  const DEPENDENCIES_FOOTER =
-    'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.';
+  const HABITS_FOOTER =
+    'For each one, the installed code is the authority, not your memory: read its installed types and source before you write against it, and run a small test of the behaviour you rely on, because a changed default still passes the type check. The `check-installed` skill says where installed code lives.';
+  const PIN_FOOTER =
+    'For what installed code cannot tell you (what changed and why, a language version, a protocol, a hosted API), pin docs with the `add-docs` skill.';
 
   it('returns an empty string when there is nothing to say', () => {
     const report = computeStatus(
@@ -536,6 +538,58 @@ describe('formatStatusBrief', () => {
     );
 
     expect(formatStatusBrief(report, BRIEF_OPTIONS)).toBe('');
+  });
+
+  describe('footers', () => {
+    const PINNED_HEADING =
+      'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:';
+    const UNPINNED_HEADING =
+      'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:';
+    const ZOD_ROW = '- zod 4.1.0 (released 2026-09-30, after cutoff): `agent-docs/zod/index.md`';
+    const NEXT_ROW = '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)';
+    const zodPack = pack('zod', {
+      version: '4.1.0',
+      dependency: { ecosystem: 'npm', name: 'zod' },
+    });
+    const brief = (withPack: boolean, withDependency: boolean): string =>
+      formatStatusBrief(
+        computeStatus(
+          baseInput({
+            dependencies: [
+              ...(withPack ? [dep('zod', '4.1.0')] : []),
+              ...(withDependency ? [dep('next', '16.1.0')] : []),
+            ],
+            releases: releases({
+              'npm:zod@4.1.0': '2026-09-30T00:00:00.000Z',
+              'npm:next@16.1.0': '2026-10-21T00:00:00.000Z',
+            }),
+            cutoff,
+            packs: withPack ? [zodPack] : [],
+          })
+        ),
+        BRIEF_OPTIONS
+      );
+
+    it('closes a pinned section alone with the installed-code habits', () => {
+      expect(brief(true, false)).toBe([PINNED_HEADING, ZOD_ROW, HABITS_FOOTER].join('\n'));
+    });
+
+    it('closes an unpinned section alone with the habits, then when to pin docs', () => {
+      expect(brief(false, true)).toBe(
+        [UNPINNED_HEADING, NEXT_ROW, HABITS_FOOTER, PIN_FOOTER].join('\n')
+      );
+    });
+
+    it('states the habits once, under the pinned rows, and closes the unpinned section with when to pin docs', () => {
+      const note = brief(true, true);
+
+      expect(note).toBe(
+        [PINNED_HEADING, ZOD_ROW, HABITS_FOOTER, '', UNPINNED_HEADING, NEXT_ROW, PIN_FOOTER].join(
+          '\n'
+        )
+      );
+      expect(note.split(HABITS_FOOTER)).toHaveLength(2);
+    });
   });
 
   it('lists packs needing a rebuild, then pinned docs newer than the cutoff, then dependencies without a pack', () => {
@@ -578,12 +632,13 @@ describe('formatStatusBrief', () => {
         'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:',
         '- Zod @schemas 4.1.0 (released 2026-09-30, after cutoff): `agent-docs/zod/index.md`',
         '- vite 8.1.0 (released 2026-06-20, near cutoff): `agent-docs/vite/index.md`',
+        HABITS_FOOTER,
         '',
         'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:',
         '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
         '- `django` 6.0.0 (pypi, released 2026-08-01, after cutoff)',
         '- `hono` 4.9.0 (npm, released 2026-05-10, near cutoff)',
-        DEPENDENCIES_FOOTER,
+        PIN_FOOTER,
       ].join('\n')
     );
   });
@@ -626,18 +681,19 @@ describe('formatStatusBrief', () => {
     );
     const lines = formatStatusBrief(report, BRIEF_OPTIONS).split('\n');
 
-    expect(lines.slice(0, 3)).toEqual([
+    expect(lines.slice(0, 4)).toEqual([
       'Pinned docs for libraries released in the last 180 days. Your training data may predate these versions: read the pinned pages before writing code against them. Newest first:',
       '- vite 8.1.0 (released 2026-10-01): `agent-docs/vite/index.md`',
+      HABITS_FOOTER,
       '',
     ]);
-    expect(lines.slice(3)).toEqual([
+    expect(lines.slice(4)).toEqual([
       'Recently released dependencies (your training data may predate them), released in the last 180 days with no pinned docs, newest first:',
       ...names
         .slice(0, 8)
         .map((name, index) => `- \`${name}\` 1.0.0 (npm, released ${day(index).slice(0, 10)})`),
       '- and 2 more (run `llm-docs status`)',
-      DEPENDENCIES_FOOTER,
+      PIN_FOOTER,
     ]);
   });
 
@@ -672,7 +728,7 @@ describe('formatStatusBrief', () => {
     const [rebuild = '', pinned = '', dependencies = ''] = full.split('\n\n');
 
     expect(rebuild.split('\n')).toHaveLength(3);
-    expect(pinned.split('\n')).toHaveLength(3);
+    expect(pinned.split('\n')).toHaveLength(4);
     expect(dependencies.split('\n')).toHaveLength(11);
     expect(brief(full.length)).toBe(full);
 
@@ -681,7 +737,7 @@ describe('formatStatusBrief', () => {
     expect(oneLess.split('\n\n')[2]?.split('\n')).toEqual([
       ...dependencies.split('\n').slice(0, 8),
       '- and 3 more (run `llm-docs status`)',
-      DEPENDENCIES_FOOTER,
+      PIN_FOOTER,
     ]);
 
     const pinnedCut = [
@@ -689,6 +745,7 @@ describe('formatStatusBrief', () => {
       '',
       ...pinned.split('\n').slice(0, 2),
       '- and 1 more (run `llm-docs status`)',
+      HABITS_FOOTER,
     ].join('\n');
     expect(brief(pinnedCut.length)).toBe(pinnedCut);
     expect(brief(rebuild.length)).toBe(rebuild);
@@ -761,7 +818,7 @@ describe('formatStatusBrief', () => {
       const report = readFirstReport();
       const lines = formatStatusBrief(report, BRIEF_OPTIONS).split('\n');
 
-      expect(lines.slice(1)).toEqual(ROWS);
+      expect(lines.slice(1)).toEqual([...ROWS, HABITS_FOOTER]);
       expect(report.packs.find((entry) => entry.id === 'three')?.readFirst).toHaveLength(5);
     });
 
@@ -772,7 +829,7 @@ describe('formatStatusBrief', () => {
       const brief = (maxChars: number): string =>
         formatStatusBrief(readFirstReport([dep('next', '16.1.0')]), { maxChars });
       const [heading = '', ...rest] = full.split('\n');
-      const pinned = (rows: string[]): string => [heading, ...rows].join('\n');
+      const pinned = (rows: string[]): string => [heading, ...rows, HABITS_FOOTER].join('\n');
 
       expect(rest.slice(0, 4)).toEqual(ROWS);
       expect(brief(pinned(ROWS).length)).toBe(pinned(ROWS));
@@ -890,6 +947,7 @@ describe('formatStatusBrief', () => {
     expect(formatStatusBrief(report, BRIEF_OPTIONS).split('\n')).toEqual([
       expect.stringMatching(/^Pinned docs for libraries released after or close to/),
       '- zod 4.0.0 (released 2026-09-01, after cutoff): `agent-docs/zod/index.md`',
+      HABITS_FOOTER,
     ]);
   });
 

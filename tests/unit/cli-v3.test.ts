@@ -797,7 +797,8 @@ describe('llm-docs v3 CLI', () => {
       code: 0,
       stdout:
         'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:\n' +
-        '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/guide/migration.md` first, then `agent-docs/hono/index.md`\n',
+        '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/guide/migration.md` first, then `agent-docs/hono/index.md`\n' +
+        'For each one, the installed code is the authority, not your memory: read its installed types and source before you write against it, and run a small test of the behaviour you rely on, because a changed default still passes the type check. The `check-installed` skill says where installed code lives.\n',
       stderr: '',
     });
     const json = await runCli(root, ['status', '--model', 'claude-opus-5-5', '--json'], env);
@@ -890,10 +891,11 @@ describe('llm-docs v3 CLI', () => {
     const brief = [
       'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:',
       '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+      'For each one, the installed code is the authority, not your memory: read its installed types and source before you write against it, and run a small test of the behaviour you rely on, because a changed default still passes the type check. The `check-installed` skill says where installed code lives.',
       '',
       'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:',
       '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
-      'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.',
+      'For what installed code cannot tell you (what changed and why, a language version, a protocol, a hosted API), pin docs with the `add-docs` skill.',
     ].join('\n');
 
     expect((await runCli(root, ['sync'], env)).code).toBe(0);

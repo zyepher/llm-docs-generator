@@ -257,14 +257,17 @@ const PINNED_HEADING =
   'Pinned docs for libraries released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06). Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:';
 const DEPENDENCIES_HEADING =
   'Direct dependencies released after or close to your training data cutoff (Claude Opus 5.5, through 2026-06) with no pinned docs, newest first:';
-const DEPENDENCIES_FOOTER =
-  'Before using their APIs, read their current docs rather than relying on memory, or create a pinned docs pack with the `add-docs` skill.';
+const HABITS_FOOTER =
+  'For each one, the installed code is the authority, not your memory: read its installed types and source before you write against it, and run a small test of the behaviour you rely on, because a changed default still passes the type check. The `check-installed` skill says where installed code lives.';
+const PIN_FOOTER =
+  'For what installed code cannot tell you (what changed and why, a language version, a protocol, a hosted API), pin docs with the `add-docs` skill.';
 const ALL_DEPENDENCIES = [
   DEPENDENCIES_HEADING,
   '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
   '- `hono` 4.13.16 (npm, released 2026-09-02, after cutoff)',
   '- `zod` 4.1.0 (npm, released 2026-06-25, near cutoff)',
-  DEPENDENCIES_FOOTER,
+  HABITS_FOOTER,
+  PIN_FOOTER,
 ].join('\n');
 const BLOCK_HEADER = [
   '## Pinned reference docs',
@@ -388,10 +391,11 @@ describe('which project and model the hook reads', () => {
       [
         'Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): pinned docs for libraries released after or close to that cutoff. If you are a different model, judge by the release dates shown. Your memory of these libraries predates these versions: read the pinned pages before writing code against them. Newest first:',
         '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+        HABITS_FOOTER,
         '',
         'Assuming your model is the configured default (Claude Opus 5.5, cutoff 2026-06): direct dependencies released after or close to that cutoff with no pinned docs, newest first:',
         '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
-        DEPENDENCIES_FOOTER,
+        PIN_FOOTER,
       ].join('\n')
     );
   });
@@ -405,7 +409,8 @@ describe('which project and model the hook reads', () => {
         '- `next` 16.1.0 (npm, released 2026-10-21)',
         '- `hono` 4.13.16 (npm, released 2026-09-02)',
         '- `zod` 4.1.0 (npm, released 2026-06-25)',
-        DEPENDENCIES_FOOTER,
+        HABITS_FOOTER,
+        PIN_FOOTER,
       ].join('\n')
     );
   });
@@ -434,7 +439,8 @@ describe('what the hook says', () => {
       [
         DEPENDENCIES_HEADING,
         '- `swift` 6.4 (toolchain, released 2026-09-14, after cutoff)',
-        DEPENDENCIES_FOOTER,
+        HABITS_FOOTER,
+        PIN_FOOTER,
       ].join('\n')
     );
   });
@@ -451,6 +457,7 @@ describe('what the hook says', () => {
       [
         PINNED_HEADING,
         '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+        HABITS_FOOTER,
       ].join('\n')
     );
   });
@@ -468,6 +475,7 @@ describe('what the hook says', () => {
       [
         PINNED_HEADING,
         '- Hono 4.13.16 (released 2026-10-21, after cutoff): `agent-docs/hono/index.md`',
+        HABITS_FOOTER,
       ].join('\n')
     );
   });
@@ -504,6 +512,7 @@ describe('what the hook says', () => {
         '- Next.js 16.1.0 (released 2026-10-21, after cutoff): read `agent-docs/next/pages/upgrade.md` and `agent-docs/next/pages/index.md` first, then `agent-docs/next/index.md`',
         '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/upgrade.md` first, then `agent-docs/hono/index.md`',
         '- Zod 4.1.0 (released 2026-06-25, near cutoff): read `agent-docs/zod/pages/changes.md` and `agent-docs/zod/pages/upgrade.md` first, then `agent-docs/zod/index.md`',
+        HABITS_FOOTER,
       ].join('\n')
     );
   });
@@ -530,10 +539,11 @@ describe('what the hook says', () => {
         PINNED_HEADING,
         '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
         '- Zod 4.0.0 (released 2026-05-01, near cutoff): `agent-docs/zod/index.md`',
+        HABITS_FOOTER,
         '',
         DEPENDENCIES_HEADING,
         '- `next` 16.1.0 (npm, released 2026-10-21, after cutoff)',
-        DEPENDENCIES_FOOTER,
+        PIN_FOOTER,
         '',
         `${BLOCK_HEADER}- Hono 4.13.16: \`agent-docs/hono/index.md\``,
         '- Zod 4.0.0: `agent-docs/zod/index.md`',
@@ -554,7 +564,7 @@ describe('what the hook says', () => {
     const fits = injected(await runHook({ payload: { cwd: crowded, ...OPUS } }));
     expect(fits.length).toBeLessThanOrEqual(HOOK_LIMITS.maxChars);
     expect(fits).toContain(PINNED_HEADING);
-    expect(fits.endsWith(DEPENDENCIES_FOOTER)).toBe(true);
+    expect(fits.endsWith(PIN_FOOTER)).toBe(true);
     expect(fits).not.toContain('## Pinned reference docs');
 
     const overflowing = await project({ packs: { hono: HONO, ...missing(40) }, build: ['hono'] });
@@ -575,7 +585,7 @@ describe('what the hook says', () => {
           hono: { ...HONO, readFirst: ['pages/upgrade.md'] },
           ...Object.fromEntries(
             Array.from({ length: rebuilds }, (_, index) => [
-              `p${String(index).padStart(2, '0')}`,
+              `p${String(index).padStart(4, '0')}`,
               { version: '1.0.0', sources: LOCAL_DOCS },
             ])
           ),
@@ -588,15 +598,21 @@ describe('what the hook says', () => {
       return text.split('\n').slice(rebuilds + 2);
     };
 
-    expect(await pinnedRow(29)).toEqual([
+    expect(await pinnedRow(22)).toEqual([
       PINNED_HEADING,
       '- Hono 4.13.16 (released 2026-09-02, after cutoff): read `agent-docs/hono/pages/upgrade.md` first, then `agent-docs/hono/index.md`',
+      HABITS_FOOTER,
     ]);
-    expect(await pinnedRow(30)).toEqual([
+    expect(await pinnedRow(23)).toEqual([
       PINNED_HEADING,
       '- Hono 4.13.16 (released 2026-09-02, after cutoff): `agent-docs/hono/index.md`',
+      HABITS_FOOTER,
     ]);
-    expect(await pinnedRow(31)).toEqual([PINNED_HEADING, '- and 1 more (run `llm-docs status`)']);
+    expect(await pinnedRow(24)).toEqual([
+      PINNED_HEADING,
+      '- and 1 more (run `llm-docs status`)',
+      HABITS_FOOTER,
+    ]);
   });
 });
 

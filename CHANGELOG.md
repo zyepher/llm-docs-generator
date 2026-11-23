@@ -54,6 +54,7 @@ Agent integration:
 - `llm-docs status` joins the lockfiles, the packs, registry release dates, and the model's training cutoff from a sourced table in `data/model-cutoffs.json`.
 - A plugin for Claude Code and Cursor with a session-start hook, the `add-docs`, `write-docs-guide`, and `llm-docs` skills, and a `docs-fact-checker` agent. The CLI is bundled into the plugin, so agents need no separate install.
 - `llm-docs discover --package` and `--url`: read-only evidence for choosing a source, tag, docs folder, and read-first pages.
+- **The check-installed skill.** The session-start note now tells the agent to read the installed version's own types and source and to test the behaviour it relies on, and a new skill says where each ecosystem keeps installed code and what installed code cannot answer.
 
 Security:
 
