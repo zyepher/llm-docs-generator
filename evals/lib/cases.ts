@@ -23,10 +23,26 @@ export type CaseKind = 'post-cutoff' | 'control';
  *   change.
  * - `type-invisible`: the from-memory solution type-checks and fails only the behaviour checks, so
  *   nothing in the edit-compile loop says anything changed.
+ * - `language`: the change is in a programming language version (a case with a `toolchain`), not
+ *   in an installed package; the from-memory solution fails the behaviour check.
  * - `control`: a library version the model has known for years.
  */
-export const STRATA = ['type-visible', 'type-invisible', 'control'] as const;
+export const STRATA = ['type-visible', 'type-invisible', 'language', 'control'] as const;
 export type Stratum = (typeof STRATA)[number];
+
+/** The toolchains a language case can be bound to, as `llm-docs` names them. */
+export const TOOLCHAINS = ['python', 'go', 'rust', 'dart', 'swift'] as const;
+export type Toolchain = (typeof TOOLCHAINS)[number];
+
+/**
+ * A language case: the agent writes code against a language version, so there is no installed
+ * package to read and nothing to install. `versionFiles` are the fixture files that state the
+ * version for `llm-docs`, which prepare-packs copies in place of the npm manifest and lockfile.
+ */
+export interface LanguageCase {
+  toolchain: Toolchain;
+  versionFiles: string[];
+}
 
 /**
  * Whether the installed package itself states the answer: in its `.d.ts` or JSDoc (`types`), in
@@ -73,6 +89,8 @@ export interface EvalCase {
   task: string;
   checks: CheckSpec[];
   pack: PackRecipe;
+  /** Set exactly when the case is about a language version (`case.json` has `toolchain`). */
+  language?: LanguageCase;
 }
 
 export type BuiltinCheck = 'deps-unchanged' | 'no-type-suppressions';
@@ -195,8 +213,41 @@ function parsePack(caseId: string, raw: unknown): PackRecipe {
   return { id, pack, sourceTypes: [...sourceTypes].sort() };
 }
 
-async function loadCase(id: string): Promise<EvalCase> {
-  const dir = join(CASES_DIR, id);
+/**
+ * The `toolchain` and `versionFiles` of a language case, or undefined for a library case. Whether
+ * each version file exists is lintCase's to report.
+ */
+function parseLanguage(caseId: string, raw: Record<string, unknown>): LanguageCase | undefined {
+  if (raw.toolchain === undefined) {
+    if (raw.versionFiles !== undefined) {
+      fail(caseId, 'versionFiles is only for a language case, which also has toolchain');
+    }
+    return undefined;
+  }
+  const toolchain = TOOLCHAINS.find((candidate) => candidate === raw.toolchain);
+  if (toolchain === undefined) {
+    fail(caseId, `toolchain must be one of ${TOOLCHAINS.join(', ')}`);
+  }
+  const versionFiles = raw.versionFiles;
+  if (
+    !Array.isArray(versionFiles) ||
+    versionFiles.length === 0 ||
+    !versionFiles.every(isNonEmptyString)
+  ) {
+    fail(
+      caseId,
+      'versionFiles must be a non-empty array of fixture file names that state the toolchain version'
+    );
+  }
+  return { toolchain, versionFiles };
+}
+
+/**
+ * Loads and validates one case from `casesDir/<id>`. Exported for the harness tests, which load
+ * small cases from `tests/fixtures/evals/`.
+ */
+export async function loadCase(id: string, casesDir: string = CASES_DIR): Promise<EvalCase> {
+  const dir = join(casesDir, id);
   const raw = await readJsonFile(join(dir, 'case.json'));
   if (!isRecord(raw)) {
     fail(id, 'case.json must be an object');
@@ -215,6 +266,10 @@ async function loadCase(id: string): Promise<EvalCase> {
   if ((stratum === 'control') !== (kind === 'control')) {
     fail(id, 'stratum is "control" exactly when kind is "control"');
   }
+  const language = parseLanguage(id, raw);
+  if ((stratum === 'language') !== (language !== undefined)) {
+    fail(id, 'stratum is "language" exactly when the case has a toolchain');
+  }
   const packageDocumentsAnswer = PACKAGE_DOCUMENTS_ANSWER.find(
     (candidate) => candidate === raw.packageDocumentsAnswer
   );
@@ -222,7 +277,12 @@ async function loadCase(id: string): Promise<EvalCase> {
     fail(id, `packageDocumentsAnswer must be one of ${PACKAGE_DOCUMENTS_ANSWER.join(', ')}`);
   }
   const notes = requireString(id, raw.notes, 'notes');
-  if (packageDocumentsAnswer !== 'none' && !/node_modules\/\S+:\d+/.test(notes)) {
+  // A language case has no node_modules; its notes cite the toolchain's own files instead.
+  if (
+    language === undefined &&
+    packageDocumentsAnswer !== 'none' &&
+    !/node_modules\/\S+:\d+/.test(notes)
+  ) {
     fail(
       id,
       `packageDocumentsAnswer is "${packageDocumentsAnswer}", so notes must cite the evidence as node_modules/<file>:<line>`
@@ -236,9 +296,13 @@ async function loadCase(id: string): Promise<EvalCase> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(released)) {
     fail(id, 'library.released must be YYYY-MM-DD');
   }
+  if (language !== undefined && library.name !== language.toolchain) {
+    fail(id, `library.name of a language case must be its toolchain, "${language.toolchain}"`);
+  }
 
   const task = await readFile(join(dir, 'task.md'), 'utf8');
-  for (const line of REQUIRED_TASK_LINES) {
+  // The ground rules are about npm and TypeScript, which a language case does not have.
+  for (const line of language === undefined ? REQUIRED_TASK_LINES : []) {
     if (!task.includes(line)) {
       fail(id, `task.md must contain "${line}"`);
     }
@@ -253,14 +317,25 @@ async function loadCase(id: string): Promise<EvalCase> {
   if (names.size !== checks.length) {
     fail(id, 'check names must be unique');
   }
-  if (stratum !== 'control' && !STRATUM_CHECKS.every((name) => names.has(name))) {
-    fail(
-      id,
-      `a post-cutoff case needs checks named ${STRATUM_CHECKS.join(' and ')}, which the selftest reads to enforce its stratum`
-    );
-  }
-  if (!checks.some((check) => check.kind === 'builtin' && check.builtin === 'deps-unchanged')) {
-    fail(id, 'checks must include the deps-unchanged builtin');
+  if (language !== undefined) {
+    if (!checks.some((check) => check.kind === 'command' && check.name === 'behaviour')) {
+      fail(id, 'a language case needs a command check named behaviour');
+    }
+    if (
+      checks.some((check) => check.kind === 'builtin' && check.builtin === 'no-type-suppressions')
+    ) {
+      fail(id, 'a language case has no TypeScript to scan: remove the no-type-suppressions check');
+    }
+  } else {
+    if (stratum !== 'control' && !STRATUM_CHECKS.every((name) => names.has(name))) {
+      fail(
+        id,
+        `a post-cutoff case needs checks named ${STRATUM_CHECKS.join(' and ')}, which the selftest reads to enforce its stratum`
+      );
+    }
+    if (!checks.some((check) => check.kind === 'builtin' && check.builtin === 'deps-unchanged')) {
+      fail(id, 'checks must include the deps-unchanged builtin');
+    }
   }
 
   return {
@@ -281,6 +356,7 @@ async function loadCase(id: string): Promise<EvalCase> {
     task,
     checks,
     pack: parsePack(id, await readJsonFile(join(dir, 'pack.json'))),
+    ...(language === undefined ? {} : { language }),
   };
 }
 
@@ -319,9 +395,14 @@ export async function loadCases(globs = '*'): Promise<EvalCase[]> {
   return cases;
 }
 
+/** The fixture text files lintCase scans for leak words, by the kind of case. */
+const LIBRARY_TEXT_FILES = /\.(md|ts|json|js|mjs|svelte|html)$/;
+const LANGUAGE_TEXT_FILES = /\.(md|py|go|mod|rs|toml|dart|yaml|swift|json)$/;
+
 /**
  * Static lint over what the agent sees: no leak words in the prompt or fixture text files, and
- * exact dependency versions (no ranges) in the fixture package.json.
+ * exact dependency versions (no ranges) in the fixture package.json. A language case has no npm
+ * project; its version files must exist instead.
  */
 export async function lintCase(evalCase: EvalCase): Promise<string[]> {
   const problems: string[] = [];
@@ -329,8 +410,9 @@ export async function lintCase(evalCase: EvalCase): Promise<string[]> {
     problems.push(`task.md mentions ${String(evalCase.task.match(LEAK_PATTERN)?.[0])}`);
   }
   const fixtureDir = join(evalCase.dir, 'fixture');
+  const textFiles = evalCase.language === undefined ? LIBRARY_TEXT_FILES : LANGUAGE_TEXT_FILES;
   for (const name of await listFiles(fixtureDir)) {
-    if (name === 'package-lock.json' || !/\.(md|ts|json|js|mjs|svelte|html)$/.test(name)) {
+    if (name === 'package-lock.json' || !textFiles.test(name)) {
       continue;
     }
     const text = await readFile(join(fixtureDir, name), 'utf8');
@@ -338,6 +420,14 @@ export async function lintCase(evalCase: EvalCase): Promise<string[]> {
     if (leak) {
       problems.push(`fixture/${name} mentions ${leak[0]}`);
     }
+  }
+  if (evalCase.language !== undefined) {
+    for (const file of evalCase.language.versionFiles) {
+      if (!existsSync(join(fixtureDir, file))) {
+        problems.push(`fixture/${file} is missing, but versionFiles lists it`);
+      }
+    }
+    return problems;
   }
   const pkg = await readJsonFile(join(fixtureDir, 'package.json'));
   if (!isRecord(pkg)) {

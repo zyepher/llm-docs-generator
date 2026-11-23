@@ -1,4 +1,5 @@
 import { isRecord } from '../../src/utils/guards.js';
+import type { Toolchain } from './cases.js';
 
 /** One SessionStart hook as the stream reported it (`--include-hook-events`). */
 export interface SessionStartHook {
@@ -56,12 +57,13 @@ export interface TranscriptSummary {
   webTargets: string[];
   /**
    * A Read, Grep, or Glob call's path or pattern, or a Bash command, named a path under
-   * `node_modules/` that is not a `package.json` file and not under `node_modules/.bin/`.
+   * `node_modules/` that is not a `package.json` file and not under `node_modules/.bin/`. In a
+   * language case: named the toolchain's own source, docs, or interfaces (`LANGUAGE_MEASURES`).
    */
   installedCodeRead: boolean;
-  /** Bash calls whose command runs `vitest` or `npm test`. */
+  /** Bash calls whose command runs `vitest` or `npm test` (a language case: `LANGUAGE_MEASURES`). */
   ownTestRuns: number;
-  /** Bash calls whose command runs `tsc`. */
+  /** Bash calls whose command runs `tsc` (a language case: `LANGUAGE_MEASURES`). */
   typeCheckRuns: number;
   sessionStartHooks: SessionStartHook[];
   parseErrors: number;
@@ -170,6 +172,73 @@ function runsProgram(command: string, program: string): boolean {
   ).test(command);
 }
 
+/**
+ * The three measurements for a language case, per toolchain: what names the installed toolchain's
+ * own source, docs, or interfaces (over the same tool inputs as `namesInstalledCode`), and the
+ * programs a Bash command runs to test its own work or to only type check it (each in the sense of
+ * `runsProgram`). Heuristics over tool calls, like the library definitions.
+ */
+const LANGUAGE_MEASURES: Record<
+  Toolchain,
+  { installedCode: RegExp; ownTest: string[]; typeCheck: string[] }
+> = {
+  python: {
+    installedCode:
+      /\/lib\/python3\.\d+\/|pydoc|help\(|inspect\.getsource|inspect\.signature|__doc__/,
+    // A `python3 -m py_compile` is a type check, not a test run.
+    ownTest: ['python3(?!\\s+-m\\s+py_compile)', 'pytest'],
+    typeCheck: ['python3\\s+-m\\s+py_compile', 'mypy', 'pyright'],
+  },
+  go: {
+    installedCode: /\/libexec\/src\/|\/go\/src\/|\bgo\s+doc\b|GOROOT/,
+    ownTest: ['go\\s+test', 'go\\s+run'],
+    typeCheck: ['go\\s+build', 'go\\s+vet'],
+  },
+  rust: {
+    installedCode: /\/rustlib\/src\/|\brustc\s+--explain\b|\bcargo\s+doc\b|\brustup\s+doc\b/,
+    ownTest: ['cargo\\s+test', 'cargo\\s+run', 'rustc'],
+    typeCheck: ['cargo\\s+check', 'cargo\\s+build'],
+  },
+  dart: {
+    installedCode: /dart-sdk\/lib\/|\bdart\s+doc\b/,
+    ownTest: ['dart\\s+run', 'dart\\s+test', 'dart\\s+\\S+\\.dart'],
+    typeCheck: ['dart\\s+analyze'],
+  },
+  swift: {
+    installedCode: /\.swiftinterface|\.swiftmodule|\/usr\/lib\/swift/,
+    ownTest: ['swift\\s+run', 'swift\\s+test', 'swiftc'],
+    typeCheck: ['swift\\s+build'],
+  },
+};
+
+/** A language case's `installedCodeRead` test for one tool input. */
+function namesInstalledToolchain(input: Record<string, unknown>, toolchain: Toolchain): boolean {
+  return ['file_path', 'path', 'pattern', 'glob', 'command'].some((key) =>
+    LANGUAGE_MEASURES[toolchain].installedCode.test(stringField(input, key) ?? '')
+  );
+}
+
+/**
+ * Whether a Bash command tests the agent's own work or type checks it: `vitest` or `npm test`, and
+ * `tsc`, in a library case; the toolchain's programs in a language case.
+ */
+function classifyCommand(
+  command: string,
+  toolchain: Toolchain | undefined
+): { ownTest: boolean; typeCheck: boolean } {
+  if (toolchain === undefined) {
+    return {
+      ownTest: runsProgram(command, 'vitest') || runsProgram(command, 'npm\\s+test'),
+      typeCheck: runsProgram(command, 'tsc'),
+    };
+  }
+  const measures = LANGUAGE_MEASURES[toolchain];
+  return {
+    ownTest: measures.ownTest.some((program) => runsProgram(command, program)),
+    typeCheck: measures.typeCheck.some((program) => runsProgram(command, program)),
+  };
+}
+
 function assistantText(message: unknown): string {
   if (!isRecord(message) || !Array.isArray(message.content)) {
     return '';
@@ -181,7 +250,11 @@ function assistantText(message: unknown): string {
     .trim();
 }
 
-export function summarizeTranscript(jsonl: string): TranscriptSummary {
+/**
+ * `toolchain` is a language case's: its `installedCodeRead`, `ownTestRuns`, and `typeCheckRuns`
+ * follow `LANGUAGE_MEASURES` instead of the npm definitions.
+ */
+export function summarizeTranscript(jsonl: string, toolchain?: Toolchain): TranscriptSummary {
   const summary: TranscriptSummary = {
     result: null,
     session: null,
@@ -295,16 +368,18 @@ export function summarizeTranscript(jsonl: string): TranscriptSummary {
           for (const path of docsPathsIn(input)) {
             docsPaths.add(path);
           }
-          summary.installedCodeRead ||= namesInstalledCode(input);
+          summary.installedCodeRead ||=
+            toolchain === undefined
+              ? namesInstalledCode(input)
+              : namesInstalledToolchain(input, toolchain);
         }
         if (name === 'Bash') {
-          const command = stringField(input, 'command') ?? '';
-          if (runsProgram(command, 'vitest') || runsProgram(command, 'npm\\s+test')) {
-            summary.ownTestRuns += 1;
-          }
-          if (runsProgram(command, 'tsc')) {
-            summary.typeCheckRuns += 1;
-          }
+          const { ownTest, typeCheck } = classifyCommand(
+            stringField(input, 'command') ?? '',
+            toolchain
+          );
+          summary.ownTestRuns += ownTest ? 1 : 0;
+          summary.typeCheckRuns += typeCheck ? 1 : 0;
         }
         if (name === 'WebSearch') {
           summary.webSearches += 1;

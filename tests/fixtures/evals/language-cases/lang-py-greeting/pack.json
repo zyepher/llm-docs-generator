@@ -1,0 +1,16 @@
+{
+  "id": "python",
+  "pack": {
+    "title": "Python",
+    "description": "The Python language and standard library",
+    "dependency": { "ecosystem": "toolchain", "name": "python" },
+    "sources": [
+      {
+        "type": "git",
+        "repo": "https://github.com/python/cpython",
+        "ref": "v{version}.0",
+        "paths": ["Doc/whatsnew/{version}.rst"]
+      }
+    ]
+  }
+}

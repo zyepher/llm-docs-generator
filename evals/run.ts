@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -26,6 +26,7 @@ import {
   RESULTS_DIR,
   STRATA,
   STRATUM_CHECKS,
+  type Toolchain,
 } from './lib/cases.js';
 import {
   checkHookNote,
@@ -138,6 +139,58 @@ const ALLOWED_TOOLS = [
   'Bash(ls *)',
   'Bash(cat *)',
 ];
+
+/**
+ * A language case has no npm project, so every arm gets the toolchain's own programs in place of
+ * the npm ones.
+ */
+const LANGUAGE_TOOLS: Readonly<Record<Toolchain, readonly string[]>> = {
+  python: ['Bash(python3 *)'],
+  go: ['Bash(go *)'],
+  rust: ['Bash(cargo *)', 'Bash(rustc *)'],
+  dart: ['Bash(dart *)'],
+  swift: ['Bash(swift *)', 'Bash(swiftc *)'],
+};
+
+/** The tools every arm of the case may use without a prompt. */
+function allowedTools(evalCase: EvalCase): string[] {
+  if (evalCase.language === undefined) {
+    return ALLOWED_TOOLS;
+  }
+  return [
+    'Read',
+    'Glob',
+    'Grep',
+    'Edit',
+    'Write',
+    'WebSearch',
+    'WebFetch',
+    'Bash(ls)',
+    'Bash(ls *)',
+    'Bash(cat *)',
+    ...LANGUAGE_TOOLS[evalCase.language.toolchain],
+  ];
+}
+
+/**
+ * What results.json records about the tools the sessions were allowed: `allowedTools`, the library
+ * cases' list, when the run has a library case, and `languageAllowedTools`, each selected language
+ * case's toolchain to its list.
+ */
+export function allowedToolsMeta(cases: readonly EvalCase[]): {
+  allowedTools?: string[];
+  languageAllowedTools: Partial<Record<Toolchain, string[]>>;
+} {
+  const languageAllowedTools: Partial<Record<Toolchain, string[]>> = {};
+  for (const evalCase of cases) {
+    if (evalCase.language !== undefined) {
+      languageAllowedTools[evalCase.language.toolchain] = allowedTools(evalCase);
+    }
+  }
+  return cases.some((evalCase) => evalCase.language === undefined)
+    ? { allowedTools: ALLOWED_TOOLS, languageAllowedTools }
+    : { languageAllowedTools };
+}
 
 function log(line: string): void {
   process.stderr.write(`[evals] ${line}\n`);
@@ -256,6 +309,9 @@ function naiveProblem(evalCase: EvalCase, results: CheckResult[]): string | null
   if (trivial.length > 0) {
     return `naive must fail only ${STRATUM_CHECKS.join(' or ')}`;
   }
+  if (evalCase.stratum === 'language' && passed('behaviour') !== false) {
+    return 'language requires naive to fail behaviour';
+  }
   if (evalCase.stratum === 'type-visible' && passed('typecheck') !== false) {
     return 'type-visible requires naive to fail typecheck';
   }
@@ -266,6 +322,22 @@ function naiveProblem(evalCase: EvalCase, results: CheckResult[]): string | null
     return 'type-invisible requires naive to pass typecheck and fail behaviour';
   }
   return null;
+}
+
+/** How many times in a row a language case's solutions must pass every check. */
+const LANGUAGE_SOLUTION_ROUNDS = 3;
+
+/**
+ * The read-first rule starts from `discover --package`, which takes no toolchain, so it does not
+ * apply to a language case; its `readFirst` is written by hand.
+ */
+function logLanguageCasesSkipped(cases: readonly EvalCase[]): void {
+  const skipped = cases.filter((evalCase) => evalCase.language !== undefined);
+  if (skipped.length > 0) {
+    log(
+      `skip the read-first rule for ${skipped.length} language case(s) (${skipped.map((evalCase) => evalCase.id).join(', ')}): discover --package takes no toolchain, so their readFirst is written by hand`
+    );
+  }
 }
 
 const SUPPRESSION_FIXTURES = join(EVALS_DIR, '..', 'tests', 'fixtures', 'evals', 'suppressions');
@@ -318,9 +390,13 @@ async function selftest(argv: string[]): Promise<number> {
 
   const ruleFailures: string[] = [];
   for (const evalCase of cases) {
+    if (evalCase.language !== undefined) {
+      continue;
+    }
     const problems = ruleProblems(evalCase, await evaluateCase(evalCase, false));
     ruleFailures.push(...problems.map((problem) => `${evalCase.id}: ${problem}`));
   }
+  logLanguageCasesSkipped(cases);
   log(
     ruleFailures.length === 0
       ? 'ok   every pack.json follows the read-first rule'
@@ -328,9 +404,11 @@ async function selftest(argv: string[]): Promise<number> {
   );
   failures.push(...ruleFailures);
 
-  const firstTemplate = templates.values().next().value;
-  if (firstTemplate !== undefined) {
-    failures.push(...(await selftestSuppressionScan(firstTemplate)));
+  // The scan loads the TypeScript compiler a library case's template installs.
+  const libraryCase = cases.find((evalCase) => evalCase.language === undefined);
+  const scanTemplate = libraryCase === undefined ? undefined : templates.get(libraryCase.id);
+  if (scanTemplate !== undefined) {
+    failures.push(...(await selftestSuppressionScan(scanTemplate)));
   }
 
   const variants: SelftestVariant[] = [];
@@ -355,7 +433,14 @@ async function selftest(argv: string[]): Promise<number> {
       if (name !== 'fixture') {
         await overlay(join(evalCase.dir, name), dir);
       }
-      const results = await gradeWorkspace(evalCase, dir);
+      // A language case's check may be timing-based (Swift), so a correct answer must pass every
+      // check three times in a row; the first failing round is the one reported.
+      const rounds =
+        evalCase.language !== undefined && expect === 'pass' ? LANGUAGE_SOLUTION_ROUNDS : 1;
+      let results: CheckResult[] = [];
+      for (let round = 0; round < rounds && results.every((result) => result.passed); round += 1) {
+        results = await gradeWorkspace(evalCase, dir);
+      }
       const passed = results.every((result) => result.passed);
       const failed = results.filter((result) => !result.passed);
       const problem =
@@ -488,6 +573,20 @@ async function noteExpectation(
   templateDir: string,
   pinned: boolean
 ): Promise<NoteExpectation> {
+  const binding = evalCase.pack.pack.dependency;
+  const boundDependency =
+    isRecord(binding) && typeof binding.name === 'string' ? binding.name : null;
+  if (evalCase.language !== undefined) {
+    // No package.json: the note's only row about the case is the toolchain's.
+    return {
+      kind: evalCase.kind,
+      packId: evalCase.pack.id,
+      library: evalCase.language.toolchain,
+      boundDependency,
+      dependencies: [],
+      pinned,
+    };
+  }
   const sources = Array.isArray(evalCase.pack.pack.sources) ? evalCase.pack.pack.sources : [];
   const packRepositories = new Set(
     sources.flatMap((source) => {
@@ -504,15 +603,28 @@ async function noteExpectation(
     const key = isRecord(installed) ? repositoryKey(installed.repository) : null;
     dependencies.push({ name, sharesPackRepository: key !== null && packRepositories.has(key) });
   }
-  const binding = evalCase.pack.pack.dependency;
   return {
     kind: evalCase.kind,
     packId: evalCase.pack.id,
     library: evalCase.library.name,
-    boundDependency: isRecord(binding) && typeof binding.name === 'string' ? binding.name : null,
+    boundDependency,
     dependencies,
     pinned,
   };
+}
+
+/**
+ * The fixture files that tell `llm-docs` the project's versions, copied into every prepared
+ * directory and hook-note workspace: the npm manifest and lockfile, or a language case's version
+ * files (so a `toolchain` binding resolves and the note sees the language version).
+ */
+async function copyVersionFiles(evalCase: EvalCase, dir: string): Promise<void> {
+  const files = evalCase.language?.versionFiles ?? ['package.json', 'package-lock.json'];
+  for (const file of files) {
+    const target = join(dir, file);
+    await mkdir(dirname(target), { recursive: true });
+    await cp(join(evalCase.dir, 'fixture', file), target);
+  }
 }
 
 /**
@@ -531,8 +643,7 @@ async function computeHookNote(
 ): Promise<{ note: string } | { failure: string }> {
   const dir = join(root, `${evalCase.id}-${arm}-1`);
   await mkdir(dir, { recursive: true });
-  await cp(join(evalCase.dir, 'fixture', 'package.json'), join(dir, 'package.json'));
-  await cp(join(evalCase.dir, 'fixture', 'package-lock.json'), join(dir, 'package-lock.json'));
+  await copyVersionFiles(evalCase, dir);
   await copyPackInto(evalCase, arm, dir);
   // The payload a headless session sends (measured with Claude Code 2.1.330): no model in it.
   const payload = JSON.stringify({
@@ -602,11 +713,12 @@ async function preparePacks(argv: string[]): Promise<number> {
   const noteRoot = await mkdtemp(join(tmpdir(), 'llm-docs-evals', 'hook-note-'));
 
   /**
-   * Builds one prepared directory for a case: the fixture's manifest and lockfile (they let
-   * `dependency` bindings resolve the pinned version), `llm-docs.json` with `packs`, then init,
-   * sync, and, when there is a pack, verify. Then `status` warms the release-date cache the
-   * session-start hook reads, so an arm with the plugin does not depend on a 1 second network
-   * budget during the run (best effort). Returns what went wrong, or null.
+   * Builds one prepared directory for a case: the fixture's manifest and lockfile, or a language
+   * case's version files (they let `dependency` bindings resolve the pinned version),
+   * `llm-docs.json` with `packs`, then init, sync, and, when there is a pack, verify. Then
+   * `status` warms the release-date cache the session-start hook reads, so an arm with the plugin
+   * does not depend on a 1 second network budget during the run (best effort). Returns what went
+   * wrong, or null.
    */
   const build = async (
     evalCase: EvalCase,
@@ -615,8 +727,7 @@ async function preparePacks(argv: string[]): Promise<number> {
   ): Promise<string | null> => {
     await rm(dir, { recursive: true, force: true });
     await mkdir(dir, { recursive: true });
-    await cp(join(evalCase.dir, 'fixture', 'package.json'), join(dir, 'package.json'));
-    await cp(join(evalCase.dir, 'fixture', 'package-lock.json'), join(dir, 'package-lock.json'));
+    await copyVersionFiles(evalCase, dir);
     await writeJsonFileSafely(join(dir, 'llm-docs.json'), {
       schemaVersion: 3,
       packsDir: 'agent-docs',
@@ -912,7 +1023,11 @@ async function readFirstRule(argv: string[]): Promise<number> {
     '|---|---|---|---|---|---|',
   ];
   let unresolved = 0;
+  logLanguageCasesSkipped(cases);
   for (const evalCase of cases) {
+    if (evalCase.language !== undefined) {
+      continue;
+    }
     const rule = await evaluateCase(evalCase, values.refresh);
     rows.push(ruleRow(evalCase, rule));
     const problems = ruleProblems(evalCase, rule);
@@ -1158,7 +1273,7 @@ export function agentInvocation(
     args.push('--plugin-dir', settings.pluginDir);
   }
   // Variadic option last, so it cannot swallow anything that follows.
-  args.push('--allowedTools', ...ALLOWED_TOOLS);
+  args.push('--allowedTools', ...allowedTools(evalCase));
   return { args, env: agentEnv(settings.model) };
 }
 
@@ -1179,6 +1294,12 @@ async function copyPackInto(
 /** Installed, provided, or generated (SvelteKit writes route types to .svelte-kit/ when Vite starts). */
 const NOT_AGENT_OUTPUT = /^(node_modules|agent-docs|\.svelte-kit)\//;
 
+/**
+ * Build output a language toolchain writes into the project at any depth (cargo, SwiftPM, Dart,
+ * Python bytecode): thousands of generated files, none of them the agent's.
+ */
+const BUILD_OUTPUT = /(^|\/)(target|\.build|\.dart_tool|__pycache__)\//;
+
 const MAX_SAVED_FILE_BYTES = 256 * 1024;
 
 /**
@@ -1186,12 +1307,21 @@ const MAX_SAVED_FILE_BYTES = 256 * 1024;
  * transcript. A JSON map rather than loose copies, so test files the agent wrote can never be
  * picked up by the repository's own test runner.
  */
-async function saveAgentFiles(evalCase: EvalCase, dir: string, outFile: string): Promise<void> {
+export async function saveAgentFiles(
+  evalCase: EvalCase,
+  dir: string,
+  outFile: string
+): Promise<void> {
   const fixtureDir = join(evalCase.dir, 'fixture');
   const fixtureFiles = new Set(await listFiles(fixtureDir));
   const files: Record<string, string> = {};
   for (const rel of await listFiles(dir)) {
-    if (NOT_AGENT_OUTPUT.test(rel) || rel === 'AGENTS.md' || rel === 'llm-docs.json') {
+    if (
+      NOT_AGENT_OUTPUT.test(rel) ||
+      BUILD_OUTPUT.test(rel) ||
+      rel === 'AGENTS.md' ||
+      rel === 'llm-docs.json'
+    ) {
       continue;
     }
     if (
@@ -1343,7 +1473,10 @@ async function executeRun(
       return { ...base, wallMs: agent.durationMs, infraError: 'interrupted' };
     }
 
-    const summary = summarizeTranscript(await readFile(transcriptPath, 'utf8'));
+    const summary = summarizeTranscript(
+      await readFile(transcriptPath, 'utf8'),
+      evalCase.language?.toolchain
+    );
     const outcome = classifyOutcome(summary, agent);
     const expectedNote = isPluginArm(arm) ? (settings.hookNotes[arm].get(evalCase.id) ?? '') : null;
     const armAssertions =
@@ -1737,7 +1870,7 @@ async function executePlan(plan: EvalPlan): Promise<{ rows: RunRow[]; exitCode: 
         })),
         maxBudgetUsdPerRun: settings.perRunUsd,
         maxTotalUsd: Number.isFinite(plan.maxTotalUsd) ? plan.maxTotalUsd : null,
-        allowedTools: ALLOWED_TOOLS,
+        ...allowedToolsMeta(cases),
         pluginDir: settings.pluginDir,
         effort: settings.effort,
       },

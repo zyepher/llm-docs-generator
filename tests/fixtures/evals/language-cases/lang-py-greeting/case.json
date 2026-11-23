@@ -1,0 +1,13 @@
+{
+  "id": "lang-py-greeting",
+  "title": "A greeting helper",
+  "kind": "post-cutoff",
+  "stratum": "language",
+  "packageDocumentsAnswer": "none",
+  "toolchain": "python",
+  "versionFiles": [".python-version"],
+  "library": { "name": "python", "version": "3.15", "released": "2026-10-09" },
+  "notes": "A small language case for the harness tests.",
+  "maxTurns": 30,
+  "timeoutSeconds": 900
+}

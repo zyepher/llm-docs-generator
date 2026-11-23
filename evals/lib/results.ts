@@ -257,7 +257,7 @@ export function renderSummary(meta: SummaryMeta, rows: RunRow[], aggregates: Agg
   lines.push('## Pass rate by stratum');
   lines.push('');
   lines.push(
-    '`type-visible`: code written from memory fails the type check, so the compiler points at the change. `type-invisible`: it type-checks and fails only at runtime, so nothing in the edit-compile loop says anything changed. `control`: a library version the model has known for years.'
+    '`type-visible`: code written from memory fails the type check, so the compiler points at the change. `type-invisible`: it type-checks and fails only at runtime, so nothing in the edit-compile loop says anything changed. `language`: the change is in a programming language version, with no installed package to read. `control`: a library version the model has known for years.'
   );
   lines.push('');
   lines.push(`| Stratum | ${arms.join(' | ')} |`);
@@ -269,7 +269,7 @@ export function renderSummary(meta: SummaryMeta, rows: RunRow[], aggregates: Agg
   lines.push('## Pass rate by case');
   lines.push('');
   lines.push(
-    '"Package documents it" says where the installed package itself states the answer (`types`: its `.d.ts` or JSDoc, `docs`: prose or agent files it ships, `none`); every arm can read `node_modules`.'
+    '"Package documents it" says where the installed package itself states the answer (`types`: its `.d.ts` or JSDoc, `docs`: prose or agent files it ships, `none`); every arm can read `node_modules`. For a `language` case it is the installed toolchain: `types` when its own source or interface files state the change in code, `docs` when a docstring, doc comment, or shipped document does.'
   );
   lines.push('');
   lines.push(`| Case | Stratum | Package documents it | ${arms.join(' | ')} |`);

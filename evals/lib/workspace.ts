@@ -31,30 +31,58 @@ async function lockKey(evalCase: EvalCase): Promise<string> {
   return sha256Hex(`${pkg}\n${lock}`);
 }
 
+/** Hash of every fixture file's name and content: a language template is rebuilt when it changes. */
+async function fixtureKey(evalCase: EvalCase): Promise<string> {
+  const fixture = join(evalCase.dir, 'fixture');
+  const lines: string[] = [];
+  for (const rel of await listFiles(fixture)) {
+    lines.push(`${rel}\u0000${await sha256File(join(fixture, rel))}`);
+  }
+  return sha256Hex(lines.join('\n'));
+}
+
 /**
  * Installs the fixture's locked dependencies once into `.cache/templates/<id>` and returns that
  * directory. Workspaces copy `node_modules` from here, so agents never wait on npm and every arm
- * starts from the same installed tree.
+ * starts from the same installed tree. A language case installs nothing: its template is a copy of
+ * the fixture, and it has no `node_modules`.
  */
 export async function ensureTemplate(
   evalCase: EvalCase,
   log: (line: string) => void
 ): Promise<string> {
   const templateDir = join(CACHE_DIR, 'templates', evalCase.id);
-  const key = await lockKey(evalCase);
+  const language = evalCase.language !== undefined;
+  const key = language ? await fixtureKey(evalCase) : await lockKey(evalCase);
   const stampPath = join(templateDir, TEMPLATE_STAMP);
   if (existsSync(stampPath)) {
     const stamp = await readJsonFile(stampPath);
-    if (isRecord(stamp) && stamp.lockKey === key && existsSync(join(templateDir, 'node_modules'))) {
+    if (
+      isRecord(stamp) &&
+      stamp.lockKey === key &&
+      (language || existsSync(join(templateDir, 'node_modules')))
+    ) {
       return templateDir;
     }
   }
 
-  log(`installing ${evalCase.id} template (npm ci)`);
   const staging = `${templateDir}.staging-${process.pid}`;
   await rm(staging, { recursive: true, force: true });
-  await mkdir(staging, { recursive: true });
   const fixture = join(evalCase.dir, 'fixture');
+  if (language) {
+    log(`copying ${evalCase.id} template (a language case installs nothing)`);
+    await copyTree(fixture, staging);
+    await writeFile(
+      join(staging, TEMPLATE_STAMP),
+      `${JSON.stringify({ lockKey: key }, null, 2)}\n`
+    );
+    await rm(templateDir, { recursive: true, force: true });
+    await rename(staging, templateDir);
+    return templateDir;
+  }
+
+  log(`installing ${evalCase.id} template (npm ci)`);
+  await mkdir(staging, { recursive: true });
   await cp(join(fixture, 'package.json'), join(staging, 'package.json'));
   await cp(join(fixture, 'package-lock.json'), join(staging, 'package-lock.json'));
   const result = await runProcess(
@@ -84,8 +112,8 @@ export async function copyTree(from: string, to: string): Promise<void> {
 }
 
 /**
- * A fresh workspace: the fixture files, then the template's node_modules. Overlays (solution,
- * naive, pack files) are applied by the caller.
+ * A fresh workspace: the fixture files, then the template's node_modules (a language case has
+ * none). Overlays (solution, naive, pack files) are applied by the caller.
  */
 export async function createWorkspace(
   evalCase: EvalCase,
@@ -95,7 +123,9 @@ export async function createWorkspace(
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
   await copyTree(join(evalCase.dir, 'fixture'), dir);
-  await copyTree(join(templateDir, 'node_modules'), join(dir, 'node_modules'));
+  if (evalCase.language === undefined) {
+    await copyTree(join(templateDir, 'node_modules'), join(dir, 'node_modules'));
+  }
 }
 
 /** Copies every file of `overlayDir` over `dir`, except the names in `skip`. */
@@ -363,16 +393,19 @@ async function runBuiltin(
 
 /**
  * Runs one command check. The program is resolved inside the workspace's node_modules/.bin so a
- * globally installed tool can never stand in for the pinned one.
+ * globally installed tool can never stand in for the pinned one. A language case has no
+ * node_modules: its program is the installed toolchain (or `sh`), resolved on PATH.
  */
 async function runCommand(
+  evalCase: EvalCase,
   check: Extract<CheckSpec, { kind: 'command' }>,
   dir: string
 ): Promise<CheckResult> {
   const [program, ...args] = check.command;
   const binDir = join(dir, 'node_modules', '.bin');
-  const programPath = join(binDir, program);
-  if (!existsSync(programPath)) {
+  const language = evalCase.language !== undefined;
+  const programPath = language ? program : join(binDir, program);
+  if (!language && !existsSync(programPath)) {
     return {
       name: check.name,
       passed: false,
@@ -386,7 +419,7 @@ async function runCommand(
     keepBytes: 16 * 1024,
     env: {
       ...process.env,
-      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+      PATH: language ? (process.env.PATH ?? '') : `${binDir}:${process.env.PATH ?? ''}`,
       CI: '1',
       NO_COLOR: '1',
       FORCE_COLOR: '0',
@@ -610,7 +643,7 @@ export async function gradeWorkspace(evalCase: EvalCase, dir: string): Promise<C
       results.push(
         check.kind === 'builtin'
           ? await runBuiltin(evalCase, check, dir)
-          : await runCommand(check, dir)
+          : await runCommand(evalCase, check, dir)
       );
     } catch (error) {
       results.push({
