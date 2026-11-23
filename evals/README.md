@@ -1,18 +1,21 @@
 # llm-docs evals
 
 This suite measures one question: does a pinned docs pack help a fully equipped coding agent
-write correct code against library APIs that were released after its training cutoff, and does
-it stay out of the way on libraries the agent already knows?
+write correct code against library APIs, or a language version, released after its training
+cutoff, and does it stay out of the way on libraries the agent already knows?
 
 The agent under test is Claude Code running Claude Opus 5.5 (`claude-opus-5-5`, training cutoff
-June 2026) in headless mode (`claude -p`). Every case is a small TypeScript project pinned to an
-exact library version, a task prompt written the way a developer would ask, and hidden
-mechanical checks that run after the agent finishes.
+June 2026) in headless mode (`claude -p`). Every library case is a small TypeScript project pinned
+to an exact library version; every language case (see **Language cases**) is a small Python, Go,
+Dart, Rust, or Swift project run with the toolchain installed on the machine. Each has a task
+prompt written the way a developer would ask, and hidden mechanical checks that run after the
+agent finishes.
 
 ## Arms
 
 Each case runs in five arms. The workspaces are identical except for the treatment, and every
-workspace starts from the fixture project with its dependencies installed.
+workspace starts from the fixture project with its dependencies installed (a language case has
+none to install).
 
 | Arm | Plugin loaded | Workspace gets | Meaning |
 |---|---|---|---|
@@ -51,7 +54,8 @@ arm but the baseline.
   timeout in every arm.
 - Same tools in every arm, including WebSearch and WebFetch. Allowed without a prompt: Read,
   Glob, Grep, Edit, Write, WebSearch, WebFetch, and Bash limited to `npx tsc`, `npx vitest`,
-  `npm test`, `ls`, and `cat`. Anything else is denied automatically
+  `npm test`, `ls`, and `cat`; a language case gets its toolchain's programs in place of the npm
+  ones (see **Language cases**). Anything else is denied automatically
   (`--permission-prompts none`), so no run can hang on a prompt.
 - Isolated settings: `--setting-sources project` keeps the operator's user settings, user
   `CLAUDE.md`, rules, hooks, and installed plugins out of the run; `--strict-mcp-config` with no
@@ -72,9 +76,10 @@ arm but the baseline.
   and the result's model usage both reported `claude-opus-5-5`, so setting the variable to the
   requested id does not change the model the session runs.
 - The graders are hidden: `checks/` is copied into the workspace only after the agent exits.
-- The prompt never names the API to use and never hints that a version changed. Every prompt
-  ends with the same ground rules: keep it fully typed (no `any` casts or ts-ignore comments), do
-  not change `package.json` or install packages, run the type checker.
+- The prompt never names the API to use and never hints that a version changed. Every library
+  case's prompt ends with the same ground rules: keep it fully typed (no `any` casts or ts-ignore
+  comments), do not change `package.json` or install packages, run the type checker. A language
+  case's prompt is the task alone.
 - Runs are ordered repeat first, then case, then arm, so drift in the model service during a
   long run touches all arms alike.
 
@@ -88,9 +93,9 @@ browsing (same pass rate, fewer fetches, lower cost) is visible as such.
 
 ## Cases
 
-Post-cutoff cases use libraries whose relevant API or behaviour shipped after June 2026. Each one
-has a `naive/` solution written the way a model coding from memory would write it, and the
-selftest proves the checks reject it.
+Post-cutoff cases use libraries, or language versions, whose relevant API or behaviour shipped
+after June 2026. Each one has a `naive/` solution written the way a model coding from memory would
+write it, and the selftest proves the checks reject it.
 
 ### Strata
 
@@ -101,12 +106,16 @@ documentation, and the selftest enforces the label against what `naive/` actuall
 |---|---|---|
 | `type-visible` | Fails `typecheck` (and usually `behaviour`). | The compiler points at the change, so a careful agent goes looking even without a pack. |
 | `type-invisible` | Passes `typecheck`, fails only `behaviour`. | Nothing: the code compiles, and nothing says anything changed. This is where pinned docs and the session-start hook should matter most. |
+| `language` | Fails `behaviour` (a language case has no `typecheck` check). | Depends on the case: see the kind of change in **Language cases**. There is no `node_modules` copy of the answer to read. |
 | `control` | Is simply correct: a library version the model has known for years. | Measures that the pack does not hurt. |
 
 Each case also records `packageDocumentsAnswer`: whether the installed package itself states the
 answer an agent needs, in its `.d.ts` or JSDoc (`types`), in prose or agent files it ships such as
 a README, CHANGELOG, `AGENTS.md`, or `ai-docs/` (`docs`), or not at all (`none`), with the file and
-line cited in `notes`. Every arm can read `node_modules`, so a baseline pass on a case marked
+line cited in `notes`. For a language case the installed toolchain takes the package's place:
+`types` when its own source or interface files state the new behaviour in code, `docs` when a
+docstring, doc comment, or shipped document states it, with the path and line on the machine
+where the case was built cited in `notes`. Every arm can read `node_modules`, so a baseline pass on a case marked
 `types` or `docs` may come from the package rather than from memory or the web. The field is shown
 in the results; it is never used for grading.
 
@@ -148,16 +157,115 @@ get packs (docs from the matching tag), so the pack arm is a real test of "does 
 | `ctrl-markdown-it-13` | `markdown-it` 13.0.2 (2023-09-26) | The `markdown-it-15` task and checks unchanged, in the type-invisible shape: on 13.x the from-memory `linkify: true` already links bare domains, so the obvious answer is simply correct and nothing pushes the agent anywhere. | docs |
 | `ctrl-date-fns-2` | `date-fns` 2.30.0 (2023-04-30) | Stay range formatting and calendar-night counting with `format`, `addDays`, and `differenceInCalendarDays`. The behaviour check runs in `Europe/London` whatever the grading host's zone, so a stay across the switch to summer time counts the same everywhere. | docs (JSDoc in the shipped source) |
 
-Every case pins TypeScript 6.0.3, Vitest 4.1.12, and `@types/node` 24.19.2 (SvelteKit 3 needs
-TypeScript 6; one version everywhere keeps the toolchain out of the comparison).
+### Language cases
 
-Each `pack.json` takes the docs from the library's own repository at the tag matching the pinned
-version, bound to the dependency so the lockfile decides the version, with two exceptions: the Hono
-website has no tags, so its pack is pinned to a commit (and to version 4.13.16, next to its
-dependency binding), and `stripe-23` adds three `docs.stripe.com` API reference pages that serve
-Markdown but are not versioned (they matched 23.1.0's API version when the case was written). Every
-pack's `readFirst`, and the change documents added to its taken paths, come from one mechanical
-rule, described next.
+The library cases all pin npm packages, whose installed `.d.ts` files and source sit in
+`node_modules` where an agent can read the answer off the disk. A **language case** is about a
+programming language version instead: Python 3.15, Go 1.27, Dart 3.13, Rust 1.100, or Swift 6.4,
+each a feature release after the cutoff. There is no `node_modules` copy of the language to read,
+only the toolchain installed on the machine (`python3` 3.15.2, `go` 1.27.4, `dart` 3.13.7,
+`rustc` and `cargo` 1.100.0, `swift` and `swiftc` 6.4.2 when the cases were built). `llm-docs`
+tracks language versions as the `toolchain` ecosystem, so every arm applies unchanged.
+
+A case is a language case when its `case.json` has two more fields:
+
+- `toolchain`: `python`, `go`, `rust`, `dart`, or `swift`.
+- `versionFiles`: the fixture files that state the toolchain version for `llm-docs`, such as
+  `[".python-version"]` or `["go.mod"]`. Each must exist in `fixture/`.
+
+Its `stratum` is `language` (and a case has that stratum exactly when it has a `toolchain`), its
+`kind` is `post-cutoff`, and its `library` is the toolchain: `{ "name": "python", "version":
+"3.15", "released": "2026-10-09" }`, the version as `llm-docs` tracks it (the feature release).
+It has no `package.json`: nothing is installed, its template is a copy of the fixture, and
+`prepare-packs` copies the version files into each prepared directory in place of the npm
+manifest and lockfile, so the pack's `toolchain` binding resolves and the session-start note sees
+the language version. Its expected notes are checked the same way, with the toolchain as the
+library and no other dependencies: the `plugin` arm's note must list the pack as pinned docs after
+the cutoff, and the `note` arm's must list the toolchain (`` - `python` ``) with no pinned docs.
+
+Its only check is a command named `behaviour`, which runs the hidden check against the workspace
+with the installed toolchain (resolved on `PATH`, since there is no `node_modules/.bin`). There is
+no `typecheck`, no `deps-unchanged`, and no suppression scan. The prompt is the task alone, without
+the npm ground rules; the leak lint scans it and the fixture's `.md`, `.py`, `.go`, `.mod`, `.rs`,
+`.toml`, `.dart`, `.yaml`, `.swift`, and `.json` files.
+
+Every arm of a language case gets Read, Glob, Grep, Edit, Write, WebSearch, WebFetch, `Bash(ls)`,
+`Bash(ls *)`, and `Bash(cat *)`, plus its toolchain's programs in place of the npm ones:
+
+| Toolchain | Also allowed |
+|---|---|
+| python | `Bash(python3 *)` |
+| go | `Bash(go *)` |
+| rust | `Bash(cargo *)`, `Bash(rustc *)` |
+| dart | `Bash(dart *)` |
+| swift | `Bash(swift *)`, `Bash(swiftc *)` |
+
+The selftest proves, for each language case, that the fixture alone fails `behaviour`, every
+`solution*/` passes every check three times in a row (the Swift check is timing-based), `naive/`
+fails `behaviour`, and every `wrong-*/` fails. The read-first rule does not apply: it starts from
+`discover --package`, which takes no toolchain, so `read-first-rule` and the selftest skip
+language cases and print one line saying so. A language case's `readFirst` is written by hand, and
+is the page that says what changed.
+
+The eight cases were found and proved by running each toolchain on the machine that built them:
+`naive/` fails on the post-cutoff toolchain, and for the three Python cases and
+`lang-go-json-field` the same `naive/` passes on the release before (Python 3.14, Go 1.26.0). The
+two new-feature cases fail on any version by design. For Dart, Rust, and Swift no older toolchain
+was installed, so the old behaviour rests on the release notes (and, for Rust, on the source at tag
+1.99.0).
+
+| Case | Language (release) | Kind of change | What `naive/` does | Package documents it |
+|---|---|---|---|---|
+| `lang-py-strptime` | Python 3.15 (2026-10-09) | A break that shows only when the code runs: `strptime` with `%d` and no year now raises `ValueError` (a hidden `DeprecationWarning` before). | Parses the syslog timestamp with `datetime.strptime(ts, "%b %d %H:%M:%S").replace(year=year)`, which raises on every line. | types |
+| `lang-py-argparse` | Python 3.15 (2026-10-09) | A break that shows only when the code runs: `add_argument('-o', '-output')` now stores to `output`, not `o`. | Reads `a.i`, `a.o`, `a.q`, and `a.s`, which raises `AttributeError`. | types |
+| `lang-py-base64url` | Python 3.15 (2026-10-09) | A silent behaviour change: `urlsafe_b64decode` no longer requires padding. | Validates by catching the decoder's exception, so unpadded signatures are now accepted. | docs |
+| `lang-go-json-field` | Go 1.27 (2026-08-19) | A silent behaviour change: `encoding/json` is backed by v2, and `UnmarshalTypeError.Field` now includes array indexes and map keys (`servers.1.port`, `limits.mem`). The release notes do not mention it. | Looks up `Help[te.Field]`, which misses, so the error has no help text. | none |
+| `lang-go-generic-method` | Go 1.27 (2026-08-19) | A new feature the natural solution needs: methods may declare their own type parameters. | Writes a package-level `Map` function because methods could not have type parameters, so a chained `.Map(...)` does not compile. | types |
+| `lang-dart-mtime` | Dart 3.13 (2026-08-12) | A silent behaviour change: file timestamps keep microseconds. | Stores milliseconds in the manifest and compares with `isAfter`, so every file is reported changed on every run. | types |
+| `lang-rust-escape-debug` | Rust 1.100 (2026-11-12) | A silent behaviour change: `str::escape_debug` escapes every grapheme extender, not only a leading one. | Uses `value.escape_debug()`, which now escapes combining marks and viramas inside names. | types |
+| `lang-swift-cancel-cleanup` | Swift 6.4 (2026-09-14) | A new feature the natural solution needs: task cancellation shields, and `await` in `defer`. | Closes the connection in a do/catch; `close()` gives up when the task is cancelled, so the connection stays open. | types |
+
+How each check runs (the hidden files are under `checks/`, copied in after the agent exits):
+
+- Python: `python3 __eval__/check.py <module>` loads the agent's module by path and compares
+  results exactly.
+- Go: the hidden `check_test.go` is copied into the package under test and run with
+  `go test -count=1 -run '^<its test>$'`, so the agent's own tests are not run (they are still
+  compiled with the package).
+- Dart: the hidden `check.dart` is copied beside `sync.dart` and run with `dart run check.dart`.
+- Rust: `__eval__/check.sh` copies `src/logfmt.rs` beside the hidden `check.rs`, compiles it with
+  `rustc --edition 2024`, and runs it.
+- Swift: `__eval__/check.sh` compiles every source of the package's `Transfer` target with the
+  hidden `main.swift` (`swiftc -swift-version 6`) and runs it.
+
+Their packs bind `{ "ecosystem": "toolchain", "name": <toolchain> }` with no version, so the
+fixture's version file decides it:
+
+| Pack | Cases | Sources | `readFirst` | Pages (full, changes) |
+|---|---|---|---|---|
+| `python` | the three `lang-py-*` | `python/cpython` at `v{version}.0`: `Doc/whatsnew/{version}.rst` and the `datetime`, `argparse`, `base64`, `re`, `json`, `pathlib`, `logging`, and `unicodedata` library pages | `pages/whatsnew/3.15.md` | 9, 1 |
+| `go` | the two `lang-go-*` | `golang/website` at commit `0eef789c9f9a` (the repository has no tags): `_content/doc/go{version}.md`; `golang/go` at `go{version}.0`: `doc/go_spec.html` | `pages/go1.27.md` | 2, 1 |
+| `dart` | `lang-dart-mtime` | `dart-lang/sdk` at `{version}.0`: `CHANGELOG.md` | `pages/CHANGELOG.md` | 1, 1 |
+| `rust` | `lang-rust-escape-debug` | `rust-lang/rust` at `{version}.0`: `RELEASES.md` | `pages/RELEASES.md` | 1, 1 |
+| `swift` | `lang-swift-cancel-cleanup` | `swiftlang/swift` at `swift-{version}.0-RELEASE`: `CHANGELOG.md`; `swiftlang/swift-book` at `swift-{version}-fcs`: the `Concurrency`, `Statements`, and `RevisionHistory` pages; `swiftlang/swift-evolution` at commit `58a97fabc723`: SE-0504 and SE-0493 | `pages/CHANGELOG.md` | 6, 1 |
+
+`readFirst` was set by hand from the built manifest, to the page that says what changed. Each
+change the cases rest on is stated on that page, except `lang-go-json-field`'s: the Go 1.27 notes
+say only that `encoding/json` is now backed by v2 and that error text may differ, not that
+`UnmarshalTypeError.Field` changed, so no page in the pack states the answer. The Swift book at
+`swift-6.4-fcs` documents neither feature the Swift case needs; the changelog and the two
+proposals do.
+
+Every library case pins TypeScript 6.0.3, Vitest 4.1.12, and `@types/node` 24.19.2 (SvelteKit 3
+needs TypeScript 6; one version everywhere keeps the toolchain out of the comparison).
+
+Each library case's `pack.json` takes the docs from the library's own repository at the tag
+matching the pinned version, bound to the dependency so the lockfile decides the version, with two
+exceptions: the Hono website has no tags, so its pack is pinned to a commit (and to version
+4.13.16, next to its dependency binding), and `stripe-23` adds three `docs.stripe.com` API
+reference pages that serve Markdown but are not versioned (they matched 23.1.0's API version when
+the case was written). Every library case pack's `readFirst`, and the change documents added to its
+taken paths, come from one mechanical rule, described next.
 
 ## Read-first pages
 
@@ -166,8 +274,9 @@ them at the top, and the session-start hook names the first two for a library ne
 model's training data. The plugin's `add-docs` skill tells a planner to always find the page that
 says what changed and mark it. An eval whose packs skip that step under-measures the product; an
 eval whose read-first pages were picked by someone who had read the tasks over-measures it. So
-every case's `readFirst` is the output of one rule, applied the same way to every case, controls
-included, and fixed without looking at any task.
+every library case's `readFirst` is the output of one rule, applied the same way to every case,
+controls included, and fixed without looking at any task. The rule does not apply to a language
+case (see **Language cases**).
 
 ### The rule
 
@@ -300,10 +409,13 @@ tuning the rule exists to prevent:
 ```
 evals/cases/<id>/
   case.json        id, title, kind, stratum, packageDocumentsAnswer, library and release date,
-                   notes (with the node_modules file:line evidence), maxTurns, timeoutSeconds
+                   notes (with the node_modules file:line evidence), maxTurns, timeoutSeconds;
+                   a language case adds toolchain and versionFiles
   task.md          the prompt
-  fixture/         the starting project (exact versions, committed package-lock.json)
+  fixture/         the starting project (exact versions, committed package-lock.json; a language
+                   case's version files and whatever the prompt says already exists)
   checks/          hidden graders: checks.json, tsconfig.eval.json, vitest.eval.config.mts, __eval__/
+                   (a language case: checks.json and its hidden check files)
   solution/        reference solution overlaid on the fixture; must pass every check
   solution-<why>/  more correct answers, each one a shape a check once rejected; must pass
   wrong-<why>/     wrong answers a check must keep rejecting (often one it once let through)
@@ -322,7 +434,8 @@ evals/cases/<id>/
   and the `{...}` expressions in the markup.
 - `typecheck`: `tsc --noEmit -p tsconfig.eval.json`, a self-contained config over `src/` and the
   hidden type tests, so editing the project's `tsconfig.json` cannot loosen it.
-- `behaviour`: Vitest over the hidden `__eval__/*.check.ts` files.
+- `behaviour`: Vitest over the hidden `__eval__/*.check.ts` files (a language case: its hidden
+  check, run with the installed toolchain).
 
 Test files the agent writes for itself (`*.test.ts`, `*.spec.ts`, `*.test-d.ts`, `__tests__/`
 under `src/`) are not graded unless the task says so: the suppression scan skips them and every
@@ -330,7 +443,8 @@ under `src/`) are not graded unless the task says so: the suppression scan skips
 Vitest config runs only `__eval__/`.
 
 Check programs resolve from the workspace's `node_modules/.bin` only, so a global tool can never
-stand in for the pinned one.
+stand in for the pinned one. A language case has no `node_modules`: its check program (the
+toolchain, or `sh` for a check script) is resolved on `PATH`.
 
 ## Running
 
@@ -345,11 +459,12 @@ npm run eval -- prepare-packs --llm-docs dist/cli.js --plugin-dir plugin
 
 # 2. Prove every case is gradable: fixture alone fails, every solution*/ passes, every wrong-*/
 #    fails, naive/ fails the way the case's stratum says (type-visible: typecheck fails;
-#    type-invisible: typecheck passes and behaviour fails; nothing else may fail), the
-#    suppression scan flags exactly what tests/fixtures/evals/suppressions/expected.json lists,
-#    and every pack.json follows the read-first rule (against the packs from step 1).
-#    Needs network for npm, and for the read-first evidence until it is cached; templates are
-#    cached per lockfile.
+#    type-invisible: typecheck passes and behaviour fails; language: behaviour fails; nothing
+#    else may fail), a language case's solutions pass three times in a row, the suppression scan
+#    flags exactly what tests/fixtures/evals/suppressions/expected.json lists, and every library
+#    case's pack.json follows the read-first rule (against the packs from step 1). Needs network
+#    for npm, and for the read-first evidence until it is cached; templates are cached per
+#    lockfile (a language case's per fixture). Language cases need their toolchains installed.
 npm run eval -- selftest
 
 # The read-first rule on its own: print its table, or --write it into every pack.json.
@@ -370,8 +485,9 @@ npm run eval -- run --runs 5 --plugin-dir plugin \
 ### What prepare-packs builds
 
 For each case, `prepare-packs` builds three directories under `evals/.cache/`, each from the
-fixture's `package.json` and `package-lock.json` (so a `dependency` binding resolves the pinned
-version) and an `llm-docs.json` with `packsDir` `agent-docs` and `agentFiles` `["AGENTS.md"]`:
+fixture's `package.json` and `package-lock.json`, or a language case's `versionFiles` (so a
+`dependency` binding resolves the pinned version), and an `llm-docs.json` with `packsDir`
+`agent-docs` and `agentFiles` `["AGENTS.md"]`:
 
 | Directory | Arms | `packs` in `llm-docs.json` | Commands |
 |---|---|---|---|
@@ -463,7 +579,7 @@ claude -p "<task.md>" --model claude-opus-5-5 --setting-sources project --strict
     "Bash(ls *)" "Bash(cat *)"
 ```
 
-with `ANTHROPIC_MODEL` set to the `--model` value, stdin from `/dev/null`, its own process group,
+(for a language case, the `--allowedTools` list in **Language cases**) with `ANTHROPIC_MODEL` set to the `--model` value, stdin from `/dev/null`, its own process group,
 and the case's wall timeout.
 
 ## Reading results
@@ -485,10 +601,14 @@ and the case's wall timeout.
   cost, turns, duration, tool call counts, the `agent-docs/` paths the agent touched,
   `installedCodeRead`, `ownTestRuns`, and `typeCheckRuns` (below), web searches and fetches,
   permission denials, each SessionStart hook's outcome and output, and the
-  session's model, tools, MCP servers, and plugins as reported by Claude Code.
+  session's model, tools, MCP servers, and plugins as reported by Claude Code. `meta.allowedTools`
+  is the library cases' tool list (left out when the run has none), and
+  `meta.languageAllowedTools` maps each selected language case's toolchain to its list.
 - `runs/<run id>/`: `transcript.jsonl`, `stderr.log`, `run.json`, and `files.json` mapping every
   file the agent created or changed to its content (a map, not loose copies, so test files the
-  agent wrote never reach the repository's own test runner).
+  agent wrote never reach the repository's own test runner). Build output a toolchain writes into
+  the project (directories named `target`, `.build`, `.dart_tool`, or `__pycache__`, at any
+  depth) is left out.
 
 Definitions:
 
@@ -541,7 +661,8 @@ Definitions:
 - **Expected hook note**: what the plugin's session-start hook must inject for a case in one arm
   that loads the plugin. `prepare-packs --plugin-dir <plugin>` computes it once the arm's
   directory is built and its release-date cache is warm: it lays out the arm's workspace under
-  the OS temp directory (the fixture's `package.json` and lockfile, and the arm's `agent-docs/`,
+  the OS temp directory (the fixture's `package.json` and lockfile, or a language case's version
+  files, and the arm's `agent-docs/`,
   `llm-docs.json`, and `AGENTS.md`), runs `node <plugin>/bin/llm-docs.mjs hook session-start`
   there with the headless payload on stdin, `CLAUDECODE=1`, `ANTHROPIC_MODEL`, and
   `LLM_DOCS_CACHE_DIR` as a session gets them, and repeats it (at most 5 times) until two
@@ -584,6 +705,22 @@ Definitions:
   `ls`) counts as a read. A test or type check started through a package script that the command
   does not name (`npm run check`) is not counted. A row written by an earlier version of the
   harness has none of these fields and reads as `false` and `0`.
+- **In a language case** the same three fields are heuristics over the same tool inputs (a Read,
+  Grep, or Glob call's path or pattern, or a Bash command, for `installedCodeRead`; Bash commands,
+  in the same sense of "runs", for the two counts), matched per toolchain instead:
+
+  | Toolchain | `installedCodeRead` matches | `ownTestRuns` counts commands that run | `typeCheckRuns` counts |
+  |---|---|---|---|
+  | python | `/lib/python3.<N>/`, `pydoc`, `help(`, `inspect.getsource`, `inspect.signature`, `__doc__` | `python3` (but not `python3 -m py_compile`) or `pytest` | `python3 -m py_compile`, `mypy`, `pyright` |
+  | go | `/libexec/src/`, `/go/src/`, `go doc`, `GOROOT` | `go test`, `go run` | `go build`, `go vet` |
+  | rust | `/rustlib/src/`, `rustc --explain`, `cargo doc`, `rustup doc` | `cargo test`, `cargo run`, `rustc` | `cargo check`, `cargo build` |
+  | dart | `dart-sdk/lib/`, `dart doc` | `dart run`, `dart test`, `dart <file>.dart` | `dart analyze` |
+  | swift | `.swiftinterface`, `.swiftmodule`, `/usr/lib/swift` | `swift run`, `swift test`, `swiftc` | `swift build` |
+
+  They are coarser than the npm ones. Running a scratch script with `python3 -c` counts as a test
+  run whatever it does, and a `help(...)` in it also counts as reading installed code; a
+  `rustc --explain` counts both as reading the toolchain's docs and as a `rustc` run; a mention of
+  `GOROOT` counts as a read. They see tool calls, not what the agent learned.
 - **Web used**: at least one WebSearch or WebFetch call. Claude Code 2.1 reads pages through its
   `web-fetch` subagent rather than a top-level WebFetch tool, so launching that subagent counts as
   a fetch (its own nested fetch is not counted twice).
@@ -600,11 +737,13 @@ date, model, Claude Code version, and run count.
 - **Nondeterminism.** The same prompt can pass and fail on consecutive runs. One run per cell is
   a smoke test, not a measurement; use at least five runs per case and arm and read differences
   of one or two runs as noise.
-- **Few cases.** Twelve post-cutoff cases over eight libraries (five `type-visible`, seven
-  `type-invisible`) and four controls cover common shapes (a renamed parameter, a new endpoint, a
-  new subpath export, a new schema type, renamed combinators, a new middleware, a changed default,
-  a reversed tuple, a new opt-in, a changed error path), not the whole space. Several cases share
-  a library, so their results are not independent.
+- **Few cases.** Twelve post-cutoff library cases over eight libraries (five `type-visible`, seven
+  `type-invisible`), eight language cases over five language releases (three Python 3.15, two Go
+  1.27, one each for Dart 3.13, Rust 1.100, and Swift 6.4), and four controls cover common shapes
+  (a renamed parameter, a new endpoint, a new subpath export, a new schema type, renamed
+  combinators, a new middleware, a changed default, a reversed tuple, a new opt-in, a changed
+  error path, a language behaviour change, a new language feature), not the whole space. Several
+  cases share a library or a language release, so their results are not independent.
 - **How the cases were selected.** The first six post-cutoff cases each exercise the headline
   change of a release, and in five of them code written from memory fails the type check, so the
   compiler itself tells a baseline agent where to look. The suite now deliberately holds both
@@ -627,6 +766,42 @@ date, model, Claude Code version, and run count.
   msw 3, path-to-regexp 9, and happy-dom 21 (not documented in the repository at the tag),
   solid-js 2 (the behaviour shipped in betas before the cutoff), and he 2 (needs stale type
   definitions pinned to compile).
+- **How the language cases were selected.** A separate search read the post-cutoff release notes
+  of Python 3.15, Go 1.27, Dart 3.13, Rust 1.100, Swift 6.4, and Node.js 26.x, and proved each
+  candidate by running it on the installed toolchain. Twelve qualified and eight were built. Not
+  built: a Python 3.15 grapheme-truncation case (rated usable), and three rated weak, a Python 3.15
+  email change (the error names the fix), an `await` in `defer` case for Swift, and an
+  `int.oneBitCount` case for Dart (in the last two, any correct pre-release answer passes). Swift
+  6.4 has no silent or run-time-only change that the search found, so its case is a new feature.
+  Node.js 26 had no candidate: every semver-major change shipped in 26.0.0 (2026-05-05), before the
+  cutoff, and the search went no further.
+- **The language releases are after the cutoff, but most of the changes are not.** Every release
+  date is after June 2026, but most of the code landed on development branches before it, and was
+  public on GitHub, in betas, or in draft release notes, so a model trained through June 2026 may
+  know it. Python 3.15 entered feature freeze at beta 1 in May 2026, so every Python 3.15 change
+  predates the cutoff on main. When each change became public (commit dates read with the GitHub
+  API when the cases were built):
+
+  | Case | Change became public | Exposure risk |
+  |---|---|---|
+  | `lang-rust-escape-debug` | PR 158303 merged 2026-08-31 | none |
+  | `lang-dart-mtime` | dart-lang/sdk issue 42444 fix referenced 2026-06-18, closed 2026-06-22 | very low |
+  | `lang-go-json-field` | `internal/buildcfg: enable JSONv2 as baseline` 2026-05-18 (v2 existed behind GOEXPERIMENT since 2025-04) | low: the `Field` change is not described anywhere the search found |
+  | `lang-go-generic-method` | `$GOROOT/doc/go_spec.html` subtitle: "Language version go1.27 (May 26, 2026)" | moderate |
+  | `lang-py-strptime` | GH-144570 merged 2026-04-15; the 3.13 `DeprecationWarning` already said "The default behavior will change in Python 3.15" (in models' data since 2024) | moderate to high |
+  | `lang-py-argparse` | gh-138697 merged 2025-11-20 | moderate |
+  | `lang-py-base64url` | gh-73613 merged 2026-04-04 | moderate |
+  | `lang-swift-cancel-cleanup` | SE-0493 accepted 2025-11-04; SE-0504 accepted 2026-02-11 | moderate to high |
+
+  A pass on a case with moderate or high exposure says less than one on `lang-rust-escape-debug`,
+  `lang-dart-mtime`, or `lang-go-json-field`.
+- **The Swift check is timing-based.** It cancels the upload after 30 ms and relies on sleeps of 5
+  to 30 ms inside the fixture's `Connection`. The selftest runs the reference solution three times
+  in a row, but a heavily loaded grading machine could still fail a correct answer, or pass a
+  wrong one.
+- **The Dart and Rust packs hold only the change page.** Their recipes take one file (the SDK
+  `CHANGELOG.md`, the Rust `RELEASES.md`), which is also the read-first page, so their `changes`,
+  `pack`, and `plugin` arms hold the same page; only the note and the skills differ between them.
 - **Web contamination.** Every answer is on the public web, which is the point of allowing web
   tools, but it also means the baseline can sometimes find the answer; that is a real competitor,
   not a flaw. Once these cases are published they can also leak into future training data, so
