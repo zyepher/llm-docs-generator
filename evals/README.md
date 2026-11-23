@@ -11,16 +11,39 @@ mechanical checks that run after the agent finishes.
 
 ## Arms
 
-Each case runs in three arms. The workspaces are identical except for the treatment.
+Each case runs in five arms. The workspaces are identical except for the treatment, and every
+workspace starts from the fixture project with its dependencies installed.
 
-| Arm | What the workspace contains |
-|---|---|
-| `baseline` | The fixture project with dependencies installed. No pack, no plugin. |
-| `pack` | The same, plus the case's pack in `agent-docs/`, `llm-docs.json`, and an `AGENTS.md` holding only the managed block that `llm-docs sync` writes. |
-| `plugin` | The same as `pack`, plus the llm-docs plugin loaded with `--plugin-dir` (session-start hook and skills). |
+| Arm | Plugin loaded | Workspace gets | Meaning |
+|---|---|---|---|
+| `baseline` | no | the fixture only | no treatment |
+| `note` | yes | an initialized llm-docs project with no packs | the note and the skill, no saved docs |
+| `changes` | yes | a pack holding only the case's read-first pages | the note, the skill, and the what-changed pages |
+| `pack` | no | the full pack | the saved docs without the plugin |
+| `plugin` | yes | the full pack | the note, the skills, and the saved docs |
 
-The fixture has no `CLAUDE.md`, so Claude Code reads `AGENTS.md` as project instructions in the
-pack and plugin arms.
+"The plugin loaded" means the llm-docs plugin passed with `--plugin-dir`: its session-start hook
+and its skills, `check-installed` among them. "An initialized project with no packs" is what
+`llm-docs init` and `llm-docs sync` leave for an `llm-docs.json` whose `packs` is empty: that file,
+an `agent-docs/` holding only its `.gitignore`, and an `AGENTS.md` holding only the empty managed
+block. The `changes`,
+`pack`, and `plugin` workspaces hold their pack in `agent-docs/`, `llm-docs.json`, and an
+`AGENTS.md` holding only the managed block that `llm-docs sync` writes. A case with no read-first
+pages (`hono-4-13`) gives the `changes` arm no pack, the same workspace as `note`.
+
+The arms add one layer at a time, so neighbours isolate a layer:
+
+- `note` against `baseline`: the session-start note and the skills alone. The note tells the agent
+  to read the installed version's own types and source and to test the behaviour it relies on,
+  and lists the case's library when it is newer than the model's training data. Nothing is saved
+  to read.
+- `changes` against `note`: the pages that say what changed, the cheapest docs a pack can hold.
+- `plugin` against `changes`: the rest of the pack.
+- `pack` against `baseline`: the full pack with no note and no skills, and `plugin` against `pack`:
+  the note and the skills on top of the full pack.
+
+The fixture has no `CLAUDE.md`, so Claude Code reads `AGENTS.md` as project instructions in every
+arm but the baseline.
 
 ## Fairness rules
 
@@ -35,7 +58,7 @@ pack and plugin arms.
   MCP config means no MCP servers in any arm; `--no-session-persistence` keeps runs out of the
   operator's session history. The runner also strips the parent session's `CLAUDE_CODE_*`
   variables from the child environment.
-- Every session, in all three arms alike, runs with `ANTHROPIC_MODEL` set to the evaluated model
+- Every session, in all five arms alike, runs with `ANTHROPIC_MODEL` set to the evaluated model
   id (the same string as `--model`) in its environment. The plugin's hook needs it: in a headless
   session the SessionStart payload carries no `model` field, so without the variable the hook
   falls back to the `model` key of the operator's own `~/.claude/settings.json`, which is the
@@ -315,9 +338,9 @@ All commands run from the repository root. `npm run eval -- <command>` is the sa
 `npx tsx evals/run.ts <command>`.
 
 ```sh
-# 1. Build the packs with the llm-docs CLI (v3: init, sync, verify, status), and store each
-#    case's expected hook note from the plugin (needed for the plugin arm; pass the same --model
-#    as the run, default claude-opus-5-5).
+# 1. Build what each arm's workspace gets with the llm-docs CLI (v3: init, sync, verify, status),
+#    and store each case's expected hook note per arm from the plugin (needed for the note,
+#    changes, and plugin arms; pass the same --model as the run, default claude-opus-5-5).
 npm run eval -- prepare-packs --llm-docs dist/cli.js --plugin-dir plugin
 
 # 2. Prove every case is gradable: fixture alone fails, every solution*/ passes, every wrong-*/
@@ -344,19 +367,54 @@ npm run eval -- run --runs 5 --plugin-dir plugin \
   --max-budget-usd-per-run 3 --max-total-usd 150
 ```
 
+### What prepare-packs builds
+
+For each case, `prepare-packs` builds three directories under `evals/.cache/`, each from the
+fixture's `package.json` and `package-lock.json` (so a `dependency` binding resolves the pinned
+version) and an `llm-docs.json` with `packsDir` `agent-docs` and `agentFiles` `["AGENTS.md"]`:
+
+| Directory | Arms | `packs` in `llm-docs.json` | Commands |
+|---|---|---|---|
+| `packs/<case>/` | `pack`, `plugin` | the case's `pack.json` entry | `init`, `sync`, `verify`, `status --json` |
+| `packs-note/<case>/` | `note` | `{}` | `init`, `sync`, `status --json` |
+| `packs-changes/<case>/` | `changes` | the case's recipe narrowed to its read-first pages | `init`, `sync`, `verify`, `status --json` |
+
+`status --json` warms the release-date cache the hook reads. Every directory must end with an
+`AGENTS.md` holding both managed block markers, and each pack's `index.md` must exist.
+
+The changes pack is derived from the full pack, never guessed. Its pages are the case's
+`readFirst` targets with any `#fragment` dropped. For each of them, the full pack's
+`manifest.json` says which source produced it and under which stored path: a page's first
+`outputs[].sources` entry is `<source index>:<stored path>` ([the manifest
+reference](../docs/manifest.md#outputs)). The derived recipe is the case's recipe with each
+source's `include` set to exactly those stored paths, the sources that produce no read-first page
+removed, and every other field (title, description, dependency, site, license, readFirst, and the
+source's own `paths`, so stored paths and page paths do not move) kept. After the build, the set
+of `pages/` outputs in the derived manifest must equal the set of read-first pages; when it does
+not, or when the full manifest does not name a read-first page's source and stored path,
+prepare-packs fails that case and names the pages. A case with no read-first pages gets a
+`packs-changes/<case>/` built exactly like `packs-note/<case>/`, with no pack.
+
+With `--plugin-dir`, each directory also gets its expected hook note (see **Expected hook note**
+below), and each gets its own `.prepared.json` stamp. `run` and `smoke` check the stamps of the
+directories the selected arms need, and refuse to start when one is missing or was prepared from
+another `pack.json`.
+
 Options for `run`: `--cases <globs>` (comma-separated, `*` wildcards), `--arms
-baseline,pack,plugin`, `--runs N`, `--model <id>` (default `claude-opus-5-5`; pass a full model
-id, because every arm asserts that the session's `system/init` event reports exactly this
-string, and the plugin arm needs expected hook notes prepared for it), `--concurrency N` (default 2),
+baseline,note,changes,pack,plugin` (any of them; they always run in this order), `--runs N`,
+`--model <id>` (default `claude-opus-5-5`; pass a full model id, because every arm asserts that
+the session's `system/init` event reports exactly this string, and the note, changes, and plugin
+arms need expected hook notes prepared for it), `--concurrency N` (default 2),
 `--max-budget-usd-per-run X` (passed to `claude --max-budget-usd`, default 3), `--max-total-usd Y`
 (no new run starts once spent plus the in-flight caps would pass it), `--plugin-dir <path>`
-(required for the plugin arm), `--effort <level>`, `--resume <results dir>` (see below),
-`--keep-workspaces`.
+(required for the note, changes, and plugin arms), `--effort <level>`, `--resume <results dir>`
+(see below), `--keep-workspaces`.
 
 `smoke` takes the same options except `--cases`, `--runs`, and `--concurrency`: it runs one case
-(`--case <id>`, default `zod-4-6`) once per arm with exactly the `run` invocation, one session at
-a time. For every session it prints the outcome, cost, turns, wall time, whether docs were
-consulted, the SessionStart hook output (plugin arm), and every arm assertion with pass or fail.
+(`--case <id>`, default `zod-4-6`) once per selected arm, in the order above, with exactly the
+`run` invocation, one session at a time. For every session it prints the outcome, cost, turns,
+wall time, whether docs were consulted, the SessionStart hook output (arms with the plugin), and
+every arm assertion with pass or fail.
 It exits 1 if any session could not run or any assertion failed, so a green smoke check is the
 proof that a full run will measure what its arms claim. `plan` describes it too.
 
@@ -384,8 +442,11 @@ the original order (repeat first, then case, then arm). Pass the same `--cases`,
 `--runs`, and `--model` as the first segment, which the printed command does for you.
 
 Each run gets a fresh workspace under the OS temp directory
-(`llm-docs-evals/<timestamp>/<case>-<arm>-<n>`), a copy of the cached `node_modules`, and, for
-the pack and plugin arms, the prepared pack. The agent's stream is saved as `transcript.jsonl`,
+(`llm-docs-evals/<timestamp>/<case>-<arm>-<n>`), a copy of the cached `node_modules`, and what
+prepare-packs built for its arm: `.cache/packs/<case>` for `pack` and `plugin`,
+`.cache/packs-note/<case>` for `note`, `.cache/packs-changes/<case>` for `changes`, and nothing
+for `baseline` (its `agent-docs/`, `AGENTS.md`, and `llm-docs.json`; never the stored note or the
+stamp). The agent's stream is saved as `transcript.jsonl`,
 then the checks are copied in and run. Ctrl-C stops every child process group; rerun with
 `--resume` to finish.
 
@@ -396,7 +457,7 @@ claude -p "<task.md>" --model claude-opus-5-5 --setting-sources project --strict
   --no-session-persistence --max-turns <case maxTurns> --max-budget-usd <cap> \
   --output-format stream-json --verbose --include-hook-events \
   --permission-mode acceptEdits --permission-prompts none \
-  [--plugin-dir <plugin>]  # plugin arm only
+  [--plugin-dir <plugin>]  # note, changes, and plugin arms only
   --allowedTools Read Glob Grep Edit Write WebSearch WebFetch "Bash(npx tsc)" "Bash(npx tsc *)" \
     "Bash(npx vitest)" "Bash(npx vitest *)" "Bash(npm test)" "Bash(npm test *)" "Bash(ls)" \
     "Bash(ls *)" "Bash(cat *)"
@@ -447,18 +508,25 @@ Definitions:
 - **Arm assertions**: before grading, every run proves it ran its arm, from the workspace as it
   was handed to the agent and from the session's `system/init` and hook events:
   - `baseline`: no `agent-docs/`, no `llm-docs.json`, no `AGENTS.md`;
+  - `note`: `llm-docs.json` exists and there is no `agent-docs/<pack>` directory;
+  - `changes`: `llm-docs.json` exists; for a case with read-first pages
+    `agent-docs/<pack>/index.md` exists, and for a case without any there is no
+    `agent-docs/<pack>` directory;
   - `pack` and `plugin`: `agent-docs/<pack>/index.md` and `manifest.json` exist and `AGENTS.md`
     holds both managed block markers;
   - `baseline` and `pack`: no plugin loaded besides Claude Code's built-in ones (reported with
     `path: "builtin"`), and no SessionStart hook ran;
-  - `plugin`: exactly the plugin named in `<plugin-dir>/.claude-plugin/plugin.json` loaded, at
-    least one SessionStart hook started and finished with outcome `success`, and the
-    `additionalContext` the hooks gave the agent equals the case's expected hook note (below).
-    Hook events do not name their plugin; since the other arms prove no SessionStart hook runs
-    without the plugin, every SessionStart hook in this arm is the plugin's. A hook that never
-    started, or started and never reported back, fails; so does one that gave nothing (it missed
-    its 1.5 second deadline) or a different note (for example another model's cutoff), because
-    either way the run would be graded as a plugin run without the plugin's treatment;
+  - `note`, `changes`, and `plugin`: exactly the plugin named in
+    `<plugin-dir>/.claude-plugin/plugin.json` loaded, at least one SessionStart hook started and
+    finished with outcome `success`, and the `additionalContext` the hooks gave the agent equals
+    the case's expected hook note for that arm (below). Hook events do not name their plugin;
+    since the other arms prove no SessionStart hook runs without the plugin, every SessionStart
+    hook in these arms is the plugin's. A hook that never started, or started and never reported
+    back, fails; so does one that gave nothing (it missed its 1.5 second deadline) or a different
+    note (for example another model's cutoff), because either way the run would be graded as a
+    run with the plugin without the plugin's treatment. The `note` and `changes` arms may expect
+    an empty note: then a hook that gave nothing is exactly right, passes, and is never retried,
+    and a hook that gave any text fails;
   - every arm: the session reports the requested model and no MCP servers.
 
   A failed assertion makes the run an infra error named after it, for example
@@ -467,26 +535,34 @@ Definitions:
   `different`), the expected note, and what the hooks actually gave. A hook that gave nothing,
   when nothing else was wrong, is a transient condition of the machine and is retried in place
   like a rate limit (after 30 seconds, then 120 seconds); a different note is not retried.
-- **Expected hook note**: what the plugin's session-start hook must inject for a case.
-  `prepare-packs --plugin-dir <plugin>` computes it once the case's pack is built and its
-  release-date cache is warm: it lays out the plugin arm's workspace under the OS temp directory
-  (the fixture's `package.json` and lockfile, the prepared pack, `llm-docs.json`, `AGENTS.md`),
-  runs `node <plugin>/bin/llm-docs.mjs hook session-start` there with the headless payload on
-  stdin, `CLAUDECODE=1`, `ANTHROPIC_MODEL`, and `LLM_DOCS_CACHE_DIR` as a session gets them, and
-  repeats it (at most 5 times) until two consecutive runs print the same non-empty note. It is
-  stored as `.cache/packs/<case>/expected-hook-note.json` with the model and a hash of the
-  plugin's `bin/llm-docs.mjs`; `run` and `smoke` refuse the plugin arm when a case has no note,
-  or one for another model or another build of the plugin. The note holds only project-relative
-  paths, and with a known cutoff its release windows do not depend on the date (the hook uses
-  "recent" only when it knows no cutoff), so nothing in it is normalized; prepare-packs fails a
-  case whose note names the temporary workspace path. It also fails a case whose note does not
-  list the case's pack as pinned docs for a library released after the cutoff (post-cutoff
-  cases), or lists the case's library or the pack's bound dependency among the dependencies with
-  no pinned docs, because either means the pack recipe is bound to the wrong thing. A listed
-  dependency whose installed `package.json` names one of the pack's source repositories, other
-  than the dependency the pack binds, is a warning instead: a pack binds a single dependency
-  today, so both MCP cases list `@modelcontextprotocol/client` without pinned docs although the
-  MCP pack covers it.
+- **Expected hook note**: what the plugin's session-start hook must inject for a case in one arm
+  that loads the plugin. `prepare-packs --plugin-dir <plugin>` computes it once the arm's
+  directory is built and its release-date cache is warm: it lays out the arm's workspace under
+  the OS temp directory (the fixture's `package.json` and lockfile, and the arm's `agent-docs/`,
+  `llm-docs.json`, and `AGENTS.md`), runs `node <plugin>/bin/llm-docs.mjs hook session-start`
+  there with the headless payload on stdin, `CLAUDECODE=1`, `ANTHROPIC_MODEL`, and
+  `LLM_DOCS_CACHE_DIR` as a session gets them, and repeats it (at most 5 times) until two
+  consecutive runs print the same note. The plugin arm's note must be non-empty. The note and
+  changes arms' note may be empty, stored as `""`: a control case whose dependencies all predate
+  the cutoff gives the hook nothing to say. Each note is stored as `expected-hook-note.json` in the
+  arm's directory (`.cache/packs/<case>/` for `plugin`, `.cache/packs-note/<case>/` for `note`,
+  `.cache/packs-changes/<case>/` for `changes`) with the model and a hash of the plugin's
+  `bin/llm-docs.mjs`; `run` and `smoke` refuse an arm when a case has no note for it, or one for
+  another model or another build of the plugin. The note holds only project-relative paths, and
+  with a known cutoff its release windows do not depend on the date (the hook uses "recent" only
+  when it knows no cutoff), so nothing in it is normalized; prepare-packs fails a case whose note
+  names the temporary workspace path. Where the workspace holds the case's pack (`plugin`, and
+  `changes` for a case with read-first pages), it also fails a case whose note does not list the
+  case's pack as pinned docs for a library released after the cutoff (post-cutoff cases), or
+  lists the case's library or the pack's bound dependency among the dependencies with no pinned
+  docs, because either means the pack recipe is bound to the wrong thing. A listed dependency
+  whose installed `package.json` names one of the pack's source repositories, other than the
+  dependency the pack binds, is a warning instead: a pack binds a single dependency today, so both
+  MCP cases list `@modelcontextprotocol/client` without pinned docs although the MCP pack covers
+  it. Where the workspace holds no pack (`note`, and `changes` for a case without read-first
+  pages), a post-cutoff case's note must list the case's library among the dependencies with no
+  pinned docs and have no pinned docs section; a control case's note may say anything, or
+  nothing.
 - **Docs consulted**: a Read, Grep, Glob, or Bash call named a path under `agent-docs/`.
 - **Web used**: at least one WebSearch or WebFetch call. Claude Code 2.1 reads pages through its
   `web-fetch` subagent rather than a top-level WebFetch tool, so launching that subagent counts as
@@ -540,21 +616,24 @@ date, model, Claude Code version, and run count.
   on the other post-cutoff cases. `effect-4-partition` is not affected: its change merged on
   2026-09-29, so the betas had the old order.
 - **Docs consulted is a heuristic.** It counts explicit tool calls on `agent-docs/` paths. The
-  managed block in `AGENTS.md` is always in context in the pack and plugin arms and is not
-  counted.
+  managed block in `AGENTS.md` is always in context in every arm but the baseline (empty in the
+  note arm, and in the changes arm of a case with no read-first pages) and is not counted.
 - **Cost** is Claude Code's `total_cost_usd`, which is computed at list prices regardless of how
   the account is billed.
 - **The plugin hook** reads release dates from a cache that `prepare-packs` warms (via
   `llm-docs status`) and that every arm shares through `LLM_DOCS_CACHE_DIR`; with a cold cache
   the hook could say less. The hook always exits 0 and logs its own errors to `hook.log` in that
   cache, so a hook that failed inside and printed nothing looks the same in the stream as one
-  that had nothing to say; check `hook.log` when the plugin arm's hook output is empty. A busy
+  that had nothing to say; check `hook.log` when an arm's hook output is empty. A busy
   machine is enough to cause that: the hook's 1.5 second deadline counts from process start,
   including loading the bundled CLI. With a load average near 100, runs of the hook on prepared
   `hono-4-13` and `mcp-sdk-v2-tools` workspaces took 1.0 to 1.7 seconds, and two of them printed
   nothing (`hook.log`: "stdin did not end within 0 ms", then "missed its 1500 ms deadline"). The
-  plugin arm's assertion catches this (the hook's note must equal the expected one), and the run
-  is retried in place, but each retry is another session: run on a quiet machine.
+  assertion of every arm with the plugin catches this (the hook's note must equal the expected
+  one), and the run is retried in place, but each retry is another session: run on a quiet
+  machine. Where the expected note is empty (possible in the note and changes arms only), a hook
+  that missed its deadline cannot be told from one with nothing to say, during the run or when
+  prepare-packs computes the note.
 - **Resumed runs are later in time.** A run stopped by a usage limit and continued with `--resume`
   executes its remaining cells hours or days after the first part, so service drift no longer
   touches all arms alike for those cells. Ordering keeps the damage small (the remaining cells

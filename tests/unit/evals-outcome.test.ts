@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import type { Arm, EvalCase } from '../../evals/lib/cases.js';
+import { ARMS as ALL_ARMS, type Arm, type EvalCase } from '../../evals/lib/cases.js';
 import type { RunRow } from '../../evals/lib/results.js';
 import {
   classifyOutcome,
@@ -13,6 +13,7 @@ import {
 } from '../../evals/lib/transcript.js';
 import {
   type PlannedRun,
+  parseArms,
   pendingRuns,
   planRuns,
   runSchedule,
@@ -285,6 +286,20 @@ describe('scheduling', () => {
       'b.pack.2',
       'b.plugin.2',
     ]);
+  });
+
+  it('parses an arm list into ARMS order, and plans all five arms in that order', () => {
+    expect(ALL_ARMS).toEqual(['baseline', 'note', 'changes', 'pack', 'plugin']);
+    expect(parseArms(undefined)).toEqual(ALL_ARMS);
+    expect(parseArms('plugin, note,baseline,note')).toEqual(['baseline', 'note', 'plugin']);
+    expect(() => parseArms('baseline,docs')).toThrow(
+      'unknown arm "docs" (expected baseline, note, changes, pack, plugin)'
+    );
+    expect(
+      planRuns([fakeCase('a')], parseArms('changes,pack,plugin,note,baseline'), 1).map(
+        (run) => run.runId
+      )
+    ).toEqual(['a.baseline.1', 'a.note.1', 'a.changes.1', 'a.pack.1', 'a.plugin.1']);
   });
 
   it.each(['usage-limit', 'auth', 'billing'] as const)(

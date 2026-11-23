@@ -14,6 +14,7 @@ import {
   CACHE_DIR,
   type CheckSpec,
   type EvalCase,
+  isPluginArm,
   listFiles,
 } from './cases.js';
 import { checkHookNote } from './hook-note.js';
@@ -413,6 +414,8 @@ export interface WorkspaceFacts {
   agentDocsDir: boolean;
   llmDocsJson: boolean;
   agentsMd: boolean;
+  /** `agent-docs/<pack id>` exists, whatever it holds. */
+  packDir: boolean;
   packIndex: boolean;
   packManifest: boolean;
   managedBlock: boolean;
@@ -425,6 +428,7 @@ export async function inspectWorkspace(dir: string, packId: string): Promise<Wor
     agentDocsDir: existsSync(join(dir, 'agent-docs')),
     llmDocsJson: existsSync(join(dir, 'llm-docs.json')),
     agentsMd: existsSync(agentsPath),
+    packDir: existsSync(join(dir, 'agent-docs', packId)),
     packIndex: existsSync(join(dir, 'agent-docs', packId, 'index.md')),
     packManifest: existsSync(join(dir, 'agent-docs', packId, 'manifest.json')),
     managedBlock:
@@ -442,10 +446,12 @@ export interface ArmAssertion {
 export interface ArmExpectation {
   model: string;
   packId: string;
-  /** `name` from the plugin's `.claude-plugin/plugin.json`; null outside the plugin arm. */
+  /** `name` from the plugin's `.claude-plugin/plugin.json`; null in an arm without the plugin. */
   pluginName: string | null;
-  /** The note prepare-packs stored for the case; null outside the plugin arm. */
+  /** The note prepare-packs stored for the case and arm; null in an arm without the plugin. */
   hookNote: string | null;
+  /** Whether the case marks read-first pages, so its changes arm holds a pack of them. */
+  hasReadFirst: boolean;
 }
 
 /**
@@ -485,6 +491,30 @@ export function assertArm(
       'AGENTS.md absent',
       'AGENTS.md is present in a baseline workspace'
     );
+  } else if (arm === 'note' || arm === 'changes') {
+    check(
+      'llm-docs.json',
+      facts.llmDocsJson,
+      'llm-docs.json present',
+      `llm-docs.json is missing from a ${arm} workspace`
+    );
+    if (arm === 'changes' && expected.hasReadFirst) {
+      check(
+        'pack index',
+        facts.packIndex,
+        `${pack}/index.md present`,
+        `${pack}/index.md is missing`
+      );
+    } else {
+      check(
+        'no pack',
+        !facts.packDir,
+        `${pack}/ absent`,
+        arm === 'note'
+          ? `${pack}/ is present in a note workspace`
+          : `${pack}/ is present in a changes workspace, but the case marks no read-first pages`
+      );
+    }
   } else {
     check('pack index', facts.packIndex, `${pack}/index.md present`, `${pack}/index.md is missing`);
     check(
@@ -520,9 +550,9 @@ export function assertArm(
 
   const plugins = (session?.plugins ?? []).map((plugin) => plugin.name);
   // Hook events do not name their plugin. The baseline and pack arms assert that no SessionStart
-  // hook runs at all, so in the plugin arm every SessionStart hook is the plugin's.
+  // hook runs at all, so in an arm that loads the plugin every SessionStart hook is the plugin's.
   const hooks = transcript.sessionStartHooks;
-  if (arm === 'plugin') {
+  if (isPluginArm(arm)) {
     const name = expected.pluginName ?? '';
     check(
       'plugin loaded',
@@ -545,10 +575,14 @@ export function assertArm(
     check(
       'plugin hook note',
       note.verdict === 'match',
-      `plugin hook gave the expected ${note.expected.length}-character note`,
+      note.expected === ''
+        ? 'plugin hook gave no note, as expected'
+        : `plugin hook gave the expected ${note.expected.length}-character note`,
       note.verdict === 'empty'
         ? `plugin hook gave the agent nothing, not the expected ${note.expected.length}-character note`
-        : `plugin hook gave a ${note.actual.length}-character note that differs from the expected ${note.expected.length}-character one`
+        : note.expected === ''
+          ? `plugin hook gave a ${note.actual.length}-character note where none was expected`
+          : `plugin hook gave a ${note.actual.length}-character note that differs from the expected ${note.expected.length}-character one`
     );
   } else {
     check(

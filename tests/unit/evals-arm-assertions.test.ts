@@ -5,8 +5,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { Arm, EvalCase } from '../../evals/lib/cases.js';
+import { ARMS, type Arm, type EvalCase, isPluginArm } from '../../evals/lib/cases.js';
 import {
+  checkHookNote,
   expectedNoteProblems,
   type NoteExpectation,
   settleHookNote,
@@ -27,6 +28,7 @@ const EXPECTED: ArmExpectation = {
   packId: 'zod',
   pluginName: null,
   hookNote: null,
+  hasReadFirst: true,
 };
 /** The `probe` hook's note in WITH_PLUGIN, as prepare-packs would have stored it. */
 const PLUGIN_EXPECTED: ArmExpectation = {
@@ -80,7 +82,7 @@ function check(
   arm: Arm,
   facts: WorkspaceFacts,
   jsonl: string,
-  expected: ArmExpectation = arm === 'plugin' ? PLUGIN_EXPECTED : EXPECTED
+  expected: ArmExpectation = isPluginArm(arm) ? PLUGIN_EXPECTED : EXPECTED
 ): ArmAssertion[] {
   return assertArm(arm, facts, summarizeTranscript(jsonl), expected);
 }
@@ -92,6 +94,7 @@ describe('inspectWorkspace', () => {
       agentDocsDir: false,
       llmDocsJson: false,
       agentsMd: false,
+      packDir: false,
       packIndex: false,
       packManifest: false,
       managedBlock: false,
@@ -103,6 +106,7 @@ describe('inspectWorkspace', () => {
       agentDocsDir: true,
       llmDocsJson: true,
       agentsMd: true,
+      packDir: true,
       packIndex: true,
       packManifest: true,
       managedBlock: true,
@@ -232,13 +236,128 @@ describe('assertArm', () => {
   });
 });
 
+describe('assertArm for the note and changes arms', () => {
+  /** An initialized project with no packs, as prepare-packs builds it for the note arm. */
+  const NOTE_FILES = {
+    'src/iban.ts': 'export {};\n',
+    'agent-docs/.gitignore': '.staging/\n',
+    'AGENTS.md': BLOCK,
+    'llm-docs.json': '{}\n',
+  };
+  const ENVELOPE =
+    '{\\"hookSpecificOutput\\":{\\"hookEventName\\":\\"SessionStart\\",\\"additionalContext\\":\\"probe context line\\"}}';
+  /** The probe plugin's session, with its hook giving the agent nothing. */
+  const SILENT = WITH_PLUGIN.replaceAll(ENVELOPE, '');
+  const NO_NOTE: ArmExpectation = { ...PLUGIN_EXPECTED, hookNote: '' };
+  const NO_READ_FIRST: ArmExpectation = { ...PLUGIN_EXPECTED, hasReadFirst: false };
+  const PLUGIN_NAMES = [
+    'model',
+    'no MCP servers',
+    'plugin loaded',
+    'plugin hook ran',
+    'plugin hook note',
+  ];
+
+  it('passes a note session with llm-docs.json, no pack, the plugin, and the expected note', async () => {
+    const facts = await inspectWorkspace(await workspace(NOTE_FILES), 'zod');
+    const assertions = check('note', facts, WITH_PLUGIN);
+    expect(failures(assertions)).toEqual([]);
+    expect(assertions.map((assertion) => assertion.name)).toEqual([
+      'llm-docs.json',
+      'no pack',
+      ...PLUGIN_NAMES,
+    ]);
+  });
+
+  it('fails a note session without llm-docs.json, with the pack, or without the plugin', async () => {
+    const { 'llm-docs.json': _config, ...withoutConfig } = NOTE_FILES;
+    const bare = await inspectWorkspace(await workspace(withoutConfig), 'zod');
+    expect(failures(check('note', bare, WITH_PLUGIN))).toEqual([
+      'llm-docs.json is missing from a note workspace',
+    ]);
+    const packed = await inspectWorkspace(await workspace(PACK_FILES), 'zod');
+    expect(failures(check('note', packed, WITH_PLUGIN))).toEqual([
+      'agent-docs/zod/ is present in a note workspace',
+    ]);
+    const facts = await inspectWorkspace(await workspace(NOTE_FILES), 'zod');
+    expect(failures(check('note', facts, CLEAN))).toEqual([
+      'plugin probe did not load',
+      'plugin hook did not run',
+      'plugin hook gave the agent nothing, not the expected 18-character note',
+    ]);
+    expect(
+      failures(check('note', facts, WITH_PLUGIN.replaceAll('probe context line', 'other')))
+    ).toEqual([
+      'plugin hook gave a 5-character note that differs from the expected 18-character one',
+    ]);
+  });
+
+  it('passes a session whose hook gave nothing when the expected note is empty, as a match', async () => {
+    const facts = await inspectWorkspace(await workspace(NOTE_FILES), 'zod');
+    for (const arm of ['note', 'changes'] as const) {
+      const assertions = check(arm, facts, SILENT, { ...NO_NOTE, hasReadFirst: false });
+      expect(failures(assertions)).toEqual([]);
+      expect(assertions.at(-1)?.detail).toBe('plugin hook gave no note, as expected');
+    }
+    // A match, not the silence of a missed deadline, so the run is neither an infra error nor retried.
+    expect(checkHookNote('', summarizeTranscript(SILENT).sessionStartHooks).verdict).toBe('match');
+  });
+
+  it('fails a session whose hook gave a note when none was expected', async () => {
+    const facts = await inspectWorkspace(await workspace(NOTE_FILES), 'zod');
+    expect(failures(check('note', facts, WITH_PLUGIN, NO_NOTE))).toEqual([
+      'plugin hook gave a 18-character note where none was expected',
+    ]);
+  });
+
+  it('passes a changes session holding the pack of read-first pages, and fails one without it', async () => {
+    const packed = await inspectWorkspace(await workspace(PACK_FILES), 'zod');
+    const assertions = check('changes', packed, WITH_PLUGIN);
+    expect(failures(assertions)).toEqual([]);
+    expect(assertions.map((assertion) => assertion.name)).toEqual([
+      'llm-docs.json',
+      'pack index',
+      ...PLUGIN_NAMES,
+    ]);
+    const unpacked = await inspectWorkspace(await workspace(NOTE_FILES), 'zod');
+    expect(failures(check('changes', unpacked, WITH_PLUGIN))).toEqual([
+      'agent-docs/zod/index.md is missing',
+    ]);
+    const { 'llm-docs.json': _config, ...withoutConfig } = PACK_FILES;
+    const bare = await inspectWorkspace(await workspace(withoutConfig), 'zod');
+    expect(failures(check('changes', bare, WITH_PLUGIN))).toEqual([
+      'llm-docs.json is missing from a changes workspace',
+    ]);
+    expect(failures(check('changes', packed, CLEAN))).toEqual([
+      'plugin probe did not load',
+      'plugin hook did not run',
+      'plugin hook gave the agent nothing, not the expected 18-character note',
+    ]);
+  });
+
+  it('passes a changes session with no pack when the case marks no read-first pages, and fails one with a pack', async () => {
+    const unpacked = await inspectWorkspace(await workspace(NOTE_FILES), 'zod');
+    const assertions = check('changes', unpacked, WITH_PLUGIN, NO_READ_FIRST);
+    expect(failures(assertions)).toEqual([]);
+    expect(assertions.map((assertion) => assertion.name)).toEqual([
+      'llm-docs.json',
+      'no pack',
+      ...PLUGIN_NAMES,
+    ]);
+    const packed = await inspectWorkspace(await workspace(PACK_FILES), 'zod');
+    expect(failures(check('changes', packed, WITH_PLUGIN, NO_READ_FIRST))).toEqual([
+      'agent-docs/zod/ is present in a changes workspace, but the case marks no read-first pages',
+    ]);
+  });
+});
+
 describe('the session environment', () => {
   const settings: RunSettings = {
     model: 'claude-opus-5-5',
     perRunUsd: 3,
     pluginDir: '/plugins/llm-docs',
     pluginName: 'llm-docs',
-    hookNotes: new Map(),
+    hookNotes: { note: new Map(), changes: new Map(), plugin: new Map() },
     effort: null,
   };
   const evalCase: EvalCase = {
@@ -261,15 +380,12 @@ describe('the session environment', () => {
     const previous = process.env.ANTHROPIC_MODEL;
     process.env.ANTHROPIC_MODEL = 'opus';
     try {
-      const invocations = (['baseline', 'pack', 'plugin'] as const).map((arm) =>
-        agentInvocation(evalCase, arm, settings)
-      );
+      const invocations = ARMS.map((arm) => agentInvocation(evalCase, arm, settings));
       for (const { args, env } of invocations) {
         expect(env.ANTHROPIC_MODEL).toBe('claude-opus-5-5');
         expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-5-5');
+        expect(env).toEqual(invocations[0]?.env);
       }
-      expect(invocations[1]?.env).toEqual(invocations[0]?.env);
-      expect(invocations[2]?.env).toEqual(invocations[0]?.env);
     } finally {
       if (previous === undefined) {
         delete process.env.ANTHROPIC_MODEL;
@@ -277,6 +393,21 @@ describe('the session environment', () => {
         process.env.ANTHROPIC_MODEL = previous;
       }
     }
+  });
+
+  it('loads the plugin with --plugin-dir in the note, changes, and plugin arms only', () => {
+    const pluginDirOf = (arm: Arm): string | null => {
+      const { args } = agentInvocation(evalCase, arm, settings);
+      const at = args.indexOf('--plugin-dir');
+      return at === -1 ? null : (args[at + 1] ?? null);
+    };
+    expect(ARMS.map((arm) => [arm, pluginDirOf(arm)])).toEqual([
+      ['baseline', null],
+      ['note', '/plugins/llm-docs'],
+      ['changes', '/plugins/llm-docs'],
+      ['pack', null],
+      ['plugin', '/plugins/llm-docs'],
+    ]);
   });
 });
 
@@ -310,6 +441,7 @@ describe('the expected hook note', () => {
       { name: '@modelcontextprotocol/server', sharesPackRepository: true },
       { name: 'typescript', sharesPackRepository: false },
     ],
+    pinned: true,
   };
 
   it('accepts a post-cutoff note that lists the pack as pinned docs after the cutoff', () => {
@@ -337,6 +469,7 @@ describe('the expected hook note', () => {
       library: 'zod',
       boundDependency: 'zod',
       dependencies: [{ name: 'zod', sharesPackRepository: true }],
+      pinned: true,
     };
     expect(expectedNoteProblems(note([], [row]), zod)).toEqual({
       failures: [`the note says the case's own library has no pinned docs: "${row}"`],
@@ -372,6 +505,41 @@ describe('the expected hook note', () => {
     expect(await settleHookNote(scripted(['a', '', 'a', 'a']))).toEqual({ note: 'a' });
     expect(await settleHookNote(scripted(['', '', 'a', 'b', 'a', 'a']))).toEqual({
       outputs: ['', '', 'a', 'b', 'a'],
+    });
+    // The note and changes arms accept an empty note, also settled by two equal runs.
+    expect(await settleHookNote(scripted(['', '', 'a']), true)).toEqual({ note: '' });
+    expect(await settleHookNote(scripted(['', 'a', 'a']), true)).toEqual({ note: 'a' });
+  });
+
+  describe('in a workspace that holds no pack (the note arm, and changes without read-first pages)', () => {
+    const LIBRARY_ROW =
+      '- `@modelcontextprotocol/server` 2.4.0 (npm, released 2026-10-23, after cutoff)';
+    const bare: NoteExpectation = { ...sdk, pinned: false };
+
+    it('accepts a post-cutoff note that lists the case library with no pinned docs', () => {
+      expect(expectedNoteProblems(note([], [LIBRARY_ROW, TS_ROW]), bare)).toEqual({
+        failures: [],
+        warnings: [],
+      });
+    });
+
+    it('fails a post-cutoff note that does not list the case library, or has a pinned section', () => {
+      expect(expectedNoteProblems(note([], [TS_ROW]), bare).failures).toEqual([
+        "the note does not list the case's library `@modelcontextprotocol/server` among the dependencies with no pinned docs",
+      ]);
+      expect(expectedNoteProblems('', bare).failures).toEqual([
+        "the note does not list the case's library `@modelcontextprotocol/server` among the dependencies with no pinned docs",
+      ]);
+      expect(expectedNoteProblems(note([SDK_ROW], [LIBRARY_ROW]), bare).failures).toEqual([
+        'the note has a pinned docs section, but the workspace holds no pack',
+      ]);
+    });
+
+    it('requires nothing of a control note, an empty one included', () => {
+      const control: NoteExpectation = { ...bare, kind: 'control' };
+      for (const text of ['', note([], [TS_ROW]), note([SDK_ROW], [])]) {
+        expect(expectedNoteProblems(text, control)).toEqual({ failures: [], warnings: [] });
+      }
     });
   });
 });

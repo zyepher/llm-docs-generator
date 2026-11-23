@@ -16,11 +16,13 @@ import {
   EVALS_DIR,
   type EvalCase,
   isCaseError,
+  isPluginArm,
   lintCase,
   listFiles,
   loadCases,
-  PACK_CACHE_DIR,
+  PREPARED_DIRS,
   PREPARED_STAMP,
+  type PluginArm,
   RESULTS_DIR,
   STRATA,
   STRATUM_CHECKS,
@@ -83,10 +85,12 @@ Commands:
                  on tests/fixtures/evals/suppressions, and that every pack.json follows the
                  read-first rule (needs prepare-packs first).
   prepare-packs  --llm-docs <cli entry> [--plugin-dir <path>] [--model M] [--cases <globs>]
-                 Build each case's docs pack with the llm-docs CLI into .cache/packs/<id>. With
-                 --plugin-dir, also run the plugin's session-start hook in each case's plugin-arm
-                 workspace (ANTHROPIC_MODEL=M, default claude-opus-5-5) and store the note it must
-                 inject; the plugin arm of run and smoke needs it.
+                 Build each case's docs pack with the llm-docs CLI into .cache/packs/<id>, an
+                 initialized project with no packs into .cache/packs-note/<id>, and a pack of only
+                 the case's read-first pages into .cache/packs-changes/<id>. With --plugin-dir,
+                 also run the plugin's session-start hook in the workspace of each arm that loads
+                 the plugin (ANTHROPIC_MODEL=M, default claude-opus-5-5) and store the note it must
+                 inject; the note, changes, and plugin arms of run and smoke need it.
   read-first-rule [--cases <globs>] [--write] [--refresh]
                  Compute each pack's readFirst from discover's change documents and the prepared
                  pack's pages (evals/README.md states the rule), print the table, and exit 1 when
@@ -95,7 +99,7 @@ Commands:
   plan           [--cases] [--arms] [--runs N] [--model M] [--max-budget-usd-per-run X]
                  [--assume-usd-per-run LOW-HIGH]
                  Print the run matrix and an estimated cost range.
-  run            [--cases <globs>] [--arms baseline,pack,plugin] [--runs N] [--model M]
+  run            [--cases <globs>] [--arms baseline,note,changes,pack,plugin] [--runs N] [--model M]
                  [--concurrency N] [--max-budget-usd-per-run X] [--max-total-usd Y]
                  [--plugin-dir <path>] [--effort <level>] [--resume <results dir>]
                  [--keep-workspaces]
@@ -175,7 +179,7 @@ function parsePositiveNumber(value: string | undefined, flag: string, fallback: 
   return parsed;
 }
 
-function parseArms(value: string | undefined): Arm[] {
+export function parseArms(value: string | undefined): Arm[] {
   if (value === undefined) {
     return [...ARMS];
   }
@@ -477,9 +481,13 @@ function repositoryKey(declared: unknown): string | null {
 /**
  * What prepare-packs checks in a case's expected note (`expectedNoteProblems`): which of the
  * fixture's direct dependencies come from one of the pack's source repositories, read from the
- * installed package's own `repository` field.
+ * installed package's own `repository` field, and whether the arm's workspace holds the pack.
  */
-async function noteExpectation(evalCase: EvalCase, templateDir: string): Promise<NoteExpectation> {
+async function noteExpectation(
+  evalCase: EvalCase,
+  templateDir: string,
+  pinned: boolean
+): Promise<NoteExpectation> {
   const sources = Array.isArray(evalCase.pack.pack.sources) ? evalCase.pack.pack.sources : [];
   const packRepositories = new Set(
     sources.flatMap((source) => {
@@ -503,26 +511,29 @@ async function noteExpectation(evalCase: EvalCase, templateDir: string): Promise
     library: evalCase.library.name,
     boundDependency: isRecord(binding) && typeof binding.name === 'string' ? binding.name : null,
     dependencies,
+    pinned,
   };
 }
 
 /**
- * The note the plugin's hook gives the agent in this case's plugin-arm workspace, run as Claude
- * Code runs it (hooks/hooks.json): `node <plugin>/bin/llm-docs.mjs hook session-start` in the
- * workspace, the headless payload on stdin, and the session's environment. The workspace lives
- * under the OS temp directory like run's, because the hook looks for a CLAUDE.md above the project.
+ * The note the plugin's hook gives the agent in this case's workspace for an arm that loads the
+ * plugin, run as Claude Code runs it (hooks/hooks.json): `node <plugin>/bin/llm-docs.mjs hook
+ * session-start` in the workspace, the headless payload on stdin, and the session's environment.
+ * The workspace lives under the OS temp directory like run's, because the hook looks for a
+ * CLAUDE.md above the project. Only the plugin arm's note must be non-empty.
  */
 async function computeHookNote(
   evalCase: EvalCase,
+  arm: PluginArm,
   pluginDir: string,
   model: string,
   root: string
 ): Promise<{ note: string } | { failure: string }> {
-  const dir = join(root, `${evalCase.id}-plugin-1`);
+  const dir = join(root, `${evalCase.id}-${arm}-1`);
   await mkdir(dir, { recursive: true });
   await cp(join(evalCase.dir, 'fixture', 'package.json'), join(dir, 'package.json'));
   await cp(join(evalCase.dir, 'fixture', 'package-lock.json'), join(dir, 'package-lock.json'));
-  await copyPackInto(evalCase, dir);
+  await copyPackInto(evalCase, arm, dir);
   // The payload a headless session sends (measured with Claude Code 2.1.330): no model in it.
   const payload = JSON.stringify({
     session_id: 'prepare-packs',
@@ -543,10 +554,10 @@ async function computeHookNote(
       }
     );
     return hookText(result.stdout);
-  });
+  }, arm !== 'plugin');
   if ('outputs' in settled) {
     return {
-      failure: `the plugin hook did not print the same non-empty note twice in a row in ${HOOK_NOTE_ATTEMPTS} runs (lengths ${settled.outputs.map((output) => output.length).join(', ')}); a loaded machine makes it miss its deadline, so prepare again when the machine is quieter, or read hook.log in ${LLM_DOCS_CACHE_DIR}`,
+      failure: `the plugin hook did not print the same ${arm === 'plugin' ? 'non-empty ' : ''}note twice in a row in ${HOOK_NOTE_ATTEMPTS} runs (lengths ${settled.outputs.map((output) => output.length).join(', ')}); a loaded machine makes it miss its deadline, so prepare again when the machine is quieter, or read hook.log in ${LLM_DOCS_CACHE_DIR}`,
     };
   }
   // The session's workspace has another path, so a note that names this one could never match.
@@ -589,95 +600,150 @@ async function preparePacks(argv: string[]): Promise<number> {
   const warnings: string[] = [];
   await mkdir(join(tmpdir(), 'llm-docs-evals'), { recursive: true });
   const noteRoot = await mkdtemp(join(tmpdir(), 'llm-docs-evals', 'hook-note-'));
-  for (const evalCase of cases) {
-    const dir = join(PACK_CACHE_DIR, evalCase.id);
-    log(`preparing pack ${evalCase.pack.id} for ${evalCase.id}`);
+
+  /**
+   * Builds one prepared directory for a case: the fixture's manifest and lockfile (they let
+   * `dependency` bindings resolve the pinned version), `llm-docs.json` with `packs`, then init,
+   * sync, and, when there is a pack, verify. Then `status` warms the release-date cache the
+   * session-start hook reads, so an arm with the plugin does not depend on a 1 second network
+   * budget during the run (best effort). Returns what went wrong, or null.
+   */
+  const build = async (
+    evalCase: EvalCase,
+    dir: string,
+    packs: Record<string, unknown>
+  ): Promise<string | null> => {
     await rm(dir, { recursive: true, force: true });
     await mkdir(dir, { recursive: true });
-    // The fixture's manifest and lockfile let `dependency` bindings resolve the pinned version.
     await cp(join(evalCase.dir, 'fixture', 'package.json'), join(dir, 'package.json'));
     await cp(join(evalCase.dir, 'fixture', 'package-lock.json'), join(dir, 'package-lock.json'));
     await writeJsonFileSafely(join(dir, 'llm-docs.json'), {
       schemaVersion: 3,
       packsDir: 'agent-docs',
       agentFiles: ['AGENTS.md'],
-      packs: { [evalCase.pack.id]: evalCase.pack.pack },
+      packs,
     });
 
+    const hasPack = Object.keys(packs).length > 0;
     const steps: Array<[string, string[], number]> = [
       ['init', ['init', '--project', dir], 60_000],
       ['sync', ['sync', '--project', dir], 20 * 60_000],
-      ['verify', ['verify', '--project', dir], 5 * 60_000],
     ];
-    let stepFailed = false;
+    if (hasPack) {
+      steps.push(['verify', ['verify', '--project', dir], 5 * 60_000]);
+    }
     for (const [name, args, timeoutMs] of steps) {
       const result = await runCli(cliPath, args, dir, timeoutMs);
       if (result.exitCode !== 0) {
-        failures.push(
-          `${evalCase.id}: llm-docs ${name} failed (exit ${String(result.exitCode)}${result.timedOut ? ', timed out' : ''})\n${result.stderr.slice(-3000)}`
-        );
-        stepFailed = true;
-        break;
+        return `llm-docs ${name} failed (exit ${String(result.exitCode)}${result.timedOut ? ', timed out' : ''})\n${result.stderr.slice(-3000)}`;
       }
-    }
-    if (stepFailed) {
-      continue;
     }
 
     const index = join(dir, 'agent-docs', evalCase.pack.id, 'index.md');
-    const agentsFile = join(dir, 'AGENTS.md');
-    if (!existsSync(index)) {
-      failures.push(`${evalCase.id}: sync succeeded but ${relative(dir, index)} is missing`);
-      continue;
+    if (hasPack && !existsSync(index)) {
+      return `sync succeeded but ${relative(dir, index)} is missing`;
     }
+    const agentsFile = join(dir, 'AGENTS.md');
+    const agentsText = existsSync(agentsFile) ? await readFile(agentsFile, 'utf8') : '';
     if (
-      !existsSync(agentsFile) ||
-      !(await readFile(agentsFile, 'utf8')).includes('<!-- BEGIN llm-docs')
+      !agentsText.includes('<!-- BEGIN llm-docs') ||
+      !agentsText.includes('<!-- END llm-docs -->')
     ) {
-      failures.push(`${evalCase.id}: sync succeeded but AGENTS.md has no managed block`);
-      continue;
+      return 'sync succeeded but AGENTS.md has no managed block';
     }
 
-    // Warm the release-date cache the session-start hook reads, so the plugin arm does not depend
-    // on a 1 second network budget during the run. Best effort.
     const status = await runCli(cliPath, ['status', '--project', dir, '--json'], dir, 2 * 60_000);
     if (status.exitCode !== 0) {
-      log(`warning: llm-docs status failed for ${evalCase.id}; the hook may lack release dates`);
+      log(
+        `warning: llm-docs status failed in ${relative(process.cwd(), dir)}; the hook may lack release dates`
+      );
     }
+    return null;
+  };
 
+  /**
+   * With --plugin-dir, stores the note the plugin's hook gives in the arm's workspace once it says
+   * the right thing about the case's pack (`pinned`: whether the workspace holds it); then stamps
+   * the arm's directory as prepared from the case's current pack.json. Returns the failures.
+   */
+  const finish = async (evalCase: EvalCase, arm: PluginArm, pinned: boolean): Promise<string[]> => {
+    const label = arm === 'plugin' ? evalCase.id : `${evalCase.id} (${arm} arm)`;
     if (pluginDir !== null) {
-      const computed = await computeHookNote(evalCase, pluginDir, model, noteRoot);
+      const computed = await computeHookNote(evalCase, arm, pluginDir, model, noteRoot);
       if ('failure' in computed) {
-        failures.push(`${evalCase.id}: ${computed.failure}`);
-        continue;
+        return [`${label}: ${computed.failure}`];
       }
       const problems = expectedNoteProblems(
         computed.note,
-        await noteExpectation(evalCase, await ensureTemplate(evalCase, log))
+        await noteExpectation(evalCase, await ensureTemplate(evalCase, log), pinned)
       );
-      warnings.push(...problems.warnings.map((warning) => `${evalCase.id}: ${warning}`));
+      warnings.push(...problems.warnings.map((warning) => `${label}: ${warning}`));
       if (problems.failures.length > 0) {
-        failures.push(
-          ...problems.failures.map(
-            (problem) => `${evalCase.id}: ${problem} (the pack recipe is bound to the wrong thing)`
-          )
+        return problems.failures.map((problem) =>
+          pinned
+            ? `${label}: ${problem} (the pack recipe is bound to the wrong thing)`
+            : `${label}: ${problem}`
         );
-        continue;
       }
       const stored: ExpectedHookNote = {
         model,
         pluginBundle: await sha256File(pluginBundlePath(pluginDir)),
         note: computed.note,
       };
-      await writeJsonFileSafely(hookNotePath(evalCase.id), stored);
-      log(`${evalCase.id}: expected hook note stored (${computed.note.length} characters)`);
+      await writeJsonFileSafely(hookNotePath(evalCase.id, arm), stored);
+      log(`${label}: expected hook note stored (${computed.note.length} characters)`);
     }
-
-    await writeJsonFileSafely(join(dir, PREPARED_STAMP), {
+    await writeJsonFileSafely(join(PREPARED_DIRS[arm], evalCase.id, PREPARED_STAMP), {
       pack: packFingerprint(evalCase),
       cli: cliPath,
       preparedAt: new Date().toISOString(),
     });
+    return [];
+  };
+
+  for (const evalCase of cases) {
+    log(`preparing pack ${evalCase.pack.id} for ${evalCase.id}`);
+    const full = await build(evalCase, join(PREPARED_DIRS.pack, evalCase.id), {
+      [evalCase.pack.id]: evalCase.pack.pack,
+    });
+    if (full !== null) {
+      failures.push(`${evalCase.id}: ${full}`);
+      continue;
+    }
+    failures.push(...(await finish(evalCase, 'plugin', true)));
+
+    log(`preparing the note arm's project (no packs) for ${evalCase.id}`);
+    const note = await build(evalCase, join(PREPARED_DIRS.note, evalCase.id), {});
+    failures.push(
+      ...(note === null
+        ? await finish(evalCase, 'note', false)
+        : [`${evalCase.id} (note arm): ${note}`])
+    );
+
+    const pages = readFirstPages(evalCase);
+    const changesDir = join(PREPARED_DIRS.changes, evalCase.id);
+    log(
+      pages.length === 0
+        ? `preparing the changes arm's project for ${evalCase.id} (no read-first pages, so no pack)`
+        : `preparing the changes arm's pack of ${pages.length} read-first page(s) for ${evalCase.id}`
+    );
+    const derived = pages.length === 0 ? { recipe: null } : await changesRecipe(evalCase, pages);
+    if ('failure' in derived) {
+      await rm(changesDir, { recursive: true, force: true });
+      failures.push(`${evalCase.id} (changes arm): ${derived.failure}`);
+      continue;
+    }
+    const changes = await build(
+      evalCase,
+      changesDir,
+      derived.recipe === null ? {} : { [evalCase.pack.id]: derived.recipe }
+    );
+    const differ = changes === null ? await changesPagesProblem(evalCase, pages) : changes;
+    failures.push(
+      ...(differ === null
+        ? await finish(evalCase, 'changes', pages.length > 0)
+        : [`${evalCase.id} (changes arm): ${differ}`])
+    );
   }
   await rm(noteRoot, { recursive: true, force: true });
 
@@ -686,29 +752,124 @@ async function preparePacks(argv: string[]): Promise<number> {
   }
   if (pluginDir === null) {
     log(
-      'no expected hook notes computed (no --plugin-dir): run and smoke refuse the plugin arm until prepare-packs runs with --plugin-dir'
+      'no expected hook notes computed (no --plugin-dir): run and smoke refuse the note, changes, and plugin arms until prepare-packs runs with --plugin-dir'
     );
   }
   if (failures.length > 0) {
     log(`prepare-packs FAILED:\n${failures.join('\n')}`);
     return 1;
   }
-  log(`prepared ${cases.length} pack(s) under ${relative(process.cwd(), PACK_CACHE_DIR)}`);
+  log(
+    `prepared ${cases.length} case(s) under ${[...new Set(Object.values(PREPARED_DIRS))].map((dir) => relative(process.cwd(), dir)).join(', ')}`
+  );
   return 0;
 }
 
-/** Throws unless every case has a pack prepared from its current pack.json. */
-async function assertPacksPrepared(cases: EvalCase[]): Promise<void> {
-  const problems: string[] = [];
-  for (const evalCase of cases) {
-    const stampPath = join(PACK_CACHE_DIR, evalCase.id, PREPARED_STAMP);
-    if (!existsSync(stampPath)) {
-      problems.push(`${evalCase.id}: no prepared pack (run prepare-packs)`);
+/** The case's read-first pages as pack paths: fragments dropped, repeats merged, recipe order. */
+function readFirstPages(evalCase: EvalCase): string[] {
+  const targets = evalCase.pack.pack.readFirst;
+  const paths = (Array.isArray(targets) ? targets : [])
+    .filter((target): target is string => typeof target === 'string')
+    .map((target) => target.replace(/#.*$/, ''));
+  return [...new Set(paths)];
+}
+
+/**
+ * The case's recipe narrowed to its read-first pages, derived from the full pack's manifest: each
+ * source's `include` becomes exactly the stored paths of the read-first pages it produced, a
+ * source that produced none is dropped, and every other field is kept. A page's first `sources`
+ * entry in the manifest is the file it was built from, as `<source index>:<stored path>`. When the
+ * manifest does not say that for a read-first page, this fails naming the page rather than guess.
+ */
+async function changesRecipe(
+  evalCase: EvalCase,
+  pages: readonly string[]
+): Promise<{ recipe: Record<string, unknown> } | { failure: string }> {
+  const manifestPath = join(
+    PREPARED_DIRS.pack,
+    evalCase.id,
+    'agent-docs',
+    evalCase.pack.id,
+    'manifest.json'
+  );
+  const manifest = existsSync(manifestPath) ? await readJsonFile(manifestPath) : null;
+  const outputs =
+    isRecord(manifest) && Array.isArray(manifest.outputs) ? manifest.outputs.filter(isRecord) : [];
+  const sources = Array.isArray(evalCase.pack.pack.sources) ? evalCase.pack.pack.sources : [];
+  const includes = new Map<number, string[]>();
+  const unknown: string[] = [];
+  for (const page of pages) {
+    const output = outputs.find((entry) => entry.kind === 'page' && entry.path === page);
+    const first: unknown = Array.isArray(output?.sources) ? output.sources[0] : undefined;
+    const match = typeof first === 'string' ? /^(\d+):(.+)$/.exec(first) : null;
+    const index = match?.[1] === undefined ? -1 : Number(match[1]);
+    const stored = match?.[2];
+    if (stored === undefined || !isRecord(sources[index])) {
+      unknown.push(page);
       continue;
     }
-    const stamp = await readJsonFile(stampPath);
-    if (!isRecord(stamp) || stamp.pack !== packFingerprint(evalCase)) {
-      problems.push(`${evalCase.id}: pack.json changed since prepare-packs; prepare again`);
+    includes.set(index, [...(includes.get(index) ?? []), stored]);
+  }
+  if (unknown.length > 0) {
+    return {
+      failure: `the full pack's manifest does not say which source and stored path produced ${unknown.map((page) => `\`${page}\``).join(', ')}, so the changes pack cannot be derived`,
+    };
+  }
+  return {
+    recipe: {
+      ...evalCase.pack.pack,
+      sources: sources.flatMap((source, index) => {
+        const include = includes.get(index);
+        return include === undefined || !isRecord(source) ? [] : [{ ...source, include }];
+      }),
+    },
+  };
+}
+
+/** How the changes pack's pages differ from the case's read-first pages, or null when they do not. */
+async function changesPagesProblem(
+  evalCase: EvalCase,
+  pages: readonly string[]
+): Promise<string | null> {
+  if (pages.length === 0) {
+    return null;
+  }
+  const manifest = await readJsonFile(
+    join(PREPARED_DIRS.changes, evalCase.id, 'agent-docs', evalCase.pack.id, 'manifest.json')
+  );
+  const built = (isRecord(manifest) && Array.isArray(manifest.outputs) ? manifest.outputs : [])
+    .map((output) => (isRecord(output) ? output.path : undefined))
+    .filter((path): path is string => typeof path === 'string' && path.startsWith('pages/'));
+  const missing = pages.filter((page) => !built.includes(page));
+  const extra = built.filter((page) => !pages.includes(page));
+  if (missing.length === 0 && extra.length === 0) {
+    return null;
+  }
+  const list = (paths: string[]): string => paths.map((path) => `\`${path}\``).join(', ');
+  return `the changes pack's pages differ from the read-first pages: ${[
+    ...(missing.length > 0 ? [`missing ${list(missing)}`] : []),
+    ...(extra.length > 0 ? [`not read-first ${list(extra)}`] : []),
+  ].join('; ')}`;
+}
+
+/** Throws unless every case has, for every selected arm, a directory prepared from its current pack.json. */
+async function assertPacksPrepared(cases: EvalCase[], arms: readonly Arm[]): Promise<void> {
+  const problems: string[] = [];
+  const roots = new Set(arms.flatMap((arm) => (arm === 'baseline' ? [] : [PREPARED_DIRS[arm]])));
+  for (const root of roots) {
+    const name = relative(CACHE_DIR, root);
+    for (const evalCase of cases) {
+      const stampPath = join(root, evalCase.id, PREPARED_STAMP);
+      if (!existsSync(stampPath)) {
+        problems.push(`${evalCase.id}: nothing prepared in .cache/${name} (run prepare-packs)`);
+        continue;
+      }
+      const stamp = await readJsonFile(stampPath);
+      if (!isRecord(stamp) || stamp.pack !== packFingerprint(evalCase)) {
+        problems.push(
+          `${evalCase.id}: pack.json changed since prepare-packs built .cache/${name}; prepare again`
+        );
+      }
     }
   }
   if (problems.length > 0) {
@@ -894,12 +1055,12 @@ async function plan(argv: string[]): Promise<number> {
   } else {
     process.stdout.write(`No previous ${model} runs in evals/results to estimate from.\n`);
   }
-  if (arms.includes('plugin')) {
+  for (const arm of arms.filter(isPluginArm)) {
     const ready = (
-      await Promise.all(cases.map((evalCase) => readExpectedHookNote(evalCase.id)))
+      await Promise.all(cases.map((evalCase) => readExpectedHookNote(evalCase.id, arm)))
     ).filter((stored) => stored?.model === model).length;
     process.stdout.write(
-      `\nThe plugin arm asserts that each session's hook gave the note prepare-packs stored for ${model}: ` +
+      `\nThe ${arm} arm asserts that each session's hook gave the note prepare-packs stored for ${model}: ` +
         `${ready} of ${cases.length} case(s) have one.` +
         (ready < cases.length
           ? ` Run \`npm run eval -- prepare-packs --llm-docs dist/cli.js --plugin-dir plugin --model ${model}\` first.\n`
@@ -954,10 +1115,10 @@ export interface RunSettings {
   model: string;
   perRunUsd: number;
   pluginDir: string | null;
-  /** `name` from the plugin's manifest, which the plugin arm asserts the session loaded. */
+  /** `name` from the plugin's manifest, which every arm with the plugin asserts the session loaded. */
   pluginName: string | null;
-  /** Case id to the note prepare-packs stored, which the plugin arm asserts its hook gave. */
-  hookNotes: ReadonlyMap<string, string>;
+  /** Per arm with the plugin, case id to the note prepare-packs stored, which the arm asserts its hook gave. */
+  hookNotes: Readonly<Record<PluginArm, ReadonlyMap<string, string>>>;
   effort: string | null;
 }
 
@@ -992,7 +1153,7 @@ export function agentInvocation(
   if (settings.effort !== null) {
     args.push('--effort', settings.effort);
   }
-  if (arm === 'plugin' && settings.pluginDir !== null) {
+  if (isPluginArm(arm) && settings.pluginDir !== null) {
     args.push('--plugin-dir', settings.pluginDir);
   }
   // Variadic option last, so it cannot swallow anything that follows.
@@ -1000,8 +1161,13 @@ export function agentInvocation(
   return { args, env: agentEnv(settings.model) };
 }
 
-async function copyPackInto(evalCase: EvalCase, dir: string): Promise<void> {
-  const prepared = join(PACK_CACHE_DIR, evalCase.id);
+/** What prepare-packs built for the arm: the packs directory, `AGENTS.md`, and `llm-docs.json`. */
+async function copyPackInto(
+  evalCase: EvalCase,
+  arm: Exclude<Arm, 'baseline'>,
+  dir: string
+): Promise<void> {
+  const prepared = join(PREPARED_DIRS[arm], evalCase.id);
   await copyTree(join(prepared, 'agent-docs'), join(dir, 'agent-docs'));
   await rm(join(dir, 'agent-docs', '.staging'), { recursive: true, force: true });
   await rm(join(dir, 'agent-docs', '.llm-docs.lock'), { force: true });
@@ -1145,7 +1311,7 @@ async function executeRun(
   try {
     await createWorkspace(evalCase, template, dir);
     if (arm !== 'baseline') {
-      await copyPackInto(evalCase, dir);
+      await copyPackInto(evalCase, arm, dir);
     }
     facts = await inspectWorkspace(dir, evalCase.pack.id);
   } catch (error) {
@@ -1175,7 +1341,7 @@ async function executeRun(
 
     const summary = summarizeTranscript(await readFile(transcriptPath, 'utf8'));
     const outcome = classifyOutcome(summary, agent);
-    const expectedNote = arm === 'plugin' ? (settings.hookNotes.get(evalCase.id) ?? '') : null;
+    const expectedNote = isPluginArm(arm) ? (settings.hookNotes[arm].get(evalCase.id) ?? '') : null;
     const armAssertions =
       outcome.kind === 'could-not-run'
         ? []
@@ -1184,6 +1350,7 @@ async function executeRun(
             packId: evalCase.pack.id,
             pluginName: settings.pluginName,
             hookNote: expectedNote,
+            hasReadFirst: readFirstPages(evalCase).length > 0,
           });
     const observed: RunRow = {
       ...base,
@@ -1410,11 +1577,14 @@ async function resolveSettings(
   freshResultsDir: string
 ): Promise<{ arms: Arm[]; settings: RunSettings; maxTotalUsd: number; resultsDir: string }> {
   const arms = parseArms(values.arms);
+  const pluginArms = arms.filter(isPluginArm);
   const pluginDir = values['plugin-dir'] === undefined ? null : resolve(values['plugin-dir']);
   let pluginName: string | null = null;
-  if (arms.includes('plugin')) {
+  if (pluginArms.length > 0) {
     if (pluginDir === null) {
-      throw new UsageError('the plugin arm needs --plugin-dir <path to the llm-docs plugin>');
+      throw new UsageError(
+        `the ${pluginArms.join(', ')} arm${pluginArms.length > 1 ? 's need' : ' needs'} --plugin-dir <path to the llm-docs plugin>`
+      );
     }
     const manifestPath = join(pluginDir, '.claude-plugin', 'plugin.json');
     if (!existsSync(manifestPath)) {
@@ -1423,34 +1593,40 @@ async function resolveSettings(
     const manifest = await readJsonFile(manifestPath);
     if (!isRecord(manifest) || typeof manifest.name !== 'string' || manifest.name.length === 0) {
       throw new UsageError(
-        `${manifestPath} has no "name"; the plugin arm asserts the session loaded it by name`
+        `${manifestPath} has no "name"; an arm with the plugin asserts the session loaded it by name`
       );
     }
     pluginName = manifest.name;
   }
   const model = values.model ?? DEFAULT_MODEL;
-  const hookNotes = new Map<string, string>();
-  if (arms.some((arm) => arm !== 'baseline')) {
-    await assertPacksPrepared(cases);
-  }
-  if (pluginDir !== null && arms.includes('plugin')) {
+  const hookNotes: Record<PluginArm, Map<string, string>> = {
+    note: new Map(),
+    changes: new Map(),
+    plugin: new Map(),
+  };
+  await assertPacksPrepared(cases, arms);
+  if (pluginDir !== null && pluginArms.length > 0) {
     const bundle = await sha256File(pluginBundlePath(pluginDir));
     const prepare = `prepare-packs --llm-docs dist/cli.js --plugin-dir ${relative(process.cwd(), pluginDir) || '.'} --model ${model}`;
     const problems: string[] = [];
-    for (const evalCase of cases) {
-      const stored = await readExpectedHookNote(evalCase.id);
-      if (stored === null) {
-        problems.push(`${evalCase.id}: no expected hook note; the plugin arm needs \`${prepare}\``);
-      } else if (stored.model !== model) {
-        problems.push(
-          `${evalCase.id}: the expected hook note is for model ${stored.model}, not ${model}; run \`${prepare}\``
-        );
-      } else if (stored.pluginBundle !== bundle) {
-        problems.push(
-          `${evalCase.id}: the plugin's bin/llm-docs.mjs changed since its expected hook note was computed; run \`${prepare}\``
-        );
-      } else {
-        hookNotes.set(evalCase.id, stored.note);
+    for (const arm of pluginArms) {
+      for (const evalCase of cases) {
+        const stored = await readExpectedHookNote(evalCase.id, arm);
+        if (stored === null) {
+          problems.push(
+            `${evalCase.id}: no expected hook note for the ${arm} arm; it needs \`${prepare}\``
+          );
+        } else if (stored.model !== model) {
+          problems.push(
+            `${evalCase.id}: the ${arm} arm's expected hook note is for model ${stored.model}, not ${model}; run \`${prepare}\``
+          );
+        } else if (stored.pluginBundle !== bundle) {
+          problems.push(
+            `${evalCase.id}: the plugin's bin/llm-docs.mjs changed since the ${arm} arm's expected hook note was computed; run \`${prepare}\``
+          );
+        } else {
+          hookNotes[arm].set(evalCase.id, stored.note);
+        }
       }
     }
     if (problems.length > 0) {
@@ -1723,7 +1899,7 @@ async function smoke(argv: string[]): Promise<number> {
       problems += 1;
       process.stdout.write(`  infra error: ${row.infraError}\n`);
     }
-    if (row.arm === 'plugin') {
+    if (isPluginArm(row.arm)) {
       const outputs = row.sessionStartHooks
         .map((hook) => hook.output)
         .filter((text) => text.length > 0);

@@ -36,8 +36,28 @@ export type Stratum = (typeof STRATA)[number];
 export const PACKAGE_DOCUMENTS_ANSWER = ['types', 'docs', 'none'] as const;
 export type PackageDocumentsAnswer = (typeof PACKAGE_DOCUMENTS_ANSWER)[number];
 
-export const ARMS = ['baseline', 'pack', 'plugin'] as const;
+export const ARMS = ['baseline', 'note', 'changes', 'pack', 'plugin'] as const;
 export type Arm = (typeof ARMS)[number];
+
+/** The arms that load the plugin: their sessions get its session-start note and skills. */
+export const PLUGIN_ARMS = ['note', 'changes', 'plugin'] as const;
+export type PluginArm = (typeof PLUGIN_ARMS)[number];
+
+export function isPluginArm(arm: Arm): arm is PluginArm {
+  return PLUGIN_ARMS.some((candidate) => candidate === arm);
+}
+
+/**
+ * Where prepare-packs builds, per case, what an arm's workspace gets: the full pack for `pack` and
+ * `plugin`, an initialized project with no packs for `note`, and a pack of only the read-first
+ * pages for `changes`. The baseline gets nothing.
+ */
+export const PREPARED_DIRS: Readonly<Record<Exclude<Arm, 'baseline'>, string>> = {
+  note: join(CACHE_DIR, 'packs-note'),
+  changes: join(CACHE_DIR, 'packs-changes'),
+  pack: PACK_CACHE_DIR,
+  plugin: PACK_CACHE_DIR,
+};
 
 export interface EvalCase {
   id: string;

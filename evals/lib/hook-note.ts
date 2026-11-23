@@ -3,15 +3,17 @@ import { join } from 'node:path';
 
 import { isNonEmptyString, isRecord } from '../../src/utils/guards.js';
 import { readJsonFile } from '../../src/utils/json.js';
-import { type CaseKind, PACK_CACHE_DIR } from './cases.js';
+import { type CaseKind, PREPARED_DIRS, type PluginArm } from './cases.js';
 import type { SessionStartHook } from './transcript.js';
 
 /**
- * The note the plugin's session-start hook must give the agent in a case's workspace. prepare-packs
- * computes it by running the bundled hook in that workspace layout, and the plugin arm proves the
- * session got exactly this text: a hook that missed its deadline prints nothing, and one that
- * resolved another model prints another cutoff, and either would grade a plugin run without the
- * plugin's treatment.
+ * The note the plugin's session-start hook must give the agent in a case's workspace for one arm
+ * that loads the plugin. prepare-packs computes it by running the bundled hook in that workspace
+ * layout, and the arm proves the session got exactly this text: a hook that missed its deadline
+ * prints nothing, and one that resolved another model prints another cutoff, and either would
+ * grade a run without the plugin's treatment. The `note` and `changes` arms may expect no text at
+ * all (a control case whose dependencies all predate the cutoff gives the hook nothing to say);
+ * the `plugin` arm always expects some.
  */
 export interface ExpectedHookNote {
   /** The evaluated model, given to the hook as `ANTHROPIC_MODEL`. */
@@ -21,18 +23,25 @@ export interface ExpectedHookNote {
   note: string;
 }
 
-/** Beside the prepared pack, so preparing the pack again removes a note computed for the old one. */
-export function hookNotePath(caseId: string): string {
-  return join(PACK_CACHE_DIR, caseId, 'expected-hook-note.json');
+/**
+ * Beside what prepare-packs built for the arm, so preparing that directory again removes a note
+ * computed for the old one.
+ */
+export function hookNotePath(caseId: string, arm: PluginArm): string {
+  return join(PREPARED_DIRS[arm], caseId, 'expected-hook-note.json');
 }
 
-export async function readExpectedHookNote(caseId: string): Promise<ExpectedHookNote | null> {
-  const path = hookNotePath(caseId);
+export async function readExpectedHookNote(
+  caseId: string,
+  arm: PluginArm
+): Promise<ExpectedHookNote | null> {
+  const path = hookNotePath(caseId, arm);
   const raw = existsSync(path) ? await readJsonFile(path) : null;
   return isRecord(raw) &&
     isNonEmptyString(raw.model) &&
     isNonEmptyString(raw.pluginBundle) &&
-    isNonEmptyString(raw.note)
+    typeof raw.note === 'string' &&
+    (raw.note !== '' || arm !== 'plugin')
     ? { model: raw.model, pluginBundle: raw.pluginBundle, note: raw.note }
     : null;
 }
@@ -41,17 +50,18 @@ export async function readExpectedHookNote(caseId: string): Promise<ExpectedHook
 export const HOOK_NOTE_ATTEMPTS = 5;
 
 /**
- * Runs the hook until two consecutive runs print the same non-empty note, at most
- * HOOK_NOTE_ATTEMPTS times. A loaded machine can make a run miss the hook's deadline (it then
+ * Runs the hook until two consecutive runs print the same note, non-empty unless `allowEmpty`, at
+ * most HOOK_NOTE_ATTEMPTS times. A loaded machine can make a run miss the hook's deadline (it then
  * prints nothing), so one run is not proof of what the hook says.
  */
 export async function settleHookNote(
-  runHook: () => Promise<string>
+  runHook: () => Promise<string>,
+  allowEmpty = false
 ): Promise<{ note: string } | { outputs: string[] }> {
   const outputs: string[] = [];
   for (let attempt = 0; attempt < HOOK_NOTE_ATTEMPTS; attempt += 1) {
     const output = await runHook();
-    if (output !== '' && output === outputs.at(-1)) {
+    if ((allowEmpty || output !== '') && output === outputs.at(-1)) {
       return { note: output };
     }
     outputs.push(output);
@@ -72,6 +82,11 @@ export interface NoteExpectation {
   boundDependency: string | null;
   /** The fixture's direct dependencies, each with whether its repository is a pack source's. */
   dependencies: ReadonlyArray<{ name: string; sharesPackRepository: boolean }>;
+  /**
+   * Whether the workspace holds the case's pack: the plugin arm, and the changes arm of a case
+   * with read-first pages. The note arm, and the changes arm of a case without any, hold none.
+   */
+  pinned: boolean;
 }
 
 type NoteSection = 'pinned' | 'unpinned' | 'other';
@@ -99,11 +114,14 @@ function noteRows(note: string): Array<{ section: NoteSection; line: string }> {
 
 /**
  * What the expected note says wrong about the case's own pack, as failures (a mis-bound pack
- * recipe) and warnings. A post-cutoff case's note must list its pack as pinned docs for a library
- * released after the cutoff. No note may list the case's library, or the pack's bound dependency,
- * among the dependencies with no pinned docs. A dependency that comes from one of the pack's source
- * repositories but is not the one the pack binds is listed there because a pack binds a single
- * dependency today; that is a warning, not a failure, until a pack can cover several.
+ * recipe) and warnings. Where the workspace holds the pack: a post-cutoff case's note must list
+ * its pack as pinned docs for a library released after the cutoff. No note may list the case's
+ * library, or the pack's bound dependency, among the dependencies with no pinned docs. A
+ * dependency that comes from one of the pack's source repositories but is not the one the pack
+ * binds is listed there because a pack binds a single dependency today; that is a warning, not a
+ * failure, until a pack can cover several. Where the workspace holds no pack: a post-cutoff case's
+ * note must list the case's library among the dependencies with no pinned docs and have no pinned
+ * docs section; a control case's note may say anything, nothing included.
  */
 export function expectedNoteProblems(
   note: string,
@@ -113,6 +131,22 @@ export function expectedNoteProblems(
   const warnings: string[] = [];
   const rows = noteRows(note);
   const index = `\`agent-docs/${expectation.packId}/index.md\``;
+
+  if (!expectation.pinned) {
+    if (expectation.kind === 'post-cutoff') {
+      if (rows.some((row) => row.section === 'pinned')) {
+        failures.push('the note has a pinned docs section, but the workspace holds no pack');
+      }
+      // The note prints a dependency name exactly, as a code span.
+      const library = `- \`${expectation.library}\` `;
+      if (!rows.some((row) => row.section === 'unpinned' && row.line.startsWith(library))) {
+        failures.push(
+          `the note does not list the case's library \`${expectation.library}\` among the dependencies with no pinned docs`
+        );
+      }
+    }
+    return { failures, warnings };
+  }
 
   if (expectation.kind === 'post-cutoff') {
     const packRows = rows.filter((row) => row.line.includes(index));
@@ -165,6 +199,7 @@ export function checkHookNote(expected: string, hooks: readonly SessionStartHook
     .filter((hook) => hook.outcome === 'success' && hook.output !== '')
     .map((hook) => hook.output)
     .join('\n\n');
-  const verdict = actual === '' ? 'empty' : actual === expected ? 'match' : 'different';
+  // An expected note of '' is matched by a hook that gave nothing, which is then not a silence.
+  const verdict = actual === expected ? 'match' : actual === '' ? 'empty' : 'different';
   return { verdict, expected, actual };
 }
