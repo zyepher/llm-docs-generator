@@ -6,7 +6,9 @@ spec = importlib.util.spec_from_file_location("candidate", sys.argv[1])
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-ok = [("aGVsbG8_", b"hello?"), ("aGk=", b"hi"), ("YQ==", b"a"), ("", b"")]
+# An empty value is left out on purpose: whether an empty signature is valid is a product
+# decision the task does not state, and a careful solution may reject it.
+ok = [("aGVsbG8_", b"hello?"), ("aGk=", b"hi"), ("YQ==", b"a")]
 bad = ["aGk", "YQ", "aGVsbG8gd29ybGQ"]  # unpadded: the spec says reject
 failures = 0
 for value, want in ok:
